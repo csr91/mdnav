@@ -1,0 +1,10 @@
+site_name: mdnav Example Docs
+docs_dir: docs
+
+nav:
+  - Inicio: 00-INTRO.md
+  - Guia:
+      - Primeros pasos: GUIDE/01-GETTING-STARTED.md
+      - Navegacion: GUIDE/02-NAVIGATION.md
+  - Diagramas:
+      - Arquitectura: DIAGRAMS/ARCHITECTURE.md

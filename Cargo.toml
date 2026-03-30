@@ -1,0 +1,11 @@
+[package]
+name = "mdnav"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal navigator for MkDocs and Markdown documentation trees"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.28"
+pulldown-cmark = "0.12"
+ratatui = "0.29"
