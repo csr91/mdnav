@@ -15,13 +15,31 @@ Este repositorio ya tiene un MVP tecnico usable:
 - Build release para distribuir como CLI
 - Carpeta `DocExample` lista para demo
 
-## Requisitos
+## Instalacion rapida
 
-Para compilar desde fuente:
+Windows desde PowerShell:
 
-- Rust
-- En Windows, Visual Studio Build Tools con C++
-- Para cross-build Linux desde Windows, Zig
+```powershell
+irm https://raw.githubusercontent.com/csr91/mdnav/main/install.ps1 | iex
+```
+
+Linux desde shell:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/csr91/mdnav/main/install.sh | bash
+```
+
+Despues deberias poder ejecutar:
+
+```powershell
+mdnav
+```
+
+o en Linux:
+
+```bash
+mdnav
+```
 
 ## Uso rapido
 
@@ -45,7 +63,7 @@ Tambien podes apuntar a cualquier otra carpeta con Markdown:
 
 ## Demo incluida
 
-La carpeta [DocExample](c:\Users\cesar\OneDrive\Documents\Desarrollos\mdnav\DocExample) trae:
+La carpeta `DocExample` trae:
 
 - Markdown simple
 - Navegacion entre archivos
@@ -53,6 +71,12 @@ La carpeta [DocExample](c:\Users\cesar\OneDrive\Documents\Desarrollos\mdnav\DocE
 - Un Mermaid basico
 
 La carpeta `Documentation` queda ignorada por Git para que no subas documentacion privada o interna por accidente.
+
+## Requisitos para compilar
+
+- Rust
+- En Windows, Visual Studio Build Tools con C++
+- Para cross-build Linux desde Windows, Zig
 
 ## Releases
 
@@ -87,9 +111,9 @@ dist/mdnav-linux-x86_64.tar.gz
 
 ## Controles
 
-- `↑` / `↓`: mover seleccion en el arbol
-- `→` / `Enter`: expandir carpeta o abrir archivo
-- `←` / `Backspace`: colapsar carpeta o subir al padre
+- `Up` / `Down`: mover seleccion en el arbol
+- `Right` / `Enter`: expandir carpeta o abrir archivo
+- `Left` / `Backspace`: colapsar carpeta o subir al padre
 - `Tab` / `Shift+Tab`: cambiar foco entre arbol y preview
 - `,` / `.`: scroll de preview
 - `Ctrl+Enter`: alternar preview completo
