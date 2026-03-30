@@ -27,13 +27,13 @@ fn resolve_docs_root() -> Result<PathBuf> {
     let arg = env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("DocExample/docs"));
+        .unwrap_or_else(|| PathBuf::from("."));
 
     if arg.exists() {
         Ok(arg)
     } else {
         Err(anyhow::anyhow!(
-            "La ruta de documentacion no existe: {}",
+            "La ruta no existe: {}. Pasa una carpeta con Markdown o ejecuta mdnav desde el directorio que quieras explorar.",
             arg.display()
         ))
     }

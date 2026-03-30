@@ -41,12 +41,14 @@ o en Linux:
 mdnav
 ```
 
+Si no pasas argumentos, `mdnav` abre el directorio actual.
+
 ## Uso rapido
 
 Ejecutar con la carpeta demo incluida:
 
 ```powershell
-.\run-mdnav.ps1
+.\run-mdnav.ps1 DocExample/docs
 ```
 
 O explicitamente:
@@ -59,6 +61,12 @@ Tambien podes apuntar a cualquier otra carpeta con Markdown:
 
 ```powershell
 .\run-mdnav.ps1 C:\ruta\a\docs
+```
+
+Tambien podes usar el binario instalado desde cualquier carpeta:
+
+```bash
+mdnav .
 ```
 
 ## Demo incluida
