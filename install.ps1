@@ -1,9 +1,9 @@
-$ErrorActionPreference = "Stop"
-
 param(
     [string]$Version = "latest",
     [string]$Repo = "csr91/mdnav"
 )
+
+$ErrorActionPreference = "Stop"
 
 $installRoot = Join-Path $env:LOCALAPPDATA "mdnav"
 $binDir = Join-Path $installRoot "bin"
