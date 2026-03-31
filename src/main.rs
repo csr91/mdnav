@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod docs;
 mod markdown;
 mod ui;
@@ -13,7 +14,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use crate::app::App;
+use crate::{app::App, config::AppConfig};
 
 fn main() -> Result<()> {
     let docs_root = resolve_docs_root()?;
@@ -55,7 +56,8 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, docs_root: PathBuf) -> Result<()> {
-    let mut app = App::new(docs_root)?;
+    let config = AppConfig::load()?;
+    let mut app = App::new(docs_root, config)?;
 
     while app.running {
         terminal.draw(|frame| ui::render(frame, &app))?;

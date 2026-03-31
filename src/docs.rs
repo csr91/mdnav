@@ -22,9 +22,13 @@ pub struct LinkTarget {
     pub resolved: Option<PathBuf>,
 }
 
-pub fn collect_markdown_tree(root: &Path, expanded_dirs: &BTreeSet<PathBuf>) -> Result<Vec<DocItem>> {
+pub fn collect_markdown_tree(
+    root: &Path,
+    expanded_dirs: &BTreeSet<PathBuf>,
+    only_mds: bool,
+) -> Result<Vec<DocItem>> {
     let mut items = Vec::new();
-    visit_dir(root, root, expanded_dirs, 0, &mut items)?;
+    visit_dir(root, root, expanded_dirs, 0, only_mds, &mut items)?;
     Ok(items)
 }
 
@@ -33,6 +37,7 @@ fn visit_dir(
     current: &Path,
     expanded_dirs: &BTreeSet<PathBuf>,
     depth: usize,
+    only_mds: bool,
     items: &mut Vec<DocItem>,
 ) -> Result<()> {
     let mut entries = fs::read_dir(current)
@@ -58,9 +63,9 @@ fn visit_dir(
             items.push(item);
 
             if should_expand {
-                visit_dir(root, &path, expanded_dirs, depth + 1, items)?;
+                visit_dir(root, &path, expanded_dirs, depth + 1, only_mds, items)?;
             }
-        } else if is_markdown_file(&path) {
+        } else if !only_mds || is_markdown_file(&path) {
             items.push(make_item(root, path, depth, false)?);
         }
     }

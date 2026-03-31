@@ -1,17 +1,53 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    env,
+    fs,
+    path::PathBuf,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::{
+    config::{config_path, AppConfig},
     docs::{collect_markdown_tree, parent_dir_if_within, DocItem},
-    markdown::{load_preview, PreviewDocument},
+    markdown::{load_preview, mermaid_terminal_canvas, MermaidBlock, PreviewDocument},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Focus {
     Tree,
     Preview,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FullscreenPanel {
+    None,
+    Tree,
+    Preview,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MermaidOutputMode {
+    Terminal,
+    Html,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Overlay {
+    None,
+    Help,
+    MermaidSelect,
+    MermaidOutput,
+    MermaidTerminalView,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HelpSection {
+    Shortcuts,
+    Settings,
 }
 
 pub struct App {
@@ -23,20 +59,32 @@ pub struct App {
     pub preview_scroll: usize,
     pub expanded_dirs: BTreeSet<PathBuf>,
     pub focus: Focus,
-    pub preview_fullscreen: bool,
+    pub fullscreen: FullscreenPanel,
     pub split_level: u8,
+    pub overlay: Overlay,
+    pub mermaid_selected_index: usize,
+    pub mermaid_output_selected_index: usize,
+    pub mermaid_active_index: usize,
+    pub mermaid_terminal_canvas: Vec<String>,
+    pub mermaid_canvas_x: usize,
+    pub mermaid_canvas_y: usize,
+    pub config: AppConfig,
+    pub help_section: HelpSection,
     pub running: bool,
     pub status: String,
 }
 
 impl App {
-    pub fn new(root: PathBuf) -> Result<Self> {
+    pub fn new(root: PathBuf, config: AppConfig) -> Result<Self> {
         let mut expanded_dirs = BTreeSet::new();
         expanded_dirs.insert(root.clone());
 
-        let items = collect_markdown_tree(&root, &expanded_dirs)?;
+        let items = collect_markdown_tree(&root, &expanded_dirs, config.only_mds)?;
         let selected_index = items.iter().position(|item| !item.is_dir).unwrap_or(0);
-        let current_file = items.get(selected_index).filter(|item| !item.is_dir).map(|item| item.path.clone());
+        let current_file = items
+            .get(selected_index)
+            .filter(|item| !item.is_dir)
+            .map(|item| item.path.clone());
         let preview = if let Some(path) = &current_file {
             load_preview(path)?
         } else {
@@ -52,8 +100,17 @@ impl App {
             preview_scroll: 0,
             expanded_dirs,
             focus: Focus::Tree,
-            preview_fullscreen: false,
+            fullscreen: FullscreenPanel::None,
             split_level: 3,
+            overlay: Overlay::None,
+            mermaid_selected_index: 0,
+            mermaid_output_selected_index: 0,
+            mermaid_active_index: 0,
+            mermaid_terminal_canvas: Vec::new(),
+            mermaid_canvas_x: 0,
+            mermaid_canvas_y: 0,
+            config,
+            help_section: HelpSection::Shortcuts,
             running: true,
             status: String::from("Listo"),
         })
@@ -64,14 +121,18 @@ impl App {
             return Ok(());
         }
 
+        if self.overlay != Overlay::None {
+            return self.handle_overlay_key(key);
+        }
+
         match key.code {
             KeyCode::Char('q') => self.running = false,
+            KeyCode::Char('?') => self.toggle_help(),
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
             KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_preview_fullscreen()
-            }
+            KeyCode::Char(')') => self.toggle_fullscreen(),
+            KeyCode::Char('M') => self.open_mermaid_flow()?,
             KeyCode::Right | KeyCode::Enter => self.activate_selected()?,
             KeyCode::Left | KeyCode::Backspace => self.collapse_or_parent()?,
             KeyCode::Char('j') if self.focus == Focus::Preview => self.scroll_preview(1),
@@ -89,21 +150,135 @@ impl App {
         Ok(())
     }
 
+    fn handle_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
+        match self.overlay {
+            Overlay::Help => match key.code {
+                KeyCode::Char('?') | KeyCode::Esc => self.close_overlay("Ayuda cerrada"),
+                KeyCode::Left | KeyCode::Char('h') => self.help_section = HelpSection::Shortcuts,
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                    self.help_section = HelpSection::Settings
+                }
+                KeyCode::BackTab => self.help_section = HelpSection::Shortcuts,
+                KeyCode::Enter | KeyCode::Char(' ') if self.help_section == HelpSection::Settings => {
+                    self.toggle_only_mds()?;
+                }
+                _ => {}
+            },
+            Overlay::MermaidSelect => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("Seleccion Mermaid cancelada"),
+                KeyCode::Up => {
+                    self.mermaid_selected_index = self.mermaid_selected_index.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    let max_index = self.preview.mermaid_diagrams.len().saturating_sub(1);
+                    self.mermaid_selected_index = (self.mermaid_selected_index + 1).min(max_index);
+                }
+                KeyCode::Enter => {
+                    self.mermaid_active_index = self.mermaid_selected_index;
+                    self.overlay = Overlay::MermaidOutput;
+                    self.mermaid_output_selected_index = 0;
+                    self.status = String::from("Elegi salida Mermaid");
+                }
+                _ => {}
+            },
+            Overlay::MermaidOutput => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("Salida Mermaid cancelada"),
+                KeyCode::Up => {
+                    self.mermaid_output_selected_index =
+                        self.mermaid_output_selected_index.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    self.mermaid_output_selected_index =
+                        (self.mermaid_output_selected_index + 1).min(1);
+                }
+                KeyCode::Enter => {
+                    let mode = if self.mermaid_output_selected_index == 0 {
+                        MermaidOutputMode::Terminal
+                    } else {
+                        MermaidOutputMode::Html
+                    };
+                    self.open_mermaid_output(self.mermaid_active_index, mode)?;
+                }
+                _ => {}
+            },
+            Overlay::MermaidTerminalView => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('M') => {
+                    self.close_overlay("Vista Mermaid cerrada")
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.pan_mermaid(0, -1),
+                KeyCode::Down | KeyCode::Char('j') => self.pan_mermaid(0, 1),
+                KeyCode::Left | KeyCode::Char('h') => self.pan_mermaid(-4, 0),
+                KeyCode::Right | KeyCode::Char('l') => self.pan_mermaid(4, 0),
+                _ => {}
+            },
+            Overlay::None => {}
+        }
+
+        Ok(())
+    }
+
+    fn toggle_help(&mut self) {
+        if self.overlay == Overlay::Help {
+            self.close_overlay("Ayuda cerrada");
+        } else {
+            self.overlay = Overlay::Help;
+            self.help_section = HelpSection::Shortcuts;
+            self.status = String::from("Ayuda abierta");
+        }
+    }
+
+    fn close_overlay(&mut self, status: &str) {
+        self.overlay = Overlay::None;
+        self.status = String::from(status);
+    }
+
+    fn pan_mermaid(&mut self, dx: isize, dy: isize) {
+        let max_x = self
+            .mermaid_terminal_canvas
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        let max_y = self.mermaid_terminal_canvas.len().saturating_sub(1);
+
+        self.mermaid_canvas_x =
+            ((self.mermaid_canvas_x as isize + dx).clamp(0, max_x as isize)) as usize;
+        self.mermaid_canvas_y =
+            ((self.mermaid_canvas_y as isize + dy).clamp(0, max_y as isize)) as usize;
+    }
+
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Tree => Focus::Preview,
             Focus::Preview => Focus::Tree,
         };
+
+        if self.fullscreen != FullscreenPanel::None {
+            self.fullscreen = match self.focus {
+                Focus::Tree => FullscreenPanel::Tree,
+                Focus::Preview => FullscreenPanel::Preview,
+            };
+        }
+
         self.status = format!("Foco: {:?}", self.focus);
     }
 
-    fn toggle_preview_fullscreen(&mut self) {
-        self.preview_fullscreen = !self.preview_fullscreen;
-        self.focus = Focus::Preview;
-        self.status = if self.preview_fullscreen {
-            String::from("Preview completo activado")
+    fn toggle_fullscreen(&mut self) {
+        let target = match self.focus {
+            Focus::Tree => FullscreenPanel::Tree,
+            Focus::Preview => FullscreenPanel::Preview,
+        };
+
+        self.fullscreen = if self.fullscreen == target {
+            FullscreenPanel::None
         } else {
-            String::from("Preview completo desactivado")
+            target
+        };
+
+        self.status = match self.fullscreen {
+            FullscreenPanel::None => String::from("Pantalla completa desactivada"),
+            FullscreenPanel::Tree => String::from("Pantalla completa: navegacion"),
+            FullscreenPanel::Preview => String::from("Pantalla completa: preview"),
         };
     }
 
@@ -121,10 +296,8 @@ impl App {
         let next = (self.selected_index as isize + delta).clamp(0, max_index) as usize;
         self.selected_index = next;
 
-        if self.focus == Focus::Tree {
-            if let Some(item) = self.items.get(self.selected_index) {
-                self.status = item.relative.display().to_string();
-            }
+        if let Some(item) = self.items.get(self.selected_index) {
+            self.status = item.relative.display().to_string();
         }
     }
 
@@ -179,7 +352,7 @@ impl App {
 
     fn reload_items(&mut self) -> Result<()> {
         let selected_path = self.items.get(self.selected_index).map(|item| item.path.clone());
-        self.items = collect_markdown_tree(&self.root, &self.expanded_dirs)?;
+        self.items = collect_markdown_tree(&self.root, &self.expanded_dirs, self.config.only_mds)?;
 
         if let Some(path) = selected_path {
             if let Some(index) = self.items.iter().position(|item| item.path == path) {
@@ -192,10 +365,39 @@ impl App {
         Ok(())
     }
 
+    fn toggle_only_mds(&mut self) -> Result<()> {
+        self.config.only_mds = !self.config.only_mds;
+        let path = self.config.save()?;
+        self.reload_items()?;
+
+        if let Some(current) = &self.current_file {
+            if !self.items.iter().any(|item| &item.path == current) {
+                self.current_file = None;
+                self.preview = PreviewDocument::default();
+                self.preview_scroll = 0;
+            }
+        }
+
+        let display_path = config_path().unwrap_or(path);
+        self.status = format!(
+            "Only Mds: {} | {}",
+            if self.config.only_mds { "on" } else { "off" },
+            display_path.display()
+        );
+        Ok(())
+    }
+
     fn open_file(&mut self, path: PathBuf) -> Result<()> {
         self.preview = load_preview(&path)?;
         self.preview_scroll = 0;
         self.current_file = Some(path.clone());
+        self.overlay = Overlay::None;
+        self.mermaid_selected_index = 0;
+        self.mermaid_output_selected_index = 0;
+        self.mermaid_active_index = 0;
+        self.mermaid_terminal_canvas.clear();
+        self.mermaid_canvas_x = 0;
+        self.mermaid_canvas_y = 0;
         let link_hint = self
             .preview
             .links
@@ -218,4 +420,130 @@ impl App {
         );
         Ok(())
     }
+
+    fn open_mermaid_flow(&mut self) -> Result<()> {
+        match self.preview.mermaid_diagrams.len() {
+            0 => {
+                self.status = String::from("No hay Mermaid en el documento actual");
+            }
+            1 => {
+                self.mermaid_active_index = 0;
+                self.mermaid_output_selected_index = 0;
+                self.overlay = Overlay::MermaidOutput;
+                self.status = String::from("Elegi salida Mermaid");
+            }
+            _ => {
+                self.overlay = Overlay::MermaidSelect;
+                self.mermaid_selected_index = 0;
+                self.status = String::from("Selecciona un Mermaid para abrir");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn open_mermaid_output(&mut self, index: usize, mode: MermaidOutputMode) -> Result<()> {
+        let Some(diagram) = self.preview.mermaid_diagrams.get(index).cloned() else {
+            return Ok(());
+        };
+
+        match mode {
+            MermaidOutputMode::Terminal => {
+                self.mermaid_terminal_canvas = mermaid_terminal_canvas(&diagram);
+                self.mermaid_canvas_x = 0;
+                self.mermaid_canvas_y = 0;
+                self.overlay = Overlay::MermaidTerminalView;
+                self.status = format!("Vista terminal Mermaid: {}", diagram.title);
+            }
+            MermaidOutputMode::Html => {
+                let html_path = write_mermaid_temp_file(&diagram)?;
+                let opened = open_in_browser(&html_path)?;
+                self.overlay = Overlay::None;
+                self.status = if opened {
+                    format!("Mermaid abierto en navegador: {}", diagram.title)
+                } else {
+                    format!("Mermaid generado en: {}", html_path.display())
+                };
+            }
+        }
+        Ok(())
+    }
+}
+
+fn write_mermaid_temp_file(diagram: &MermaidBlock) -> Result<PathBuf> {
+    let mut path = env::temp_dir();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    path.push(format!("mdnav-mermaid-{timestamp}.html"));
+
+    let escaped_title = html_escape(&diagram.title);
+    let html = format!(
+        "<!doctype html>\
+<html>\
+<head>\
+<meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>{escaped_title}</title>\
+<script type=\"module\">\
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';\
+mermaid.initialize({{ startOnLoad: true, theme: 'dark' }});\
+</script>\
+<style>\
+body {{ margin: 0; padding: 24px; background: #101418; color: #e6edf3; font-family: ui-monospace, SFMono-Regular, monospace; }}\
+.frame {{ max-width: 1200px; margin: 0 auto; background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 20px; }}\
+h1 {{ font-size: 18px; margin-top: 0; color: #7cc7ff; }}\
+.mermaid {{ background: #0d1117; border-radius: 12px; padding: 18px; overflow: auto; }}\
+</style>\
+</head>\
+<body>\
+<div class=\"frame\">\
+<h1>{escaped_title}</h1>\
+<pre class=\"mermaid\">{}</pre>\
+</div>\
+</body>\
+</html>",
+        html_escape(&diagram.source)
+    );
+
+    fs::write(&path, html)?;
+    Ok(path)
+}
+
+fn open_in_browser(path: &PathBuf) -> Result<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", &path.display().to_string()])
+            .spawn()?;
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if env::var_os("DISPLAY").is_none() && env::var_os("WAYLAND_DISPLAY").is_none() {
+            return Ok(false);
+        }
+        Command::new("xdg-open").arg(path).spawn()?;
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(path).spawn()?;
+        return Ok(true);
+    }
+
+    #[allow(unreachable_code)]
+    Ok(false)
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
