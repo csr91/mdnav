@@ -7,8 +7,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use arboard::Clipboard;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use reqwest::blocking::Client;
+use serde_json::json;
 
 use crate::{
     config::{config_path, AppConfig},
@@ -33,6 +36,7 @@ pub enum FullscreenPanel {
 pub enum MermaidOutputMode {
     Terminal,
     Html,
+    Web,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,6 +46,7 @@ pub enum Overlay {
     MermaidSelect,
     MermaidOutput,
     MermaidTerminalView,
+    WebLink,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +75,7 @@ pub struct App {
     pub mermaid_canvas_y: usize,
     pub config: AppConfig,
     pub help_section: HelpSection,
+    pub web_link_popup: Option<String>,
     pub running: bool,
     pub status: String,
 }
@@ -111,6 +117,7 @@ impl App {
             mermaid_canvas_y: 0,
             config,
             help_section: HelpSection::Shortcuts,
+            web_link_popup: None,
             running: true,
             status: String::from("Listo"),
         })
@@ -189,13 +196,13 @@ impl App {
                 }
                 KeyCode::Down => {
                     self.mermaid_output_selected_index =
-                        (self.mermaid_output_selected_index + 1).min(1);
+                        (self.mermaid_output_selected_index + 1).min(2);
                 }
                 KeyCode::Enter => {
-                    let mode = if self.mermaid_output_selected_index == 0 {
-                        MermaidOutputMode::Terminal
-                    } else {
-                        MermaidOutputMode::Html
+                    let mode = match self.mermaid_output_selected_index {
+                        0 => MermaidOutputMode::Terminal,
+                        1 => MermaidOutputMode::Html,
+                        _ => MermaidOutputMode::Web,
                     };
                     self.open_mermaid_output(self.mermaid_active_index, mode)?;
                 }
@@ -209,6 +216,13 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => self.pan_mermaid(0, 1),
                 KeyCode::Left | KeyCode::Char('h') => self.pan_mermaid(-4, 0),
                 KeyCode::Right | KeyCode::Char('l') => self.pan_mermaid(4, 0),
+                _ => {}
+            },
+            Overlay::WebLink => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    self.web_link_popup = None;
+                    self.close_overlay("Popup de link cerrado");
+                }
                 _ => {}
             },
             Overlay::None => {}
@@ -398,6 +412,7 @@ impl App {
         self.mermaid_terminal_canvas.clear();
         self.mermaid_canvas_x = 0;
         self.mermaid_canvas_y = 0;
+        self.web_link_popup = None;
         let link_hint = self
             .preview
             .links
@@ -465,9 +480,71 @@ impl App {
                     format!("Mermaid generado en: {}", html_path.display())
                 };
             }
+            MermaidOutputMode::Web => {
+                let share_url = share_mermaid_via_web(&diagram)?;
+                let opened = open_url_in_browser(&share_url)?;
+                let copied = copy_to_clipboard(&share_url).unwrap_or(false);
+                self.web_link_popup = Some(share_url.clone());
+                self.overlay = Overlay::WebLink;
+                self.status = if copied && opened {
+                    String::from("Link web abierto y copiado")
+                } else if copied {
+                    String::from("Link web copiado")
+                } else if opened {
+                    format!("Link web abierto: {share_url}")
+                } else {
+                    format!("Link web Mermaid: {share_url}")
+                };
+            }
         }
         Ok(())
     }
+}
+
+fn share_mermaid_via_web(diagram: &MermaidBlock) -> Result<String> {
+    let base_url = env::var("MDNAV_WEB_BASE_URL")
+        .unwrap_or_else(|_| String::from("https://mdnav-web.vercel.app"));
+    let trimmed_base = base_url.trim_end_matches('/');
+    let hash = generate_share_hash();
+    let api_url = format!("{trimmed_base}/api/diagrams/{hash}");
+
+    let client = Client::new();
+    let payload = json!({
+        "mermaid": diagram.source,
+        "title": diagram.title,
+        "ttlSeconds": 3600
+    });
+
+    let mut request = client.post(&api_url).json(&payload);
+    if let Ok(token) = env::var("MDNAV_WEB_WRITE_TOKEN") {
+        if !token.trim().is_empty() {
+            request = request.header("x-mdnav-token", token);
+        }
+    }
+
+    let response = request.send()?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_else(|_| String::from("sin detalle"));
+        return Err(anyhow::anyhow!("Error web Mermaid {status}: {body}"));
+    }
+
+    let body: serde_json::Value = response.json()?;
+    let url = body
+        .get("url")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{trimmed_base}/{hash}"));
+
+    Ok(url)
+}
+
+fn generate_share_hash() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("mdnav-{timestamp:x}")
 }
 
 fn write_mermaid_temp_file(diagram: &MermaidBlock) -> Result<PathBuf> {
@@ -537,6 +614,42 @@ fn open_in_browser(path: &PathBuf) -> Result<bool> {
 
     #[allow(unreachable_code)]
     Ok(false)
+}
+
+fn open_url_in_browser(url: &str) -> Result<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd").args(["/C", "start", "", url]).spawn()?;
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if env::var_os("DISPLAY").is_none() && env::var_os("WAYLAND_DISPLAY").is_none() {
+            return Ok(false);
+        }
+        Command::new("xdg-open").arg(url).spawn()?;
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(url).spawn()?;
+        return Ok(true);
+    }
+
+    #[allow(unreachable_code)]
+    Ok(false)
+}
+
+fn copy_to_clipboard(value: &str) -> Result<bool> {
+    let mut clipboard = match Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(_) => return Ok(false),
+    };
+
+    clipboard.set_text(value.to_string())?;
+    Ok(true)
 }
 
 fn html_escape(value: &str) -> String {

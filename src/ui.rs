@@ -46,6 +46,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::MermaidSelect => render_mermaid_select_popup(frame, app),
         Overlay::MermaidOutput => render_mermaid_output_popup(frame, app),
         Overlay::MermaidTerminalView => render_mermaid_terminal_view(frame, app),
+        Overlay::WebLink => render_web_link_popup(frame, app),
         Overlay::None => {}
     }
 }
@@ -256,6 +257,7 @@ fn render_mermaid_output_popup(frame: &mut Frame, app: &App) {
     let items = vec![
         ListItem::new(Line::from("Render terminal")),
         ListItem::new(Line::from("Abrir HTML")),
+        ListItem::new(Line::from("Abrir web link")),
     ];
 
     let list = List::new(items)
@@ -358,6 +360,46 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
             .alignment(Alignment::Center),
         sections[2],
     );
+}
+
+fn render_web_link_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(72, 32, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let link = app
+        .web_link_popup
+        .as_deref()
+        .unwrap_or("Link no disponible");
+
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "Link Manual Disponible:",
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            link.to_string(),
+            Style::default().fg(Color::Yellow),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Enter o Esc para cerrar",
+            Style::default().fg(Color::Gray),
+        )]),
+    ];
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title("Web Link")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::LightGreen)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, popup_area);
 }
 
 fn render_help_tabs(frame: &mut Frame, area: Rect, selected: HelpSection) {
