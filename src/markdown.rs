@@ -16,7 +16,6 @@ pub enum PreviewLineKind {
     Heading(u8),
     CodeFence,
     MermaidTitle,
-    MermaidEdge,
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +28,22 @@ pub struct PreviewLine {
 pub struct MermaidBlock {
     pub title: String,
     pub source: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CanvasNode {
+    pub label: String,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MermaidCanvas {
+    pub lines: Vec<String>,
+    pub nodes: Vec<CanvasNode>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -45,29 +60,99 @@ pub fn load_preview(path: &Path) -> Result<PreviewDocument> {
     Ok(render_preview(path, &content))
 }
 
-pub fn mermaid_terminal_canvas(diagram: &MermaidBlock) -> Vec<String> {
+pub fn mermaid_terminal_canvas(diagram: &MermaidBlock) -> MermaidCanvas {
+    // Diagrams that are not flowcharts can't be rendered as boxes — show source
+    if let Some(kind) = non_flowchart_type(&diagram.source) {
+        return render_source_canvas(diagram, kind);
+    }
+
     let raw_lines = diagram
         .source
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
+        // Strip subgraph declarations and their closing `end` — edges inside are
+        // kept, the grouping itself isn't meaningful for box rendering
+        .filter(|line| !is_subgraph_keyword(line))
         .collect::<Vec<_>>();
 
     let aliases = collect_mermaid_aliases(&raw_lines);
+    let urls = parse_click_urls(&diagram.source, &aliases);
     let edges = raw_lines
         .iter()
         .filter_map(|line| simplify_mermaid_edge(line, &aliases))
         .collect::<Vec<_>>();
 
     if edges.is_empty() {
-        return vec![
-            String::from("No diagram data"),
-            String::new(),
-            String::from("No pude detectar conexiones Mermaid en este bloque."),
-        ];
+        return MermaidCanvas {
+            lines: vec![
+                String::from("Sin conexiones detectadas"),
+                String::new(),
+                String::from("El bloque no contiene aristas reconocibles (-->  ---  ==>)."),
+            ],
+            nodes: vec![],
+        };
     }
 
-    render_mermaid_canvas_from_edges(&edges)
+    let is_lr = is_left_to_right(&diagram.source);
+    render_mermaid_canvas_from_edges(&edges, &urls, is_lr)
+}
+
+fn is_left_to_right(source: &str) -> bool {
+    source
+        .lines()
+        .next()
+        .map(|line| {
+            line.contains("flowchart LR")
+                || line.contains("graph LR")
+                || line.contains("flowchart RL")
+                || line.contains("graph RL")
+        })
+        .unwrap_or(false)
+}
+
+/// Returns the diagram kind name if the source is NOT a flowchart/graph.
+fn non_flowchart_type(source: &str) -> Option<&'static str> {
+    let first = source
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if first.starts_with("sequenceDiagram") {
+        Some("sequenceDiagram")
+    } else if first.starts_with("pie") {
+        Some("pie")
+    } else if first.starts_with("gitGraph") {
+        Some("gitGraph")
+    } else if first.starts_with("classDiagram") {
+        Some("classDiagram")
+    } else if first.starts_with("stateDiagram") {
+        Some("stateDiagram")
+    } else if first.starts_with("erDiagram") {
+        Some("erDiagram")
+    } else if first.starts_with("gantt") {
+        Some("gantt")
+    } else if first.starts_with("journey") {
+        Some("journey")
+    } else {
+        None
+    }
+}
+
+/// Render the raw source lines as a plain canvas with a type header.
+fn render_source_canvas(diagram: &MermaidBlock, kind: &str) -> MermaidCanvas {
+    let header = format!("[ {} ]  —  abrí en HTML o Web para render visual", kind);
+    let separator = "─".repeat(header.chars().count().min(60));
+    let mut lines = vec![header, separator, String::new()];
+    for line in diagram.source.lines() {
+        lines.push(line.to_string());
+    }
+    MermaidCanvas { lines, nodes: vec![] }
+}
+
+fn is_subgraph_keyword(line: &str) -> bool {
+    let t = line.trim();
+    t == "end" || t.starts_with("subgraph") || t.starts_with("classDef") || t.starts_with("class ")
 }
 
 pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
@@ -171,6 +256,7 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
                     label,
                     raw_target: dest_url.to_string(),
                     resolved,
+                    line_index: lines.len(),
                 });
             }
             Event::Text(text) => {
@@ -284,33 +370,55 @@ fn sanitize_mermaid_line(line: &str) -> String {
         .replace('\t', "    ")
 }
 
-fn summarize_mermaid(source: &str) -> Vec<(PreviewLineKind, String)> {
-    let raw_lines = source
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
+// ── Edge parsing ─────────────────────────────────────────────────────────────
 
-    let aliases = collect_mermaid_aliases(&raw_lines);
-    let edges = raw_lines
-        .iter()
-        .filter_map(|line| simplify_mermaid_edge(line, &aliases))
-        .collect::<Vec<_>>();
-
-    if !edges.is_empty() {
-        render_mermaid_ascii(source, &edges)
-    } else if let Some(first) = raw_lines.first() {
-        vec![(PreviewLineKind::MermaidEdge, sanitize_mermaid_line(first))]
+/// Extract a pipe-enclosed edge label: `-->|label|` or `--|label|`
+fn extract_pipe_label(line: &str) -> Option<String> {
+    let arrow_pos = line.find("--")?;
+    let after_arrow = &line[arrow_pos..];
+    let pipe_open = after_arrow.find('|')?;
+    let rest = &after_arrow[pipe_open + 1..];
+    let pipe_close = rest.find('|')?;
+    let label = rest[..pipe_close].trim();
+    if label.is_empty() {
+        None
     } else {
-        Vec::new()
+        Some(label.to_string())
     }
 }
 
-fn simplify_mermaid_edge(line: &str, aliases: &HashMap<String, String>) -> Option<(String, String)> {
+/// Extract a dash-enclosed edge label: `A -- label text --> B`
+/// Only matches when there is text between `--` and `-->` / `---`.
+fn extract_dash_label(line: &str) -> Option<String> {
+    // Find `--` not immediately followed by `>` or another `-`
+    let pos = line.find("--")?;
+    let after = &line[pos + 2..];
+    if after.starts_with('>') || after.starts_with('-') {
+        return None;
+    }
+    // The label ends at the next `--`
+    let end = after.find("--")?;
+    let label = after[..end].trim().trim_matches('"');
+    if label.is_empty() {
+        None
+    } else {
+        Some(label.to_string())
+    }
+}
+
+fn extract_edge_label(line: &str) -> Option<String> {
+    extract_pipe_label(line).or_else(|| extract_dash_label(line))
+}
+
+fn simplify_mermaid_edge(
+    line: &str,
+    aliases: &HashMap<String, String>,
+) -> Option<(String, String, Option<String>)> {
     if !line.contains("--") && !line.contains("->") {
         return None;
     }
 
+    let label = extract_edge_label(line);
     let normalized = normalize_mermaid_edge(line);
 
     let parts = normalized.split("->").map(str::trim).collect::<Vec<_>>();
@@ -320,7 +428,7 @@ fn simplify_mermaid_edge(line: &str, aliases: &HashMap<String, String>) -> Optio
 
     let left = parse_mermaid_node(parts.first()?.trim(), aliases);
     let right = parse_mermaid_node(parts.last()?.trim(), aliases);
-    Some((left, right))
+    Some((left, right, label))
 }
 
 fn parse_mermaid_node(node: &str, aliases: &HashMap<String, String>) -> String {
@@ -422,8 +530,46 @@ fn extract_odd_shape_label(value: &str) -> Option<String> {
     Some(value[marker + 1..end].to_string())
 }
 
+fn strip_pipe_label(line: &str) -> String {
+    let Some(arrow_pos) = line.find("--") else {
+        return line.to_string();
+    };
+    let after = &line[arrow_pos..];
+    let Some(pipe_open) = after.find('|') else {
+        return line.to_string();
+    };
+    let Some(pipe_close) = after[pipe_open + 1..].find('|') else {
+        return line.to_string();
+    };
+    let label_end = arrow_pos + pipe_open + 1 + pipe_close + 1;
+    format!("{}{}", &line[..arrow_pos + pipe_open], &line[label_end..])
+}
+
+fn strip_dash_label(line: &str) -> String {
+    // `A -- label text --> B`  →  `A --> B`
+    // Only strip when there's text between `--` and `--`
+    let Some(pos) = line.find("--") else {
+        return line.to_string();
+    };
+    let after = &line[pos + 2..];
+    // If immediately followed by > or -, it's already a plain arrow
+    if after.starts_with('>') || after.starts_with('-') {
+        return line.to_string();
+    }
+    let Some(end) = after.find("--") else {
+        return line.to_string();
+    };
+    // Replace `-- <label> --` with `--`
+    format!("{}{}{}", &line[..pos], "--", &after[end + 2..])
+}
+
 fn normalize_mermaid_edge(line: &str) -> String {
-    let mut normalized = sanitize_mermaid_line(line);
+    // Strip pipe labels: `-->|text|` → `-->`
+    let s = strip_pipe_label(line);
+    // Strip dash labels: `-- text -->` → `-->`  (collapse `-- ... --` to `--`)
+    let s = strip_dash_label(&s);
+
+    let mut normalized = sanitize_mermaid_line(&s);
 
     for pattern in ["==>", "-.->", "-->", "---", "--"] {
         normalized = normalized.replace(pattern, "->");
@@ -435,184 +581,57 @@ fn normalize_mermaid_edge(line: &str) -> String {
         .join(" ")
 }
 
-fn render_mermaid_ascii(source: &str, edges: &[(String, String)]) -> Vec<(PreviewLineKind, String)> {
-    if is_left_to_right(source) {
-        if let Some(lines) = render_split_merge_lr(edges) {
-            return lines;
+/// Parse `click NodeId href "url"` or `click NodeId "url"` lines.
+/// Returns a map of display-label → url (resolves aliases).
+fn parse_click_urls(source: &str, aliases: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut urls = HashMap::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        let rest = if let Some(r) = trimmed.strip_prefix("click ") {
+            r
+        } else {
+            continue;
+        };
+
+        let mut parts = rest.splitn(3, ' ');
+        let node_id = match parts.next() {
+            Some(id) => id.trim(),
+            None => continue,
+        };
+
+        let remainder = parts.collect::<Vec<_>>().join(" ");
+        let url_raw = remainder
+            .trim()
+            .trim_start_matches("href")
+            .trim()
+            .trim_matches('"');
+
+        if url_raw.starts_with("http://") || url_raw.starts_with("https://") {
+            // Use display label as key if alias exists, else use node_id
+            let key = aliases
+                .get(node_id)
+                .cloned()
+                .unwrap_or_else(|| node_id.to_string());
+            urls.insert(key, url_raw.to_string());
         }
     }
 
-    if let Some(chain) = build_linear_chain(edges) {
-        return render_linear_chain_boxes(&chain);
-    }
-
-    let mut lines = Vec::new();
-    lines.push((
-        PreviewLineKind::MermaidEdge,
-        String::from("Complex diagram: terminal summary"),
-    ));
-    lines.push((PreviewLineKind::Normal, String::new()));
-    for (left, right) in edges.iter().take(6) {
-        lines.push((PreviewLineKind::MermaidEdge, format!("  {} -> {}", left, right)));
-    }
-    lines
+    urls
 }
 
-fn is_left_to_right(source: &str) -> bool {
-    source
-        .lines()
-        .next()
-        .map(|line| line.contains("flowchart LR") || line.contains("graph LR"))
-        .unwrap_or(false)
-}
+// ── Canvas renderer ───────────────────────────────────────────────────────────
 
-fn build_linear_chain(edges: &[(String, String)]) -> Option<Vec<String>> {
-    if edges.is_empty() {
-        return None;
-    }
+fn render_mermaid_canvas_from_edges(
+    edges: &[(String, String, Option<String>)],
+    urls: &HashMap<String, String>,
+    is_lr: bool,
+) -> MermaidCanvas {
+    let nodes_list = collect_nodes(edges);
+    let levels = compute_levels(edges, &nodes_list);
+    let grouped = group_by_level(&levels, &nodes_list);
 
-    for window in edges.windows(2) {
-        if window[0].1 != window[1].0 {
-            return None;
-        }
-    }
-
-    let mut chain = Vec::new();
-    chain.push(edges.first()?.0.clone());
-    for (_, right) in edges {
-        chain.push(right.clone());
-    }
-    Some(chain)
-}
-
-fn render_split_merge_lr(edges: &[(String, String)]) -> Option<Vec<(PreviewLineKind, String)>> {
-    let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
-    let mut incoming: HashMap<String, usize> = HashMap::new();
-
-    for (left, right) in edges {
-        outgoing.entry(left.clone()).or_default().push(right.clone());
-        *incoming.entry(right.clone()).or_insert(0) += 1;
-        incoming.entry(left.clone()).or_insert(0);
-    }
-
-    let split = outgoing
-        .iter()
-        .find_map(|(node, targets)| (targets.len() == 2).then_some(node.clone()))?;
-    let merge = incoming
-        .iter()
-        .find_map(|(node, count)| (*count == 2).then_some(node.clone()))?;
-
-    let prefix = build_path_to(&split, edges)?;
-    let suffix = build_path_from(&merge, edges);
-    let branches = outgoing.get(&split)?.clone();
-
-    if branches.len() != 2 {
-        return None;
-    }
-
-    let top_branch = branches[0].clone();
-    let bottom_branch = branches[1].clone();
-
-    if !edge_exists(edges, &top_branch, &merge) || !edge_exists(edges, &bottom_branch, &merge) {
-        return None;
-    }
-
-    let mut lines = Vec::new();
-    let prefix_text = join_boxes(prefix.iter().cloned());
-    let merge_box = boxed_label(&merge);
-    let suffix_text = if suffix.is_empty() {
-        String::new()
-    } else {
-        format!(" -> {}", join_boxes(suffix.into_iter()))
-    };
-
-    lines.push((
-        PreviewLineKind::MermaidEdge,
-        format!("{} -> {}", prefix_text, boxed_label(&split)),
-    ));
-    lines.push((
-        PreviewLineKind::MermaidEdge,
-        format!("{}  |-> {} --\\", " ".repeat(prefix_text.chars().count()), boxed_label(&top_branch)),
-    ));
-    lines.push((
-        PreviewLineKind::MermaidEdge,
-        format!(
-            "{}  |              > {}{}",
-            " ".repeat(prefix_text.chars().count()),
-            merge_box,
-            suffix_text
-        ),
-    ));
-    lines.push((
-        PreviewLineKind::MermaidEdge,
-        format!("{}  |-> {} --/", " ".repeat(prefix_text.chars().count()), boxed_label(&bottom_branch)),
-    ));
-
-    Some(lines)
-}
-
-fn build_path_to(target: &str, edges: &[(String, String)]) -> Option<Vec<String>> {
-    let mut reverse: HashMap<String, String> = HashMap::new();
-    for (left, right) in edges {
-        reverse.entry(right.clone()).or_insert_with(|| left.clone());
-    }
-
-    let mut path = Vec::new();
-    let mut current = reverse.get(target)?.clone();
-    path.push(current.clone());
-
-    while let Some(prev) = reverse.get(&current) {
-        current = prev.clone();
-        path.push(current.clone());
-    }
-
-    path.reverse();
-    Some(path)
-}
-
-fn build_path_from(start: &str, edges: &[(String, String)]) -> Vec<String> {
-    let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
-    for (left, right) in edges {
-        outgoing.entry(left.clone()).or_default().push(right.clone());
-    }
-
-    let mut path = Vec::new();
-    let mut current = start.to_string();
-    while let Some(next_nodes) = outgoing.get(&current) {
-        if next_nodes.len() != 1 {
-            break;
-        }
-        let next = next_nodes[0].clone();
-        path.push(next.clone());
-        current = next;
-    }
-    path
-}
-
-fn edge_exists(edges: &[(String, String)], from: &str, to: &str) -> bool {
-    edges.iter().any(|(left, right)| left == from && right == to)
-}
-
-fn boxed_label(label: &str) -> String {
-    format!("[ {} ]", label)
-}
-
-fn join_boxes<I>(labels: I) -> String
-where
-    I: IntoIterator<Item = String>,
-{
-    labels
-        .into_iter()
-        .map(|label| boxed_label(&label))
-        .collect::<Vec<_>>()
-        .join(" -> ")
-}
-
-fn render_mermaid_canvas_from_edges(edges: &[(String, String)]) -> Vec<String> {
-    let nodes = collect_nodes(edges);
-    let levels = compute_levels(edges, &nodes);
-    let grouped = group_by_level(&levels, &nodes);
-    let node_layouts = nodes
+    let node_layouts = nodes_list
         .iter()
         .map(|node| {
             let lines = wrap_label_lines(node, 24);
@@ -627,89 +646,330 @@ fn render_mermaid_canvas_from_edges(edges: &[(String, String)]) -> Vec<String> {
             (node.clone(), (width, height, lines))
         })
         .collect::<HashMap<_, _>>();
+
+    // For LR: levels become columns (x-axis), nodes stack vertically per column.
+    // For TD: levels become rows (y-axis), nodes spread horizontally per row.
     let x_gap = 4usize;
     let y_gap = 2usize;
     let left_margin = 2usize;
     let top_margin = 1usize;
 
-    let mut level_widths = BTreeMap::new();
-    let mut level_heights = BTreeMap::new();
+    // Compute per-level dimensions
+    let mut level_widths: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut level_heights: BTreeMap<usize, usize> = BTreeMap::new();
     for (level, level_nodes) in &grouped {
-        let content_width = level_nodes
+        let max_w = level_nodes
             .iter()
-            .map(|node| node_layouts.get(node).map(|(width, _, _)| *width).unwrap_or(12))
-            .sum::<usize>()
-            + level_nodes.len().saturating_sub(1) * x_gap;
-        level_widths.insert(*level, content_width);
-
-        let level_height = level_nodes
+            .map(|n| node_layouts.get(n).map(|(w, _, _)| *w).unwrap_or(12))
+            .max()
+            .unwrap_or(12);
+        let max_h = level_nodes
             .iter()
-            .map(|node| node_layouts.get(node).map(|(_, height, _)| *height).unwrap_or(3))
+            .map(|n| node_layouts.get(n).map(|(_, h, _)| *h).unwrap_or(3))
             .max()
             .unwrap_or(3);
-        level_heights.insert(*level, level_height);
+        let total_h = level_nodes
+            .iter()
+            .map(|n| node_layouts.get(n).map(|(_, h, _)| *h).unwrap_or(3))
+            .sum::<usize>()
+            + level_nodes.len().saturating_sub(1) * y_gap;
+        let total_w = level_nodes
+            .iter()
+            .map(|n| node_layouts.get(n).map(|(w, _, _)| *w).unwrap_or(12))
+            .sum::<usize>()
+            + level_nodes.len().saturating_sub(1) * x_gap;
+        level_widths.insert(*level, if is_lr { max_w } else { total_w });
+        level_heights.insert(*level, if is_lr { total_h } else { max_h });
     }
 
-    let canvas_width = left_margin * 2 + level_widths.values().copied().max().unwrap_or(40).max(40);
     let max_level = levels.values().copied().max().unwrap_or(0);
-    let content_height = (0..=max_level)
-        .map(|level| level_heights.get(&level).copied().unwrap_or(3) + y_gap)
-        .sum::<usize>();
-    let canvas_height = top_margin * 2 + content_height;
 
-    let mut canvas = vec![vec![' '; canvas_width]; canvas_height.max(12)];
+    let (canvas_width, canvas_height) = if is_lr {
+        let w = left_margin * 2
+            + (0..=max_level)
+                .map(|l| level_widths.get(&l).copied().unwrap_or(12) + x_gap)
+                .sum::<usize>();
+        let h = top_margin * 2
+            + level_heights.values().copied().max().unwrap_or(12).max(12);
+        (w.max(40), h.max(12))
+    } else {
+        let w = left_margin * 2
+            + level_widths.values().copied().max().unwrap_or(40).max(40);
+        let h = top_margin * 2
+            + (0..=max_level)
+                .map(|l| level_heights.get(&l).copied().unwrap_or(3) + y_gap)
+                .sum::<usize>();
+        (w, h.max(12))
+    };
+
+    let mut canvas = vec![vec![' '; canvas_width]; canvas_height];
     let mut positions: HashMap<String, (usize, usize, usize, usize)> = HashMap::new();
-    let mut current_y = top_margin;
 
-    for (level, level_nodes) in grouped {
-        let content_width = level_widths.get(&level).copied().unwrap_or(0);
-        let start_x = left_margin + (canvas_width.saturating_sub(content_width + left_margin * 2)) / 2;
-        let y = current_y;
-        let mut cursor_x = start_x;
-
-        for node in &level_nodes {
-            let (width, height, lines) = node_layouts
-                .get(node)
-                .cloned()
-                .unwrap_or_else(|| (12, 3, vec![node.clone()]));
-            draw_box(&mut canvas, cursor_x, y, width, &lines);
-            positions.insert(node.clone(), (cursor_x, y, width, height));
-            cursor_x += width + x_gap;
+    if is_lr {
+        // Place nodes: each level is a column, nodes stack top-to-bottom within the column
+        let total_height = canvas_height.saturating_sub(top_margin * 2);
+        let mut current_x = left_margin;
+        for level in 0..=max_level {
+            let level_nodes = match grouped.get(&level) {
+                Some(n) => n,
+                None => continue,
+            };
+            let col_h = level_heights.get(&level).copied().unwrap_or(12);
+            let col_w = level_widths.get(&level).copied().unwrap_or(12);
+            // Center the stack vertically
+            let stack_start_y =
+                top_margin + total_height.saturating_sub(col_h) / 2;
+            let mut cursor_y = stack_start_y;
+            for node in level_nodes {
+                let (width, height, lines) = node_layouts
+                    .get(node)
+                    .cloned()
+                    .unwrap_or_else(|| (12, 3, vec![node.clone()]));
+                draw_box(&mut canvas, current_x, cursor_y, width, &lines);
+                positions.insert(node.clone(), (current_x, cursor_y, width, height));
+                cursor_y += height + y_gap;
+            }
+            current_x += col_w + x_gap;
         }
-
-        current_y += level_heights.get(&level).copied().unwrap_or(3) + y_gap;
+    } else {
+        // TD layout: each level is a row
+        let mut current_y = top_margin;
+        for (level, level_nodes) in &grouped {
+            let content_width = level_widths.get(level).copied().unwrap_or(0);
+            let start_x =
+                left_margin + (canvas_width.saturating_sub(content_width + left_margin * 2)) / 2;
+            let mut cursor_x = start_x;
+            for node in level_nodes {
+                let (width, height, lines) = node_layouts
+                    .get(node)
+                    .cloned()
+                    .unwrap_or_else(|| (12, 3, vec![node.clone()]));
+                draw_box(&mut canvas, cursor_x, current_y, width, &lines);
+                positions.insert(node.clone(), (cursor_x, current_y, width, height));
+                cursor_x += width + x_gap;
+            }
+            current_y += level_heights.get(level).copied().unwrap_or(3) + y_gap;
+        }
     }
 
-    for (from, to) in edges {
+    // Draw connectors
+    for (from, to, label) in edges {
         let Some(&(from_x, from_y, from_width, from_height)) = positions.get(from) else {
             continue;
         };
-        let Some(&(to_x, to_y, to_width, _to_height)) = positions.get(to) else {
+        let Some(&(to_x, to_y, to_width, _)) = positions.get(to) else {
             continue;
         };
 
-        let from_center = from_x + from_width / 2;
-        let to_center = to_x + to_width / 2;
-        let start_y = from_y + from_height.saturating_sub(1);
-        let end_y = to_y;
-        let mid_y = start_y + 1 + (end_y.saturating_sub(start_y + 1)) / 2;
+        if is_lr {
+            // Horizontal connector: exit right side of from, enter left side of to
+            let start_x = from_x + from_width;
+            let end_x = to_x;
+            let from_mid_y = from_y + from_height / 2;
+            let to_mid_y = to_y + (to_width.min(from_width)) / 2; // reuse to_y center
+            let to_center_y = to_y + {
+                let (_, h, _) = node_layouts.get(to).cloned().unwrap_or((12, 3, vec![]));
+                h / 2
+            };
+            let mid_x = start_x + (end_x.saturating_sub(start_x)) / 2;
 
-        if start_y + 1 <= mid_y {
-            draw_vertical(&mut canvas, from_center, start_y + 1, mid_y);
+            if start_x < end_x {
+                // Horizontal from from_mid_y to mid_x, then vertical to to_center_y, then horizontal to end_x
+                draw_horizontal(&mut canvas, start_x, mid_x, from_mid_y);
+                if from_mid_y != to_center_y {
+                    let y_start = from_mid_y.min(to_center_y);
+                    let y_end = from_mid_y.max(to_center_y);
+                    draw_vertical(&mut canvas, mid_x, y_start, y_end);
+                }
+                draw_horizontal(&mut canvas, mid_x, end_x, to_center_y);
+                if end_x > 0 {
+                    put_char(&mut canvas, end_x.saturating_sub(1), to_center_y, '►');
+                }
+                if let Some(lbl) = label {
+                    draw_edge_label(&mut canvas, start_x, mid_x, from_mid_y, lbl);
+                }
+            }
+            let _ = (to_mid_y, mid_x); // suppress unused warnings
+        } else {
+            // TD connector: exit bottom of from, enter top of to
+            let from_center = from_x + from_width / 2;
+            let to_center = to_x + to_width / 2;
+            let start_y = from_y + from_height.saturating_sub(1);
+            let end_y = to_y;
+            let mid_y = start_y + 1 + (end_y.saturating_sub(start_y + 1)) / 2;
+
+            if start_y + 1 <= mid_y {
+                draw_vertical(&mut canvas, from_center, start_y + 1, mid_y);
+            }
+            if from_center != to_center {
+                draw_horizontal(&mut canvas, from_center, to_center, mid_y);
+                if let Some(lbl) = label {
+                    draw_edge_label(&mut canvas, from_center, to_center, mid_y, lbl);
+                }
+            }
+            if mid_y + 1 <= end_y.saturating_sub(1) {
+                draw_vertical(&mut canvas, to_center, mid_y + 1, end_y.saturating_sub(1));
+            }
+            if end_y > 0 {
+                put_char(&mut canvas, to_center, end_y.saturating_sub(1), '▼');
+            }
         }
-        draw_horizontal(&mut canvas, from_center, to_center, mid_y);
-        if mid_y + 1 <= end_y.saturating_sub(1) {
-            draw_vertical(&mut canvas, to_center, mid_y + 1, end_y.saturating_sub(1));
-        }
-        put_char(&mut canvas, to_center, end_y.saturating_sub(1), 'v');
     }
 
-    trim_canvas(canvas)
+    fix_junctions(&mut canvas);
+
+    // Build CanvasNode list in topological order (same order as nodes_list)
+    let canvas_nodes = nodes_list
+        .iter()
+        .filter_map(|label| {
+            let &(x, y, width, height) = positions.get(label)?;
+            let url = urls.get(label).cloned();
+            Some(CanvasNode {
+                label: label.clone(),
+                x,
+                y,
+                width,
+                height,
+                url,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    MermaidCanvas {
+        lines: trim_canvas(canvas),
+        nodes: canvas_nodes,
+    }
 }
 
-fn collect_nodes(edges: &[(String, String)]) -> Vec<String> {
+// ── Canvas drawing primitives ─────────────────────────────────────────────────
+
+fn draw_box(canvas: &mut [Vec<char>], x: usize, y: usize, width: usize, lines: &[String]) {
+    let inner = width.saturating_sub(2);
+    let top = format!("┌{}┐", "─".repeat(inner));
+    let bottom = format!("└{}┘", "─".repeat(inner));
+
+    draw_text(canvas, x, y, &top);
+    for (i, line) in lines.iter().enumerate() {
+        draw_text(canvas, x, y + 1 + i, &box_line(width, line));
+    }
+    draw_text(canvas, x, y + 1 + lines.len(), &bottom);
+}
+
+fn box_line(width: usize, text: &str) -> String {
+    let inner = width.saturating_sub(2);
+    let content = fit_text(text, inner);
+    let padding = inner.saturating_sub(content.chars().count());
+    let left_pad = padding / 2;
+    let right_pad = padding.saturating_sub(left_pad);
+    format!("│{}{}{}│", " ".repeat(left_pad), content, " ".repeat(right_pad))
+}
+
+fn draw_vertical(canvas: &mut [Vec<char>], x: usize, y1: usize, y2: usize) {
+    for y in y1..=y2 {
+        put_char(canvas, x, y, '│');
+    }
+}
+
+fn draw_horizontal(canvas: &mut [Vec<char>], x1: usize, x2: usize, y: usize) {
+    let start = x1.min(x2);
+    let end = x1.max(x2);
+    for x in start..=end {
+        put_char(canvas, x, y, '─');
+    }
+}
+
+fn draw_edge_label(canvas: &mut [Vec<char>], x1: usize, x2: usize, y: usize, label: &str) {
+    let start = x1.min(x2).saturating_add(1);
+    let end = x1.max(x2);
+    let available = end.saturating_sub(start);
+    let chars: Vec<char> = label.chars().collect();
+    let needed = chars.len() + 2; // space on each side
+    if needed > available {
+        return;
+    }
+    let mid_start = start + (available.saturating_sub(needed)) / 2;
+    put_char(canvas, mid_start, y, ' ');
+    for (i, ch) in chars.iter().enumerate() {
+        put_char(canvas, mid_start + 1 + i, y, *ch);
+    }
+    put_char(canvas, mid_start + 1 + chars.len(), y, ' ');
+}
+
+/// Post-process the canvas: replace plain `│` and `─` connector chars with
+/// appropriate Unicode junction chars (┬ ┴ ├ ┤ ┼ └ ┘ ┌ ┐) based on neighbors.
+/// Skips chars that are adjacent to box corners to preserve box borders.
+fn fix_junctions(canvas: &mut [Vec<char>]) {
+    let height = canvas.len();
+    if height == 0 {
+        return;
+    }
+    let width = canvas[0].len();
+
+    // We need a snapshot to avoid cascading edits
+    let snapshot: Vec<Vec<char>> = canvas.to_vec();
+
+    for y in 0..height {
+        for x in 0..width {
+            let ch = snapshot[y][x];
+            if ch != '│' && ch != '─' {
+                continue;
+            }
+
+            // Skip chars adjacent to box corners (part of box border)
+            let neighbors = [
+                if y > 0 { snapshot[y - 1][x] } else { ' ' },
+                if y + 1 < height { snapshot[y + 1][x] } else { ' ' },
+                if x > 0 { snapshot[y][x - 1] } else { ' ' },
+                if x + 1 < width { snapshot[y][x + 1] } else { ' ' },
+            ];
+            if neighbors.iter().any(|&c| is_box_corner(c)) {
+                continue;
+            }
+
+            let above = y > 0 && is_vert_connector(snapshot[y - 1][x]);
+            let below = y + 1 < height && is_vert_connector(snapshot[y + 1][x]);
+            let left = x > 0 && is_horiz_connector(snapshot[y][x - 1]);
+            let right = x + 1 < width && is_horiz_connector(snapshot[y][x + 1]);
+
+            canvas[y][x] = junction_char(above, below, left, right, ch);
+        }
+    }
+}
+
+fn is_box_corner(ch: char) -> bool {
+    matches!(ch, '┌' | '┐' | '└' | '┘')
+}
+
+fn is_vert_connector(ch: char) -> bool {
+    matches!(ch, '│' | '┬' | '┴' | '├' | '┤' | '┼')
+}
+
+fn is_horiz_connector(ch: char) -> bool {
+    matches!(ch, '─' | '┬' | '┴' | '├' | '┤' | '┼')
+}
+
+fn junction_char(above: bool, below: bool, left: bool, right: bool, current: char) -> char {
+    match (above, below, left, right) {
+        (true, true, true, true) => '┼',
+        (true, true, true, false) => '┤',
+        (true, true, false, true) => '├',
+        (false, true, true, true) => '┬',
+        (true, false, true, true) => '┴',
+        (true, false, true, false) => '┘',
+        (true, false, false, true) => '└',
+        (false, true, true, false) => '┐',
+        (false, true, false, true) => '┌',
+        (true, true, false, false) => '│',
+        (false, false, true, true) => '─',
+        _ => current,
+    }
+}
+
+// ── Graph topology helpers ────────────────────────────────────────────────────
+
+fn collect_nodes(edges: &[(String, String, Option<String>)]) -> Vec<String> {
     let mut nodes = Vec::new();
-    for (from, to) in edges {
+    for (from, to, _) in edges {
         if !nodes.contains(from) {
             nodes.push(from.clone());
         }
@@ -720,7 +980,10 @@ fn collect_nodes(edges: &[(String, String)]) -> Vec<String> {
     nodes
 }
 
-fn compute_levels(edges: &[(String, String)], nodes: &[String]) -> HashMap<String, usize> {
+fn compute_levels(
+    edges: &[(String, String, Option<String>)],
+    nodes: &[String],
+) -> HashMap<String, usize> {
     let mut incoming: HashMap<String, usize> = HashMap::new();
     let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
     let mut levels: HashMap<String, usize> = HashMap::new();
@@ -730,7 +993,7 @@ fn compute_levels(edges: &[(String, String)], nodes: &[String]) -> HashMap<Strin
         levels.insert(node.clone(), 0);
     }
 
-    for (from, to) in edges {
+    for (from, to, _) in edges {
         outgoing.entry(from.clone()).or_default().push(to.clone());
         *incoming.entry(to.clone()).or_insert(0) += 1;
     }
@@ -763,7 +1026,10 @@ fn compute_levels(edges: &[(String, String)], nodes: &[String]) -> HashMap<Strin
     levels
 }
 
-fn group_by_level(levels: &HashMap<String, usize>, nodes: &[String]) -> BTreeMap<usize, Vec<String>> {
+fn group_by_level(
+    levels: &HashMap<String, usize>,
+    nodes: &[String],
+) -> BTreeMap<usize, Vec<String>> {
     let mut grouped: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     for node in nodes {
         let level = levels.get(node).copied().unwrap_or(0);
@@ -772,30 +1038,7 @@ fn group_by_level(levels: &HashMap<String, usize>, nodes: &[String]) -> BTreeMap
     grouped
 }
 
-fn draw_box_label(canvas: &mut [Vec<char>], x: usize, y: usize, width: usize, label: &str) {
-    let lines = wrap_label_lines(label, width.saturating_sub(4).max(8));
-    draw_box(canvas, x, y, width, &lines);
-}
-
-fn draw_box(canvas: &mut [Vec<char>], x: usize, y: usize, width: usize, lines: &[String]) {
-    let top = format!("+{}+", "-".repeat(width.saturating_sub(2)));
-    let bottom = top.clone();
-
-    draw_text(canvas, x, y, &top);
-    for (index, line) in lines.iter().enumerate() {
-        draw_text(canvas, x, y + 1 + index, &box_line(width, line));
-    }
-    draw_text(canvas, x, y + 1 + lines.len(), &bottom);
-}
-
-fn box_line(width: usize, text: &str) -> String {
-    let inner = width.saturating_sub(2);
-    let content = fit_text(text, inner);
-    let padding = inner.saturating_sub(content.chars().count());
-    let left_pad = padding / 2;
-    let right_pad = padding.saturating_sub(left_pad);
-    format!("|{}{}{}|", " ".repeat(left_pad), content, " ".repeat(right_pad))
-}
+// ── Text helpers ──────────────────────────────────────────────────────────────
 
 fn wrap_label_lines(value: &str, width: usize) -> Vec<String> {
     let max_width = width.max(8);
@@ -805,7 +1048,11 @@ fn wrap_label_lines(value: &str, width: usize) -> Vec<String> {
     for word in value.split_whitespace() {
         let word_len = word.chars().count();
         let current_len = current.chars().count();
-        let needed = if current.is_empty() { word_len } else { current_len + 1 + word_len };
+        let needed = if current.is_empty() {
+            word_len
+        } else {
+            current_len + 1 + word_len
+        };
 
         if needed <= max_width {
             if !current.is_empty() {
@@ -868,24 +1115,6 @@ fn draw_text(canvas: &mut [Vec<char>], x: usize, y: usize, text: &str) {
     }
 }
 
-fn draw_vertical(canvas: &mut [Vec<char>], x: usize, y1: usize, y2: usize) {
-    for y in y1..=y2 {
-        put_char(canvas, x, y, '|');
-    }
-}
-
-fn draw_horizontal(canvas: &mut [Vec<char>], x1: usize, x2: usize, y: usize) {
-    let start = x1.min(x2);
-    let end = x1.max(x2);
-    for x in start..=end {
-        if x == x1 || x == x2 {
-            put_char(canvas, x, y, '+');
-        } else {
-            put_char(canvas, x, y, '-');
-        }
-    }
-}
-
 fn put_char(canvas: &mut [Vec<char>], x: usize, y: usize, ch: char) {
     if let Some(row) = canvas.get_mut(y) {
         if let Some(cell) = row.get_mut(x) {
@@ -900,47 +1129,16 @@ fn trim_canvas(canvas: Vec<Vec<char>>) -> Vec<String> {
         .map(|row| row.into_iter().collect::<String>())
         .collect::<Vec<_>>();
 
-    while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+    while lines
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
         lines.pop();
     }
 
-    lines.into_iter().map(|line| line.trim_end().to_string()).collect()
-}
-
-fn render_linear_chain_boxes(chain: &[String]) -> Vec<(PreviewLineKind, String)> {
-    let max_width = chain
-        .iter()
-        .map(|node| node.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(8);
-
-    let inner_width = max_width + 2;
-    let top = format!("+{}+", "-".repeat(inner_width));
-    let bottom = top.clone();
-    let arrow_pad = (top.len().saturating_sub(1)) / 2;
-
-    let mut lines = Vec::new();
-    for (index, node) in chain.iter().enumerate() {
-        let padding = inner_width.saturating_sub(node.chars().count());
-        let right_padding = padding.saturating_sub(1);
-        let content = format!("| {}{}|", node, " ".repeat(right_padding));
-
-        lines.push((PreviewLineKind::MermaidEdge, top.clone()));
-        lines.push((PreviewLineKind::MermaidEdge, content));
-        lines.push((PreviewLineKind::MermaidEdge, bottom.clone()));
-
-        if index + 1 < chain.len() {
-            lines.push((
-                PreviewLineKind::MermaidEdge,
-                format!("{}|", " ".repeat(arrow_pad)),
-            ));
-            lines.push((
-                PreviewLineKind::MermaidEdge,
-                format!("{}v", " ".repeat(arrow_pad)),
-            ));
-        }
-    }
-
     lines
+        .into_iter()
+        .map(|line| line.trim_end().to_string())
+        .collect()
 }

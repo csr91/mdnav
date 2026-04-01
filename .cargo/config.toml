@@ -1,0 +1,4 @@
+# Static CRT linking for Windows MSVC — the binary works on any Windows
+# machine without requiring the Visual C++ Redistributable to be installed.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

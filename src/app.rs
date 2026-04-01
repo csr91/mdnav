@@ -18,7 +18,7 @@ use serde_json::json;
 use crate::{
     config::{config_path, AppConfig},
     docs::{collect_markdown_tree, parent_dir_if_within, DocItem},
-    markdown::{load_preview, mermaid_terminal_canvas, MermaidBlock, PreviewDocument},
+    markdown::{load_preview, mermaid_terminal_canvas, MermaidBlock, MermaidCanvas, PreviewDocument},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +49,8 @@ pub enum Overlay {
     MermaidOutput,
     MermaidTerminalView,
     WebLink,
+    Search,
+    Toc,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,9 +88,10 @@ pub struct App {
     pub mermaid_selected_index: usize,
     pub mermaid_output_selected_index: usize,
     pub mermaid_active_index: usize,
-    pub mermaid_terminal_canvas: Vec<String>,
+    pub mermaid_canvas: MermaidCanvas,
     pub mermaid_canvas_x: usize,
     pub mermaid_canvas_y: usize,
+    pub mermaid_selected_node: Option<usize>,
     pub config: AppConfig,
     pub help_section: HelpSection,
     pub web_link_popup: Option<String>,
@@ -98,6 +101,12 @@ pub struct App {
     pub selection: Option<SelectionState>,
     pub running: bool,
     pub status: String,
+    pub search_query: String,
+    pub search_results: Vec<usize>, // indices into items
+    pub search_cursor: usize,       // index into search_results
+    pub toc_entries: Vec<(usize, String)>, // (line_index, heading text)
+    pub toc_cursor: usize,
+    pub preview_link_cursor: Option<usize>, // index into preview.links
 }
 
 impl App {
@@ -132,9 +141,10 @@ impl App {
             mermaid_selected_index: 0,
             mermaid_output_selected_index: 0,
             mermaid_active_index: 0,
-            mermaid_terminal_canvas: Vec::new(),
+            mermaid_canvas: MermaidCanvas::default(),
             mermaid_canvas_x: 0,
             mermaid_canvas_y: 0,
+            mermaid_selected_node: None,
             config,
             help_section: HelpSection::Shortcuts,
             web_link_popup: None,
@@ -144,6 +154,12 @@ impl App {
             selection: None,
             running: true,
             status: String::from("Listo"),
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_cursor: 0,
+            toc_entries: Vec::new(),
+            toc_cursor: 0,
+            preview_link_cursor: None,
         })
     }
 
@@ -168,12 +184,18 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
             KeyCode::Char(')') => self.toggle_fullscreen(),
             KeyCode::Char('M') => self.open_mermaid_flow()?,
-            KeyCode::Right | KeyCode::Enter => self.activate_selected()?,
+            KeyCode::Right => self.activate_selected()?,
+            KeyCode::Enter if self.focus == Focus::Preview => self.follow_active_link()?,
+            KeyCode::Enter => self.activate_selected()?,
             KeyCode::Left | KeyCode::Backspace => self.collapse_or_parent()?,
             KeyCode::Char('j') if self.focus == Focus::Preview => self.scroll_preview(1),
             KeyCode::Char('k') if self.focus == Focus::Preview => self.scroll_preview(-1),
             KeyCode::Char('.') if self.focus == Focus::Preview => self.scroll_preview(1),
             KeyCode::Char(',') if self.focus == Focus::Preview => self.scroll_preview(-1),
+            KeyCode::PageDown if self.focus == Focus::Preview => self.scroll_preview(20),
+            KeyCode::PageUp if self.focus == Focus::Preview => self.scroll_preview(-20),
+            KeyCode::Char(']') if self.focus == Focus::Preview => self.move_link_cursor(1),
+            KeyCode::Char('[') if self.focus == Focus::Preview => self.move_link_cursor(-1),
             KeyCode::Char('Y') => self.toggle_selection_mode(),
             KeyCode::Char('E') => self.edit_target_in_nano()?,
             KeyCode::Char('!') => self.set_split_level(1),
@@ -182,6 +204,8 @@ impl App {
             KeyCode::Char('$') => self.set_split_level(4),
             KeyCode::Char('%') => self.set_split_level(5),
             KeyCode::Char('G') => self.queue_cd_to_target_dir(),
+            KeyCode::Char('/') => self.open_search(),
+            KeyCode::Char('T') => self.open_toc(),
             _ => {}
         }
 
@@ -256,6 +280,9 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('M') => {
                     self.close_overlay("Vista Mermaid cerrada")
                 }
+                KeyCode::Tab => self.cycle_mermaid_node(true),
+                KeyCode::BackTab => self.cycle_mermaid_node(false),
+                KeyCode::Enter => self.open_selected_node_url()?,
                 KeyCode::Up | KeyCode::Char('k') => self.pan_mermaid(0, -1),
                 KeyCode::Down | KeyCode::Char('j') => self.pan_mermaid(0, 1),
                 KeyCode::Left | KeyCode::Char('h') => self.pan_mermaid(-4, 0),
@@ -266,6 +293,35 @@ impl App {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                     self.web_link_popup = None;
                     self.close_overlay("Popup de link cerrado");
+                }
+                _ => {}
+            },
+            Overlay::Toc => match key.code {
+                KeyCode::Esc | KeyCode::Char('T') | KeyCode::Char('q') => {
+                    self.close_overlay("TOC cerrado")
+                }
+                KeyCode::Up => {
+                    self.toc_cursor = self.toc_cursor.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    self.toc_cursor =
+                        (self.toc_cursor + 1).min(self.toc_entries.len().saturating_sub(1));
+                }
+                KeyCode::Enter => self.jump_to_toc_entry(),
+                _ => {}
+            },
+            Overlay::Search => match key.code {
+                KeyCode::Esc => self.close_search(),
+                KeyCode::Enter => self.confirm_search(),
+                KeyCode::Backspace => {
+                    self.search_query.pop();
+                    self.update_search_results();
+                }
+                KeyCode::Down => self.move_search_cursor(1),
+                KeyCode::Up => self.move_search_cursor(-1),
+                KeyCode::Char(c) => {
+                    self.search_query.push(c);
+                    self.update_search_results();
                 }
                 _ => {}
             },
@@ -292,17 +348,102 @@ impl App {
 
     fn pan_mermaid(&mut self, dx: isize, dy: isize) {
         let max_x = self
-            .mermaid_terminal_canvas
+            .mermaid_canvas
+            .lines
             .iter()
             .map(|line| line.chars().count())
             .max()
             .unwrap_or(0);
-        let max_y = self.mermaid_terminal_canvas.len().saturating_sub(1);
+        let max_y = self.mermaid_canvas.lines.len().saturating_sub(1);
 
         self.mermaid_canvas_x =
             ((self.mermaid_canvas_x as isize + dx).clamp(0, max_x as isize)) as usize;
         self.mermaid_canvas_y =
             ((self.mermaid_canvas_y as isize + dy).clamp(0, max_y as isize)) as usize;
+    }
+
+    fn cycle_mermaid_node(&mut self, forward: bool) {
+        let n = self.mermaid_canvas.nodes.len();
+        if n == 0 {
+            return;
+        }
+        self.mermaid_selected_node = Some(match self.mermaid_selected_node {
+            None => {
+                if forward {
+                    0
+                } else {
+                    n - 1
+                }
+            }
+            Some(i) => {
+                if forward {
+                    (i + 1) % n
+                } else if i == 0 {
+                    n - 1
+                } else {
+                    i - 1
+                }
+            }
+        });
+        self.scroll_to_selected_node();
+        if let Some(idx) = self.mermaid_selected_node {
+            if let Some(node) = self.mermaid_canvas.nodes.get(idx) {
+                self.status = if node.url.is_some() {
+                    format!("Nodo: {} [Enter para abrir link]", node.label)
+                } else {
+                    format!("Nodo: {}", node.label)
+                };
+            }
+        }
+    }
+
+    fn scroll_to_selected_node(&mut self) {
+        let Some(idx) = self.mermaid_selected_node else {
+            return;
+        };
+        let Some(node) = self.mermaid_canvas.nodes.get(idx) else {
+            return;
+        };
+        // Scroll so the node is visible with a small margin
+        let margin_x = 4usize;
+        let margin_y = 2usize;
+        if node.x < self.mermaid_canvas_x + margin_x {
+            self.mermaid_canvas_x = node.x.saturating_sub(margin_x);
+        }
+        if node.y < self.mermaid_canvas_y + margin_y {
+            self.mermaid_canvas_y = node.y.saturating_sub(margin_y);
+        }
+        // Rough right/bottom bound (assume ~80 cols, ~22 rows viewport)
+        if node.x + node.width > self.mermaid_canvas_x + 72 {
+            self.mermaid_canvas_x = node.x + node.width + margin_x;
+        }
+        if node.y + node.height > self.mermaid_canvas_y + 18 {
+            self.mermaid_canvas_y = node.y + node.height + margin_y;
+        }
+    }
+
+    fn open_selected_node_url(&mut self) -> Result<()> {
+        let Some(idx) = self.mermaid_selected_node else {
+            self.status = String::from("Ningún nodo seleccionado");
+            return Ok(());
+        };
+        let Some(node) = self.mermaid_canvas.nodes.get(idx).cloned() else {
+            return Ok(());
+        };
+        let Some(url) = node.url.clone() else {
+            self.status = format!("El nodo '{}' no tiene link", node.label);
+            return Ok(());
+        };
+        let opened = open_url_in_browser(&url)?;
+        let copied = copy_to_clipboard(&url).unwrap_or(false);
+        self.status = if opened && copied {
+            format!("Link abierto y copiado: {url}")
+        } else if opened {
+            format!("Link abierto: {url}")
+        } else {
+            format!("Link: {url}")
+        };
+        Ok(())
     }
 
     fn toggle_focus(&mut self) {
@@ -637,10 +778,12 @@ impl App {
         self.mermaid_selected_index = 0;
         self.mermaid_output_selected_index = 0;
         self.mermaid_active_index = 0;
-        self.mermaid_terminal_canvas.clear();
+        self.mermaid_canvas = MermaidCanvas::default();
         self.mermaid_canvas_x = 0;
         self.mermaid_canvas_y = 0;
+        self.mermaid_selected_node = None;
         self.web_link_popup = None;
+        self.preview_link_cursor = None;
         let link_hint = self
             .preview
             .links
@@ -692,9 +835,10 @@ impl App {
 
         match mode {
             MermaidOutputMode::Terminal => {
-                self.mermaid_terminal_canvas = mermaid_terminal_canvas(&diagram);
+                self.mermaid_canvas = mermaid_terminal_canvas(&diagram);
                 self.mermaid_canvas_x = 0;
                 self.mermaid_canvas_y = 0;
+                self.mermaid_selected_node = None;
                 self.overlay = Overlay::MermaidTerminalView;
                 self.status = format!("Vista terminal Mermaid: {}", diagram.title);
             }
@@ -726,6 +870,142 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn move_link_cursor(&mut self, delta: isize) {
+        let n = self.preview.links.len();
+        if n == 0 {
+            self.status = String::from("No hay links en este archivo");
+            return;
+        }
+        self.preview_link_cursor = Some(match self.preview_link_cursor {
+            None => {
+                if delta > 0 { 0 } else { n - 1 }
+            }
+            Some(i) => ((i as isize + delta).rem_euclid(n as isize)) as usize,
+        });
+        if let Some(idx) = self.preview_link_cursor {
+            if let Some(link) = self.preview.links.get(idx) {
+                self.preview_scroll = link.line_index;
+                let kind = if link.resolved.is_some() { "interno" } else { "externo" };
+                self.status = format!(
+                    "Link {}/{}: {} → {} ({kind})  Enter=abrir",
+                    idx + 1, n, link.label, link.raw_target
+                );
+            }
+        }
+    }
+
+    fn follow_active_link(&mut self) -> Result<()> {
+        let Some(idx) = self.preview_link_cursor else {
+            return self.activate_selected();
+        };
+        let Some(link) = self.preview.links.get(idx).cloned() else {
+            return Ok(());
+        };
+
+        if let Some(resolved) = link.resolved {
+            let mut current = resolved.parent().map(|p| p.to_path_buf());
+            while let Some(dir) = current {
+                if dir.starts_with(&self.root) {
+                    self.expanded_dirs.insert(dir.clone());
+                    current = dir.parent().map(|p| p.to_path_buf());
+                } else {
+                    break;
+                }
+            }
+            self.reload_items()?;
+            if let Some(index) = self.items.iter().position(|item| item.path == resolved) {
+                self.selected_index = index;
+            }
+            self.open_file(resolved)?;
+        } else {
+            open_url_in_browser(&link.raw_target)?;
+            self.status = format!("Link externo abierto: {}", link.raw_target);
+        }
+        Ok(())
+    }
+
+    fn open_toc(&mut self) {
+        use crate::markdown::PreviewLineKind;
+        self.toc_entries = self
+            .preview
+            .lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                if let PreviewLineKind::Heading(_) = line.kind {
+                    Some((i, line.text.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if self.toc_entries.is_empty() {
+            self.status = String::from("No hay headings en este archivo");
+            return;
+        }
+        self.toc_cursor = 0;
+        self.overlay = Overlay::Toc;
+        self.status = format!("{} headings encontrados", self.toc_entries.len());
+    }
+
+    fn jump_to_toc_entry(&mut self) {
+        if let Some(&(line_index, _)) = self.toc_entries.get(self.toc_cursor) {
+            self.preview_scroll = line_index;
+            self.focus = Focus::Preview;
+        }
+        self.close_overlay("TOC: saltando a heading");
+    }
+
+    fn open_search(&mut self) {
+        self.search_query.clear();
+        self.search_results.clear();
+        self.search_cursor = 0;
+        self.overlay = Overlay::Search;
+        self.status = String::from("Buscar: escribe para filtrar");
+    }
+
+    fn update_search_results(&mut self) {
+        let query = self.search_query.to_lowercase();
+        self.search_results = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.name.to_lowercase().contains(&query))
+            .map(|(i, _)| i)
+            .collect();
+        self.search_cursor = 0;
+        self.status = format!(
+            "Buscar: \"{}\" — {} resultado(s)",
+            self.search_query,
+            self.search_results.len()
+        );
+    }
+
+    fn move_search_cursor(&mut self, delta: isize) {
+        if self.search_results.is_empty() {
+            return;
+        }
+        let n = self.search_results.len() as isize;
+        self.search_cursor =
+            ((self.search_cursor as isize + delta).rem_euclid(n)) as usize;
+    }
+
+    fn confirm_search(&mut self) {
+        if let Some(&item_index) = self.search_results.get(self.search_cursor) {
+            self.selected_index = item_index;
+            self.focus = Focus::Tree;
+        }
+        self.close_search();
+    }
+
+    fn close_search(&mut self) {
+        self.search_query.clear();
+        self.search_results.clear();
+        self.overlay = Overlay::None;
+        self.status = String::from("Busqueda cerrada");
     }
 }
 

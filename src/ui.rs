@@ -49,6 +49,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::MermaidOutput => render_mermaid_output_popup(frame, app),
         Overlay::MermaidTerminalView => render_mermaid_terminal_view(frame, app),
         Overlay::WebLink => render_web_link_popup(frame, app),
+        Overlay::Search => render_search_popup(frame, app),
+        Overlay::Toc => render_toc_popup(frame, app),
         Overlay::None => {}
     }
 }
@@ -209,12 +211,20 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
     let lines = if app.preview.lines.is_empty() {
         vec![Line::from("Selecciona un archivo Markdown para ver el contenido")]
     } else {
+        // Line index of the active link (if any)
+        let active_link_line = app
+            .preview_link_cursor
+            .and_then(|i| app.preview.links.get(i))
+            .map(|l| l.line_index);
+
         app.preview
             .lines
             .iter()
             .enumerate()
             .skip(app.preview_scroll)
-            .map(|(index, line)| styled_preview_line(line, app.selection, index))
+            .map(|(index, line)| {
+                styled_preview_line(line, app.selection, index, active_link_line)
+            })
             .collect::<Vec<_>>()
     };
 
@@ -322,33 +332,89 @@ fn render_mermaid_terminal_view(frame: &mut Frame, app: &App) {
 
     let inner_width = area.width.saturating_sub(2) as usize;
     let inner_height = area.height.saturating_sub(2) as usize;
-    let lines = mermaid_canvas_viewport(
-        &app.mermaid_terminal_canvas,
-        app.mermaid_canvas_x,
-        app.mermaid_canvas_y,
-        inner_width,
-        inner_height,
-    )
-    .into_iter()
-    .map(|line| {
-        Line::from(Span::styled(
-            line,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ))
-    })
-    .collect::<Vec<_>>();
+
+    let selected_node = app
+        .mermaid_selected_node
+        .and_then(|i| app.mermaid_canvas.nodes.get(i));
+
+    let normal_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let highlight_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+
+    let lines = (0..inner_height)
+        .map(|row| {
+            let canvas_y = app.mermaid_canvas_y + row;
+            let source = app
+                .mermaid_canvas
+                .lines
+                .get(canvas_y)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+
+            let chars: Vec<char> = source
+                .chars()
+                .skip(app.mermaid_canvas_x)
+                .take(inner_width)
+                .collect();
+
+            // If there's a selected node and this row intersects its box, build colored spans
+            if let Some(node) = selected_node {
+                if canvas_y >= node.y && canvas_y < node.y + node.height {
+                    let node_col_start = node.x.saturating_sub(app.mermaid_canvas_x);
+                    let node_col_end =
+                        (node.x + node.width).saturating_sub(app.mermaid_canvas_x);
+
+                    if node_col_start < inner_width {
+                        let before: String = chars[..node_col_start.min(chars.len())].iter().collect();
+                        let hl_start = node_col_start.min(chars.len());
+                        let hl_end = node_col_end.min(chars.len());
+                        let highlighted: String = chars[hl_start..hl_end].iter().collect();
+                        let after: String = chars[hl_end..].iter().collect();
+
+                        let mut spans = Vec::new();
+                        if !before.is_empty() {
+                            spans.push(Span::styled(before, normal_style));
+                        }
+                        if !highlighted.is_empty() {
+                            spans.push(Span::styled(highlighted, highlight_style));
+                        }
+                        if !after.is_empty() {
+                            spans.push(Span::styled(after, normal_style));
+                        }
+                        return Line::from(spans);
+                    }
+                }
+            }
+
+            Line::from(Span::styled(chars.iter().collect::<String>(), normal_style))
+        })
+        .collect::<Vec<_>>();
+
+    let node_hint = selected_node
+        .map(|n| {
+            if n.url.is_some() {
+                format!("  │  {} [Enter=link]", n.label)
+            } else {
+                format!("  │  {}", n.label)
+            }
+        })
+        .unwrap_or_default();
+
+    let title = format!(
+        "Mermaid [Esc] hjkl/arrows=pan  Tab=nodo{}",
+        node_hint
+    );
 
     let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
-                .title("Mermaid terminal view [Esc]  arrows/hjkl move")
+                .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::LightCyan)),
         )
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: false });
+        .alignment(Alignment::Left);
 
     frame.render_widget(paragraph, area);
 }
@@ -479,9 +545,13 @@ fn shortcut_lines() -> Vec<Line<'static>> {
         Line::from(""),
         Line::from(vec![Span::styled("Preview", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
         Line::from(""),
-        shortcut_line(", / .", "scroll del documento"),
+        shortcut_line(", / .", "scroll del documento (línea a línea)"),
+        shortcut_line("PgUp / PgDn", "scroll del documento (salto rápido)"),
         shortcut_line("Arrows", "mover cursor en modo seleccion"),
         shortcut_line("Shift+Arrows", "extender seleccion en modo seleccion"),
+        shortcut_line("/", "buscar archivo en el arbol"),
+        shortcut_line("Shift+T", "tabla de contenidos del archivo"),
+        shortcut_line("[ / ]", "navegar links del preview  Enter=abrir"),
         shortcut_line("Shift+M", "abrir acciones Mermaid"),
         shortcut_line("?", "abrir o cerrar este menu"),
     ]
@@ -537,8 +607,15 @@ fn styled_preview_line(
     line: &PreviewLine,
     selection: Option<crate::app::SelectionState>,
     line_index: usize,
+    active_link_line: Option<usize>,
 ) -> Line<'static> {
-    let base_style = preview_line_style(&line.kind);
+    let mut base_style = preview_line_style(&line.kind);
+
+    // Highlight the line where the active link lives
+    if active_link_line == Some(line_index) {
+        base_style = base_style.bg(Color::DarkGray);
+    }
+
     let selected_range = selection_range_for_line(selection, line_index, line.text.chars().count());
 
     match line.kind {
@@ -573,9 +650,6 @@ fn preview_line_style(kind: &PreviewLineKind) -> Style {
             .fg(Color::Magenta)
             .add_modifier(Modifier::BOLD),
         PreviewLineKind::CodeFence => Style::default().fg(Color::LightBlue),
-        PreviewLineKind::MermaidEdge => Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
         PreviewLineKind::MermaidTitle => Style::default()
             .fg(Color::LightCyan)
             .add_modifier(Modifier::BOLD),
@@ -672,27 +746,6 @@ fn preview_cursor_position(app: &App, area: Rect, cursor: PreviewCursor) -> Opti
     ))
 }
 
-fn mermaid_canvas_viewport(
-    canvas: &[String],
-    offset_x: usize,
-    offset_y: usize,
-    width: usize,
-    height: usize,
-) -> Vec<String> {
-    let mut view = Vec::with_capacity(height);
-
-    for row in 0..height {
-        let source_index = offset_y + row;
-        if let Some(source) = canvas.get(source_index) {
-            let line = source.chars().skip(offset_x).take(width).collect::<String>();
-            view.push(line);
-        } else {
-            view.push(String::new());
-        }
-    }
-
-    view
-}
 
 fn tree_window(total_items: usize, selected_index: usize, visible_height: usize) -> (usize, usize, usize) {
     if total_items <= visible_height {
@@ -710,6 +763,102 @@ fn tree_window(total_items: usize, selected_index: usize, visible_height: usize)
 
     let local_selected = selected_index.saturating_sub(start);
     (start, end, local_selected)
+}
+
+fn render_toc_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(60, 60, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let items = app
+        .toc_entries
+        .iter()
+        .map(|(_, text)| {
+            // Indent by heading level (# count at start)
+            let level = text.chars().take_while(|&c| c == '#').count();
+            let label = text.trim_start_matches('#').trim();
+            let indent = "  ".repeat(level.saturating_sub(1));
+            ListItem::new(Line::from(format!("{indent}{label}")))
+        })
+        .collect::<Vec<_>>();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title("Tabla de contenidos  Enter=ir | T/Esc=cerrar")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::LightGreen)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Green)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default();
+    state.select(Some(app.toc_cursor));
+    frame.render_stateful_widget(list, popup_area, &mut state);
+}
+
+fn render_search_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(60, 60, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(popup_area);
+
+    // Input box
+    let input = Paragraph::new(format!("/{}", app.search_query))
+        .block(
+            Block::default()
+                .title("Buscar archivo")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(input, sections[0]);
+
+    // Results list
+    let items = if app.search_results.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "Sin resultados",
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        app.search_results
+            .iter()
+            .filter_map(|&i| app.items.get(i))
+            .map(|item| {
+                let indent = "  ".repeat(item.depth);
+                let marker = if item.is_dir { ">" } else { "-" };
+                ListItem::new(Line::from(format!("{indent}{marker} {}", item.name)))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(format!("Resultados  Up/Down navegar | Enter abrir | Esc cerrar"))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default();
+    if !app.search_results.is_empty() {
+        state.select(Some(app.search_cursor));
+    }
+    frame.render_stateful_widget(list, sections[1], &mut state);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

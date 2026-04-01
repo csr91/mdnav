@@ -20,6 +20,7 @@ pub struct LinkTarget {
     pub label: String,
     pub raw_target: String,
     pub resolved: Option<PathBuf>,
+    pub line_index: usize, // approximate line in rendered preview
 }
 
 pub fn collect_markdown_tree(
