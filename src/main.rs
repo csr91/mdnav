@@ -17,7 +17,16 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use crate::{app::App, config::AppConfig};
 
 fn main() -> Result<()> {
-    let docs_root = resolve_docs_root()?;
+    match resolve_command()? {
+        CliCommand::Run { docs_root } => run_cli(docs_root),
+        CliCommand::ShellHook { shell } => {
+            print!("{}", shell_hook_script(&shell)?);
+            Ok(())
+        }
+    }
+}
+
+fn run_cli(docs_root: PathBuf) -> Result<()> {
     let config = AppConfig::load()?;
     let mut resume_path: Option<PathBuf> = None;
 
@@ -38,19 +47,35 @@ fn main() -> Result<()> {
     }
 }
 
-fn resolve_docs_root() -> Result<PathBuf> {
-    let arg = env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+enum CliCommand {
+    Run { docs_root: PathBuf },
+    ShellHook { shell: String },
+}
 
-    if arg.exists() {
-        Ok(arg)
-    } else {
-        Err(anyhow::anyhow!(
-            "La ruta no existe: {}. Pasa una carpeta con Markdown o ejecuta mdnav desde el directorio que quieras explorar.",
-            arg.display()
-        ))
+fn resolve_command() -> Result<CliCommand> {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+
+    match args.as_slice() {
+        [] => Ok(CliCommand::Run {
+            docs_root: PathBuf::from("."),
+        }),
+        [flag, shell] if flag == "--shell-hook" => Ok(CliCommand::ShellHook {
+            shell: shell.to_string(),
+        }),
+        [path] => {
+            let docs_root = PathBuf::from(path);
+            if docs_root.exists() {
+                Ok(CliCommand::Run { docs_root })
+            } else {
+                Err(anyhow::anyhow!(
+                    "La ruta no existe: {}. Pasa una carpeta con Markdown o ejecuta mdnav desde el directorio que quieras explorar.",
+                    docs_root.display()
+                ))
+            }
+        }
+        _ => Err(anyhow::anyhow!(
+            "Uso: mdnav [ruta] | mdnav --shell-hook <bash|zsh>"
+        )),
     }
 }
 
@@ -112,5 +137,32 @@ fn open_in_nano(path: &PathBuf) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow::anyhow!("nano termino con estado {status}"))
+    }
+}
+
+fn shell_hook_script(shell: &str) -> Result<String> {
+    match shell {
+        "bash" | "zsh" => Ok(String::from(
+            r#"mdnav() {
+  local tmp exit_code target
+  tmp="$(mktemp "${TMPDIR:-/tmp}/mdnav-cd.XXXXXX")" || return 1
+  MDNAV_CD_FILE="$tmp" command mdnav "$@"
+  exit_code=$?
+  if [ -s "$tmp" ]; then
+    target="$(cat "$tmp")"
+    rm -f "$tmp"
+    if [ -n "$target" ]; then
+      cd "$target" || return $exit_code
+    fi
+  else
+    rm -f "$tmp"
+  fi
+  return $exit_code
+}
+"#,
+        )),
+        _ => Err(anyhow::anyhow!(
+            "Shell no soportada: {shell}. Usa bash o zsh."
+        )),
     }
 }

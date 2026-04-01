@@ -43,6 +43,24 @@ mdnav
 
 Si no pasas argumentos, `mdnav` abre el directorio actual.
 
+## Integracion de shell
+
+Para que `Shift+G` pueda cambiar el directorio de tu shell al salir, integra el hook oficial:
+
+En Bash:
+
+```bash
+source <(mdnav --shell-hook bash)
+```
+
+En Zsh:
+
+```zsh
+source <(mdnav --shell-hook zsh)
+```
+
+Si queres dejarlo permanente, agrega una de esas lineas a tu `~/.bashrc` o `~/.zshrc`.
+
 ## Uso rapido
 
 Ejecutar con la carpeta demo incluida:
@@ -136,4 +154,5 @@ dist/mdnav-linux-x86_64.tar.gz
 `mdnav` puede preparar un directorio destino con `Shift+G`.
 
 - Si lo ejecutas con [`run-mdnav.ps1`](c:\Users\cesar\OneDrive\Documents\Desarrollos\mdnav\run-mdnav.ps1), al cerrar la app PowerShell hace `cd` automaticamente a ese directorio.
-- Si lo ejecutas directo como binario, `mdnav` imprime el comando `cd` sugerido al salir.
+- Si lo ejecutas en Bash o Zsh con `source <(mdnav --shell-hook bash)` o `source <(mdnav --shell-hook zsh)`, el `cd` se aplica automaticamente.
+- Si lo ejecutas directo como binario sin hook, `mdnav` imprime el comando `cd` sugerido al salir.

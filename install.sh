@@ -43,3 +43,7 @@ case ":$PATH:" in
 esac
 
 echo "Instalacion lista."
+echo
+echo "Para habilitar cd automatico con Shift+G:"
+echo "  bash: echo 'source <(mdnav --shell-hook bash)' >> ~/.bashrc"
+echo "  zsh:  echo 'source <(mdnav --shell-hook zsh)' >> ~/.zshrc"
