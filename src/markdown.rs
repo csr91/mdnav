@@ -311,10 +311,7 @@ fn simplify_mermaid_edge(line: &str, aliases: &HashMap<String, String>) -> Optio
         return None;
     }
 
-    let normalized = sanitize_mermaid_line(line)
-        .replace("-->", "->")
-        .replace("---", "->")
-        .replace("--", "->");
+    let normalized = normalize_mermaid_edge(line);
 
     let parts = normalized.split("->").map(str::trim).collect::<Vec<_>>();
     if parts.len() < 2 {
@@ -332,6 +329,7 @@ fn parse_mermaid_node(node: &str, aliases: &HashMap<String, String>) -> String {
     if let Some(label) = extract_between(trimmed, '[', ']')
         .or_else(|| extract_between(trimmed, '{', '}'))
         .or_else(|| extract_between(trimmed, '(', ')'))
+        .or_else(|| extract_odd_shape_label(trimmed))
     {
         return cleanup_mermaid_label(&label);
     }
@@ -357,8 +355,12 @@ fn cleanup_mermaid_label(value: &str) -> String {
         .replace("<br/>", " / ")
         .replace("<br>", " / ")
         .replace(['[', ']', '{', '}', '(', ')'], " ")
+        .replace("%%", " ")
         .replace('"', "")
         .replace('\'', "")
+        .replace("==", " ")
+        .replace("-.", " ")
+        .replace("..", " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
@@ -389,6 +391,13 @@ fn extract_mermaid_alias(value: &str) -> Option<(String, String)> {
     let trimmed = value.trim();
     let start = trimmed.find(['[', '{', '('])?;
     if start == 0 {
+        if let Some(label) = extract_odd_shape_label(trimmed) {
+            let marker = trimmed.find('>')?;
+            let id = trimmed[..marker].trim();
+            if !id.is_empty() {
+                return Some((id.to_string(), cleanup_mermaid_label(&label)));
+            }
+        }
         return None;
     }
 
@@ -402,6 +411,28 @@ fn extract_mermaid_alias(value: &str) -> Option<(String, String)> {
         .or_else(|| extract_between(trimmed, '(', ')'))?;
 
     Some((id.to_string(), cleanup_mermaid_label(&label)))
+}
+
+fn extract_odd_shape_label(value: &str) -> Option<String> {
+    let marker = value.find('>')?;
+    let end = value.rfind(']')?;
+    if end <= marker {
+        return None;
+    }
+    Some(value[marker + 1..end].to_string())
+}
+
+fn normalize_mermaid_edge(line: &str) -> String {
+    let mut normalized = sanitize_mermaid_line(line);
+
+    for pattern in ["==>", "-.->", "-->", "---", "--"] {
+        normalized = normalized.replace(pattern, "->");
+    }
+
+    normalized
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn render_mermaid_ascii(source: &str, edges: &[(String, String)]) -> Vec<(PreviewLineKind, String)> {
@@ -581,62 +612,87 @@ fn render_mermaid_canvas_from_edges(edges: &[(String, String)]) -> Vec<String> {
     let nodes = collect_nodes(edges);
     let levels = compute_levels(edges, &nodes);
     let grouped = group_by_level(&levels, &nodes);
-    let node_widths = nodes
+    let node_layouts = nodes
         .iter()
         .map(|node| {
-            let width = node.chars().count().clamp(8, 36) + 4;
-            (node.clone(), width)
+            let lines = wrap_label_lines(node, 24);
+            let inner_width = lines
+                .iter()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(8)
+                .clamp(8, 24);
+            let width = inner_width + 4;
+            let height = lines.len() + 2;
+            (node.clone(), (width, height, lines))
         })
         .collect::<HashMap<_, _>>();
-    let x_gap = 6usize;
-    let y_gap = 4usize;
+    let x_gap = 4usize;
+    let y_gap = 2usize;
     let left_margin = 2usize;
     let top_margin = 1usize;
 
     let mut level_widths = BTreeMap::new();
+    let mut level_heights = BTreeMap::new();
     for (level, level_nodes) in &grouped {
         let content_width = level_nodes
             .iter()
-            .map(|node| node_widths.get(node).copied().unwrap_or(12))
+            .map(|node| node_layouts.get(node).map(|(width, _, _)| *width).unwrap_or(12))
             .sum::<usize>()
             + level_nodes.len().saturating_sub(1) * x_gap;
         level_widths.insert(*level, content_width);
+
+        let level_height = level_nodes
+            .iter()
+            .map(|node| node_layouts.get(node).map(|(_, height, _)| *height).unwrap_or(3))
+            .max()
+            .unwrap_or(3);
+        level_heights.insert(*level, level_height);
     }
 
     let canvas_width = left_margin * 2 + level_widths.values().copied().max().unwrap_or(40).max(40);
     let max_level = levels.values().copied().max().unwrap_or(0);
-    let canvas_height = top_margin * 2 + (max_level + 1) * (3 + y_gap);
+    let content_height = (0..=max_level)
+        .map(|level| level_heights.get(&level).copied().unwrap_or(3) + y_gap)
+        .sum::<usize>();
+    let canvas_height = top_margin * 2 + content_height;
 
     let mut canvas = vec![vec![' '; canvas_width]; canvas_height.max(12)];
-    let mut positions: HashMap<String, (usize, usize, usize)> = HashMap::new();
+    let mut positions: HashMap<String, (usize, usize, usize, usize)> = HashMap::new();
+    let mut current_y = top_margin;
 
     for (level, level_nodes) in grouped {
         let content_width = level_widths.get(&level).copied().unwrap_or(0);
         let start_x = left_margin + (canvas_width.saturating_sub(content_width + left_margin * 2)) / 2;
-        let y = top_margin + level * (3 + y_gap);
+        let y = current_y;
         let mut cursor_x = start_x;
 
         for node in &level_nodes {
-            let width = node_widths.get(node).copied().unwrap_or(12);
-            draw_box(&mut canvas, cursor_x, y, width, node);
-            positions.insert(node.clone(), (cursor_x, y, width));
+            let (width, height, lines) = node_layouts
+                .get(node)
+                .cloned()
+                .unwrap_or_else(|| (12, 3, vec![node.clone()]));
+            draw_box(&mut canvas, cursor_x, y, width, &lines);
+            positions.insert(node.clone(), (cursor_x, y, width, height));
             cursor_x += width + x_gap;
         }
+
+        current_y += level_heights.get(&level).copied().unwrap_or(3) + y_gap;
     }
 
     for (from, to) in edges {
-        let Some(&(from_x, from_y, from_width)) = positions.get(from) else {
+        let Some(&(from_x, from_y, from_width, from_height)) = positions.get(from) else {
             continue;
         };
-        let Some(&(to_x, to_y, to_width)) = positions.get(to) else {
+        let Some(&(to_x, to_y, to_width, _to_height)) = positions.get(to) else {
             continue;
         };
 
         let from_center = from_x + from_width / 2;
         let to_center = to_x + to_width / 2;
-        let start_y = from_y + 2;
+        let start_y = from_y + from_height.saturating_sub(1);
         let end_y = to_y;
-        let mid_y = start_y + (end_y.saturating_sub(start_y)) / 2;
+        let mid_y = start_y + 1 + (end_y.saturating_sub(start_y + 1)) / 2;
 
         if start_y + 1 <= mid_y {
             draw_vertical(&mut canvas, from_center, start_y + 1, mid_y);
@@ -716,19 +772,79 @@ fn group_by_level(levels: &HashMap<String, usize>, nodes: &[String]) -> BTreeMap
     grouped
 }
 
-fn draw_box(canvas: &mut [Vec<char>], x: usize, y: usize, width: usize, label: &str) {
+fn draw_box_label(canvas: &mut [Vec<char>], x: usize, y: usize, width: usize, label: &str) {
+    let lines = wrap_label_lines(label, width.saturating_sub(4).max(8));
+    draw_box(canvas, x, y, width, &lines);
+}
+
+fn draw_box(canvas: &mut [Vec<char>], x: usize, y: usize, width: usize, lines: &[String]) {
     let top = format!("+{}+", "-".repeat(width.saturating_sub(2)));
     let bottom = top.clone();
-    let inner = width.saturating_sub(2);
-    let text = fit_text(label, inner);
-    let padding = inner.saturating_sub(text.chars().count());
-    let left_pad = padding / 2;
-    let right_pad = padding.saturating_sub(left_pad);
-    let middle = format!("|{}{}{}|", " ".repeat(left_pad), text, " ".repeat(right_pad));
 
     draw_text(canvas, x, y, &top);
-    draw_text(canvas, x, y + 1, &middle);
-    draw_text(canvas, x, y + 2, &bottom);
+    for (index, line) in lines.iter().enumerate() {
+        draw_text(canvas, x, y + 1 + index, &box_line(width, line));
+    }
+    draw_text(canvas, x, y + 1 + lines.len(), &bottom);
+}
+
+fn box_line(width: usize, text: &str) -> String {
+    let inner = width.saturating_sub(2);
+    let content = fit_text(text, inner);
+    let padding = inner.saturating_sub(content.chars().count());
+    let left_pad = padding / 2;
+    let right_pad = padding.saturating_sub(left_pad);
+    format!("|{}{}{}|", " ".repeat(left_pad), content, " ".repeat(right_pad))
+}
+
+fn wrap_label_lines(value: &str, width: usize) -> Vec<String> {
+    let max_width = width.max(8);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in value.split_whitespace() {
+        let word_len = word.chars().count();
+        let current_len = current.chars().count();
+        let needed = if current.is_empty() { word_len } else { current_len + 1 + word_len };
+
+        if needed <= max_width {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+            continue;
+        }
+
+        if !current.is_empty() {
+            lines.push(current.clone());
+            current.clear();
+        }
+
+        if word_len <= max_width {
+            current.push_str(word);
+        } else {
+            let mut chunk = String::new();
+            for ch in word.chars() {
+                chunk.push(ch);
+                if chunk.chars().count() == max_width.saturating_sub(1) {
+                    chunk.push('~');
+                    lines.push(chunk.clone());
+                    chunk.clear();
+                }
+            }
+            current = chunk;
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
 }
 
 fn fit_text(value: &str, width: usize) -> String {

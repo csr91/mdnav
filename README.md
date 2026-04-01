@@ -123,7 +123,17 @@ dist/mdnav-linux-x86_64.tar.gz
 - `Right` / `Enter`: expandir carpeta o abrir archivo
 - `Left` / `Backspace`: colapsar carpeta o subir al padre
 - `Tab` / `Shift+Tab`: cambiar foco entre arbol y preview
+- `Shift+Y`: marcar o soltar un selector sobre el item actual
+- `Shift+E`: abrir `nano` sobre el archivo actual
+- `Shift+G`: dejar pendiente un `cd` al directorio del item actual
 - `,` / `.`: scroll de preview
-- `Ctrl+Enter`: alternar preview completo
+- `Shift+0`: alternar pantalla completa del panel enfocado
 - `Shift+1..5`: ajustar separacion entre navegacion y preview
 - `q`: salir
+
+## Cambio de directorio al salir
+
+`mdnav` puede preparar un directorio destino con `Shift+G`.
+
+- Si lo ejecutas con [`run-mdnav.ps1`](c:\Users\cesar\OneDrive\Documents\Desarrollos\mdnav\run-mdnav.ps1), al cerrar la app PowerShell hace `cd` automaticamente a ese directorio.
+- Si lo ejecutas directo como binario, `mdnav` imprime el comando `cd` sugerido al salir.

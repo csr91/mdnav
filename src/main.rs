@@ -4,7 +4,7 @@ mod docs;
 mod markdown;
 mod ui;
 
-use std::{env, io, path::PathBuf};
+use std::{env, io, path::PathBuf, process::Command};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -18,10 +18,24 @@ use crate::{app::App, config::AppConfig};
 
 fn main() -> Result<()> {
     let docs_root = resolve_docs_root()?;
-    let mut terminal = setup_terminal()?;
-    let result = run(&mut terminal, docs_root);
-    restore_terminal(&mut terminal)?;
-    result
+    let config = AppConfig::load()?;
+    let mut resume_path: Option<PathBuf> = None;
+
+    loop {
+        let mut terminal = setup_terminal()?;
+        let result = run(&mut terminal, docs_root.clone(), config.clone(), resume_path.take());
+        restore_terminal(&mut terminal)?;
+        let app = result?;
+
+        if let Some(path) = app.pending_external_edit.clone() {
+            open_in_nano(&path)?;
+            resume_path = Some(path);
+            continue;
+        }
+
+        emit_pending_cd(&app);
+        return Ok(());
+    }
 }
 
 fn resolve_docs_root() -> Result<PathBuf> {
@@ -55,9 +69,17 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
     terminal.show_cursor().context("No se pudo restaurar el cursor")
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, docs_root: PathBuf) -> Result<()> {
-    let config = AppConfig::load()?;
+fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    docs_root: PathBuf,
+    config: AppConfig,
+    resume_path: Option<PathBuf>,
+) -> Result<App> {
     let mut app = App::new(docs_root, config)?;
+
+    if let Some(path) = resume_path {
+        app.restore_path_focus(&path)?;
+    }
 
     while app.running {
         terminal.draw(|frame| ui::render(frame, &app))?;
@@ -67,5 +89,28 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, docs_root: PathBuf
         }
     }
 
-    Ok(())
+    Ok(app)
+}
+
+fn emit_pending_cd(app: &App) {
+    let Some(target) = app.pending_cd.as_ref() else {
+        return;
+    };
+
+    if let Ok(file_path) = env::var("MDNAV_CD_FILE") {
+        let _ = std::fs::write(file_path, target.display().to_string());
+        return;
+    }
+
+    println!("mdnav pending cd: {}", target.display());
+    println!("Run this in your shell: cd \"{}\"", target.display());
+}
+
+fn open_in_nano(path: &PathBuf) -> Result<()> {
+    let status = Command::new("nano").arg(path).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("nano termino con estado {status}"))
+    }
 }

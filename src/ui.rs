@@ -3,11 +3,12 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    layout::Position,
     Frame,
 };
 
 use crate::{
-    app::{App, Focus, FullscreenPanel, HelpSection, Overlay},
+    app::{App, Focus, FullscreenPanel, HelpSection, Overlay, PreviewCursor},
     config::config_path,
 };
 use crate::markdown::{PreviewLine, PreviewLineKind};
@@ -36,6 +37,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     let footer = Paragraph::new(Line::from(vec![
         Span::styled("== For Help Type: ? ==", Style::default().fg(Color::Yellow)),
         footer_item_span(app),
+        pending_cd_span(app),
     ]))
     .block(Block::default().borders(Borders::TOP));
 
@@ -69,6 +71,24 @@ fn footer_item_span(app: &App) -> Span<'static> {
     };
 
     Span::styled(item.name.clone(), Style::default().fg(color))
+}
+
+fn pending_cd_span(app: &App) -> Span<'static> {
+    let Some(path) = app.pending_cd.as_ref() else {
+        return Span::raw("");
+    };
+
+    let relative = path.strip_prefix(&app.root).unwrap_or(path);
+    let display = if relative.as_os_str().is_empty() {
+        String::from("/")
+    } else {
+        format!("/{}", relative.display().to_string().replace('\\', "/"))
+    };
+
+    Span::styled(
+        format!("   Go: {display}"),
+        Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+    )
 }
 
 fn split_body(width: u16, area: Rect, split_level: u8) -> Vec<Rect> {
@@ -128,9 +148,14 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 "-"
             };
+            let selector = if app.selector_path.as_ref() == Some(&item.path) {
+                "*"
+            } else {
+                " "
+            };
 
             ListItem::new(Line::from(vec![Span::raw(format!(
-                "{indent}{marker} {}",
+                "{selector}{indent}{marker} {}",
                 item.name
             ))]))
         })
@@ -170,7 +195,11 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
     let title = if app.fullscreen == FullscreenPanel::Preview {
-        "Preview [fullscreen]"
+        if app.selection.is_some() {
+            "Preview [select]"
+        } else {
+            "Preview [fullscreen]"
+        }
     } else if app.focus == Focus::Preview {
         "Preview [focus]"
     } else {
@@ -183,8 +212,9 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
         app.preview
             .lines
             .iter()
+            .enumerate()
             .skip(app.preview_scroll)
-            .map(styled_preview_line)
+            .map(|(index, line)| styled_preview_line(line, app.selection, index))
             .collect::<Vec<_>>()
     };
 
@@ -202,6 +232,12 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     frame.render_widget(paragraph, area);
+
+    if let Some(cursor) = app.selection.map(|selection| selection.cursor) {
+        if let Some(position) = preview_cursor_position(app, area, cursor) {
+            frame.set_cursor_position(position);
+        }
+    }
 }
 
 fn render_mermaid_select_popup(frame: &mut Frame, app: &App) {
@@ -434,6 +470,9 @@ fn shortcut_lines() -> Vec<Line<'static>> {
         Line::from(""),
         shortcut_line("Enter", "abrir archivo o expandir carpeta"),
         shortcut_line("Tab / Shift+Tab", "cambiar foco entre arbol y preview"),
+        shortcut_line("Shift+Y", "activar modo seleccion en preview"),
+        shortcut_line("Shift+E", "abrir nano sobre el archivo actual"),
+        shortcut_line("Shift+G", "dejar pendiente cd al directorio del item"),
         shortcut_line("Shift+0", "pantalla completa del panel enfocado"),
         shortcut_line("Shift+1..5", "ajustar proporcion entre paneles"),
         shortcut_line("q", "salir"),
@@ -441,6 +480,8 @@ fn shortcut_lines() -> Vec<Line<'static>> {
         Line::from(vec![Span::styled("Preview", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
         Line::from(""),
         shortcut_line(", / .", "scroll del documento"),
+        shortcut_line("Arrows", "mover cursor en modo seleccion"),
+        shortcut_line("Shift+Arrows", "extender seleccion en modo seleccion"),
         shortcut_line("Shift+M", "abrir acciones Mermaid"),
         shortcut_line("?", "abrir o cerrar este menu"),
     ]
@@ -492,59 +533,143 @@ fn border_style(is_focused: bool) -> Style {
     }
 }
 
-fn styled_preview_line(line: &PreviewLine) -> Line<'static> {
+fn styled_preview_line(
+    line: &PreviewLine,
+    selection: Option<crate::app::SelectionState>,
+    line_index: usize,
+) -> Line<'static> {
+    let base_style = preview_line_style(&line.kind);
+    let selected_range = selection_range_for_line(selection, line_index, line.text.chars().count());
+
     match line.kind {
         PreviewLineKind::MermaidTitle => {
             if let Some((title, hint)) = line.text.split_once("    ") {
-                Line::from(vec![
-                    Span::styled(
-                        title.to_string(),
-                        Style::default()
-                            .fg(Color::LightCyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("    "),
-                    Span::styled(
-                        hint.to_string(),
-                        Style::default()
-                            .fg(Color::Gray)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ])
+                styled_selected_text(
+                    &format!("{title}    {hint}"),
+                    base_style,
+                    selected_range,
+                )
             } else {
-                Line::from(Span::styled(
-                    line.text.clone(),
-                    Style::default()
-                        .fg(Color::LightCyan)
-                        .add_modifier(Modifier::BOLD),
-                ))
+                styled_selected_text(&line.text, base_style, selected_range)
             }
         }
-        _ => {
-            let style = match line.kind {
-                PreviewLineKind::Normal => Style::default().fg(Color::Gray),
-                PreviewLineKind::Heading(1) => Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-                PreviewLineKind::Heading(2) => Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-                PreviewLineKind::Heading(3) => Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-                PreviewLineKind::Heading(_) => Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-                PreviewLineKind::CodeFence => Style::default().fg(Color::LightBlue),
-                PreviewLineKind::MermaidEdge => Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-                PreviewLineKind::MermaidTitle => unreachable!(),
-            };
-
-            Line::from(Span::styled(line.text.clone(), style))
-        }
+        _ => styled_selected_text(&line.text, base_style, selected_range),
     }
+}
+
+fn preview_line_style(kind: &PreviewLineKind) -> Style {
+    match kind {
+        PreviewLineKind::Normal => Style::default().fg(Color::Gray),
+        PreviewLineKind::Heading(1) => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        PreviewLineKind::Heading(2) => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        PreviewLineKind::Heading(3) => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        PreviewLineKind::Heading(_) => Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+        PreviewLineKind::CodeFence => Style::default().fg(Color::LightBlue),
+        PreviewLineKind::MermaidEdge => Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+        PreviewLineKind::MermaidTitle => Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+fn selection_range_for_line(
+    selection: Option<crate::app::SelectionState>,
+    line_index: usize,
+    line_len: usize,
+) -> Option<(usize, usize)> {
+    let selection = selection?;
+    if selection.anchor == selection.cursor {
+        return None;
+    }
+
+    let (start, end) = normalized_selection_bounds(selection.anchor, selection.cursor);
+    if line_index < start.line || line_index > end.line {
+        return None;
+    }
+
+    let start_col = if line_index == start.line { start.column } else { 0 };
+    let end_col = if line_index == end.line { end.column } else { line_len };
+
+    if start_col == end_col {
+        None
+    } else {
+        Some((start_col.min(line_len), end_col.min(line_len)))
+    }
+}
+
+fn normalized_selection_bounds(left: PreviewCursor, right: PreviewCursor) -> (PreviewCursor, PreviewCursor) {
+    if (left.line, left.column) <= (right.line, right.column) {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
+fn styled_selected_text(text: &str, base: Style, selected: Option<(usize, usize)>) -> Line<'static> {
+    let Some((start, end)) = selected else {
+        return Line::from(Span::styled(text.to_string(), base));
+    };
+
+    let chars = text.chars().collect::<Vec<_>>();
+    let prefix = chars.iter().take(start).collect::<String>();
+    let middle = chars.iter().skip(start).take(end.saturating_sub(start)).collect::<String>();
+    let suffix = chars.iter().skip(end).collect::<String>();
+    let selected_style = base.bg(Color::LightCyan).fg(Color::Black);
+
+    let mut spans = Vec::new();
+    if !prefix.is_empty() {
+        spans.push(Span::styled(prefix, base));
+    }
+    if !middle.is_empty() {
+        spans.push(Span::styled(middle, selected_style));
+    }
+    if !suffix.is_empty() {
+        spans.push(Span::styled(suffix, base));
+    }
+
+    if spans.is_empty() {
+        Line::from(Span::styled(String::new(), base))
+    } else {
+        Line::from(spans)
+    }
+}
+
+fn preview_cursor_position(app: &App, area: Rect, cursor: PreviewCursor) -> Option<Position> {
+    if cursor.line < app.preview_scroll {
+        return None;
+    }
+
+    let offset_y = cursor.line.saturating_sub(app.preview_scroll) as u16;
+    let inner = if app.fullscreen == FullscreenPanel::Preview {
+        area
+    } else {
+        Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(1),
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(2),
+        }
+    };
+
+    if offset_y >= inner.height {
+        return None;
+    }
+
+    let max_x = inner.width.saturating_sub(1) as usize;
+    Some(Position::new(
+        inner.x.saturating_add(cursor.column.min(max_x) as u16),
+        inner.y.saturating_add(offset_y),
+    ))
 }
 
 fn mermaid_canvas_viewport(

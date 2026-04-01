@@ -14,3 +14,4 @@ Bienvenido a la carpeta de ejemplo de `mdnav`.
 - [Primeros pasos](GUIDE/01-GETTING-STARTED.md)
 - [Navegacion](GUIDE/02-NAVIGATION.md)
 - [Arquitectura Mermaid](DIAGRAMS/ARCHITECTURE.md)
+- [Mermaid Examples](MERMAID-EXAMPLES/00-INDEX.md)

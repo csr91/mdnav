@@ -9,7 +9,9 @@ use std::{
 
 use arboard::Clipboard;
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::{
+    event::{KeyCode, KeyEvent, KeyEventKind},
+};
 use reqwest::blocking::Client;
 use serde_json::json;
 
@@ -55,6 +57,20 @@ pub enum HelpSection {
     Settings,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreviewCursor {
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SelectionState {
+    pub anchor: PreviewCursor,
+    pub cursor: PreviewCursor,
+    pub preferred_column: usize,
+    pub previous_fullscreen: FullscreenPanel,
+}
+
 pub struct App {
     pub root: PathBuf,
     pub items: Vec<DocItem>,
@@ -76,6 +92,10 @@ pub struct App {
     pub config: AppConfig,
     pub help_section: HelpSection,
     pub web_link_popup: Option<String>,
+    pub selector_path: Option<PathBuf>,
+    pub pending_cd: Option<PathBuf>,
+    pub pending_external_edit: Option<PathBuf>,
+    pub selection: Option<SelectionState>,
     pub running: bool,
     pub status: String,
 }
@@ -118,6 +138,10 @@ impl App {
             config,
             help_section: HelpSection::Shortcuts,
             web_link_popup: None,
+            selector_path: None,
+            pending_cd: None,
+            pending_external_edit: None,
+            selection: None,
             running: true,
             status: String::from("Listo"),
         })
@@ -130,6 +154,10 @@ impl App {
 
         if self.overlay != Overlay::None {
             return self.handle_overlay_key(key);
+        }
+
+        if self.selection.is_some() {
+            return self.handle_selection_key(key);
         }
 
         match key.code {
@@ -146,11 +174,27 @@ impl App {
             KeyCode::Char('k') if self.focus == Focus::Preview => self.scroll_preview(-1),
             KeyCode::Char('.') if self.focus == Focus::Preview => self.scroll_preview(1),
             KeyCode::Char(',') if self.focus == Focus::Preview => self.scroll_preview(-1),
+            KeyCode::Char('Y') => self.toggle_selection_mode(),
+            KeyCode::Char('E') => self.edit_target_in_nano()?,
             KeyCode::Char('!') => self.set_split_level(1),
             KeyCode::Char('@') => self.set_split_level(2),
             KeyCode::Char('#') => self.set_split_level(3),
             KeyCode::Char('$') => self.set_split_level(4),
             KeyCode::Char('%') => self.set_split_level(5),
+            KeyCode::Char('G') => self.queue_cd_to_target_dir(),
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn handle_selection_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('Y') => self.exit_selection_mode(),
+            KeyCode::Left => self.move_selection_cursor(-1, 0, key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)),
+            KeyCode::Right => self.move_selection_cursor(1, 0, key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)),
+            KeyCode::Up => self.move_selection_cursor(0, -1, key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)),
+            KeyCode::Down => self.move_selection_cursor(0, 1, key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)),
             _ => {}
         }
 
@@ -301,6 +345,121 @@ impl App {
         self.status = format!("Separacion ajustada: {}", self.split_level);
     }
 
+    fn selected_item_path(&self) -> Option<PathBuf> {
+        self.items
+            .get(self.selected_index)
+            .map(|item| item.path.clone())
+    }
+
+    fn action_target_path(&self) -> Option<PathBuf> {
+        if self.focus == Focus::Tree {
+            self.selected_item_path()
+        } else {
+            self.current_file
+                .clone()
+                .or_else(|| self.selected_item_path())
+        }
+    }
+
+    fn toggle_selection_mode(&mut self) {
+        if self.selection.is_some() {
+            self.exit_selection_mode();
+            return;
+        }
+
+        if self.focus != Focus::Preview {
+            self.status = String::from("Shift+Y funciona con foco en Preview");
+            return;
+        }
+
+        if self.preview.lines.is_empty() {
+            self.status = String::from("No hay contenido para seleccionar");
+            return;
+        }
+
+        let line = self.preview_scroll.min(self.preview.lines.len().saturating_sub(1));
+        let column = 0;
+        let cursor = PreviewCursor { line, column };
+        self.selection = Some(SelectionState {
+            anchor: cursor,
+            cursor,
+            preferred_column: column,
+            previous_fullscreen: self.fullscreen,
+        });
+        self.fullscreen = FullscreenPanel::Preview;
+        self.status = String::from("Modo seleccion activo");
+    }
+
+    fn edit_target_in_nano(&mut self) -> Result<()> {
+        let Some(target) = self.action_target_path() else {
+            self.status = String::from("No hay archivo para editar");
+            return Ok(());
+        };
+
+        if target.is_dir() {
+            self.status = String::from("Shift+E solo abre archivos");
+            return Ok(());
+        }
+
+        self.pending_external_edit = Some(target);
+        self.running = false;
+        self.status = String::from("Relanzando mdnav despues de nano");
+        Ok(())
+    }
+
+    pub fn restore_path_focus(&mut self, path: &std::path::Path) -> Result<()> {
+        let mut current = path.parent().map(|parent| parent.to_path_buf());
+        while let Some(dir) = current {
+            if dir.starts_with(&self.root) {
+                self.expanded_dirs.insert(dir.clone());
+                current = dir.parent().map(|parent| parent.to_path_buf());
+            } else {
+                break;
+            }
+        }
+
+        self.reload_items()?;
+
+        if let Some(index) = self.items.iter().position(|item| item.path == path) {
+            self.selected_index = index;
+        }
+
+        if path.is_file() {
+            self.open_file(path.to_path_buf())?;
+        } else {
+            self.status = format!("Reabierto en {}", self.relative_label(path));
+        }
+
+        Ok(())
+    }
+
+    fn queue_cd_to_target_dir(&mut self) {
+        let Some(target) = self.action_target_path() else {
+            self.status = String::from("No hay item para preparar cd");
+            return;
+        };
+
+        let dir = if target.is_dir() {
+            target
+        } else if let Some(parent) = target.parent() {
+            parent.to_path_buf()
+        } else {
+            self.status = String::from("No se pudo resolver el directorio");
+            return;
+        };
+
+        let label = self.relative_label(&dir);
+        self.pending_cd = Some(dir);
+        self.status = format!("Directorio pendiente para salir: {label}");
+    }
+
+    fn relative_label(&self, path: &std::path::Path) -> String {
+        path.strip_prefix(&self.root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    }
+
     fn move_selection(&mut self, delta: isize) {
         if self.items.is_empty() || self.focus != Focus::Tree {
             return;
@@ -362,6 +521,75 @@ impl App {
         let max_scroll = self.preview.lines.len().saturating_sub(1) as isize;
         let next = (self.preview_scroll as isize + delta).clamp(0, max_scroll) as usize;
         self.preview_scroll = next;
+    }
+
+    fn exit_selection_mode(&mut self) {
+        if let Some(selection) = self.selection.take() {
+            self.fullscreen = selection.previous_fullscreen;
+            self.status = String::from("Modo seleccion cerrado");
+        }
+    }
+
+    fn move_selection_cursor(&mut self, dx: isize, dy: isize, extend: bool) {
+        let Some(mut selection) = self.selection else {
+            return;
+        };
+
+        let mut line = selection.cursor.line as isize + dy;
+        line = line.clamp(0, self.preview.lines.len().saturating_sub(1) as isize);
+        let line = line as usize;
+
+        let line_len = self.preview_line_len(line);
+        let column = if dy != 0 {
+            selection.preferred_column.min(line_len)
+        } else {
+            (selection.cursor.column as isize + dx).clamp(0, line_len as isize) as usize
+        };
+
+        selection.cursor = PreviewCursor { line, column };
+        selection.preferred_column = column;
+
+        if !extend {
+            selection.anchor = selection.cursor;
+        }
+
+        self.selection = Some(selection);
+        self.ensure_selection_visible();
+        self.status = if self.has_selected_text() {
+            String::from("Seleccion extendida")
+        } else {
+            String::from("Cursor de seleccion")
+        };
+    }
+
+    fn ensure_selection_visible(&mut self) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+
+        let line = selection.cursor.line;
+        if line < self.preview_scroll {
+            self.preview_scroll = line;
+        } else {
+            let bottom_margin = 12usize;
+            if line >= self.preview_scroll.saturating_add(bottom_margin) {
+                self.preview_scroll = line.saturating_sub(bottom_margin.saturating_sub(1));
+            }
+        }
+    }
+
+    fn preview_line_len(&self, line: usize) -> usize {
+        self.preview
+            .lines
+            .get(line)
+            .map(|preview_line| preview_line.text.chars().count())
+            .unwrap_or(0)
+    }
+
+    fn has_selected_text(&self) -> bool {
+        self.selection
+            .map(|selection| selection.anchor != selection.cursor)
+            .unwrap_or(false)
     }
 
     fn reload_items(&mut self) -> Result<()> {
