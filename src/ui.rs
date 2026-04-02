@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, Focus, FullscreenPanel, HelpSection, Overlay, PreviewCursor},
+    app::{App, CreateKind, CreateStep, Focus, FullscreenPanel, GitState, HelpSection, Overlay, PreviewCursor},
     config::config_path,
 };
 use crate::markdown::{PreviewLine, PreviewLineKind};
@@ -51,6 +51,10 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::WebLink => render_web_link_popup(frame, app),
         Overlay::Search => render_search_popup(frame, app),
         Overlay::Toc => render_toc_popup(frame, app),
+        Overlay::CommandPalette => render_command_palette(frame, app),
+        Overlay::Find => render_find_popup(frame, app),
+        Overlay::Create => render_create_popup(frame, app),
+        Overlay::Git => render_git_popup(frame, app),
         Overlay::None => {}
     }
 }
@@ -859,6 +863,246 @@ fn render_search_popup(frame: &mut Frame, app: &App) {
         state.select(Some(app.search_cursor));
     }
     frame.render_stateful_widget(list, sections[1], &mut state);
+}
+
+fn render_command_palette(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(50, 50, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(2)])
+        .split(popup_area);
+
+    let input = Paragraph::new(format!("> {}", app.palette_query))
+        .block(
+            Block::default()
+                .title("Comando  (Esc cerrar)")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(input, sections[0]);
+
+    let filtered = app.palette_filtered();
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .map(|(name, desc)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<10}", name), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {desc}"), Style::default().fg(Color::Gray)),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)))
+        .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default();
+    if !filtered.is_empty() {
+        state.select(Some(app.palette_cursor));
+    }
+    frame.render_stateful_widget(list, sections[1], &mut state);
+}
+
+fn render_find_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(65, 65, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(popup_area);
+
+    let input = Paragraph::new(format!("/{}", app.find_query))
+        .block(
+            Block::default()
+                .title("Buscar en archivo  (Esc cerrar | Enter saltar)")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(input, sections[0]);
+
+    let items: Vec<ListItem> = if app.find_results.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            if app.find_query.is_empty() { "Escribe para buscar..." } else { "Sin resultados" },
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        app.find_results
+            .iter()
+            .filter_map(|&i| app.preview.lines.get(i).map(|l| (i, l)))
+            .map(|(i, line)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:>4} ", i + 1), Style::default().fg(Color::DarkGray)),
+                    Span::raw(line.text.chars().take(80).collect::<String>()),
+                ]))
+            })
+            .collect()
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(format!("{} resultado(s)  ↑↓ navegar", app.find_results.len()))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .highlight_style(Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default();
+    if !app.find_results.is_empty() {
+        state.select(Some(app.find_cursor));
+    }
+    frame.render_stateful_widget(list, sections[1], &mut state);
+}
+
+fn render_create_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(50, 40, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Length(3)])
+        .split(popup_area);
+
+    // Kind chooser
+    let kind_items: Vec<ListItem> = vec![
+        ListItem::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Carpeta", if app.create_kind == CreateKind::Folder {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            }),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Archivo", if app.create_kind == CreateKind::File {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            }),
+        ])),
+    ];
+
+    let kind_block_style = if app.create_step == CreateStep::ChooseKind {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let kind_list = List::new(kind_items)
+        .block(Block::default().title("Tipo  (↑↓ elegir | Enter confirmar | Esc cancelar)").borders(Borders::ALL).border_style(kind_block_style))
+        .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black));
+
+    let mut kind_state = ListState::default();
+    kind_state.select(Some(match app.create_kind { CreateKind::Folder => 0, CreateKind::File => 1 }));
+    frame.render_stateful_widget(kind_list, sections[0], &mut kind_state);
+
+    // Name input
+    let name_style = if app.create_step == CreateStep::EnterName {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let prompt = match app.create_kind { CreateKind::Folder => "Nombre carpeta", CreateKind::File => "Nombre archivo" };
+    let name_input = Paragraph::new(format!("{}_", app.create_name))
+        .block(Block::default().title(format!("{prompt}  (Enter crear)")).borders(Borders::ALL).border_style(name_style))
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(name_input, sections[1]);
+}
+
+fn render_git_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(65, 70, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    match app.git_state {
+        GitState::CommandList => {
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(2)])
+                .split(popup_area);
+
+            let cmds = App::git_commands();
+            let items: Vec<ListItem> = cmds
+                .iter()
+                .map(|(name, desc, _)| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("{:<12}", name), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!("  {desc}"), Style::default().fg(Color::Gray)),
+                    ]))
+                })
+                .collect();
+
+            let list = List::new(items)
+                .block(Block::default().title("Git  (↑↓ navegar | Enter ejecutar | Esc cerrar)").borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)))
+                .highlight_style(Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
+                .highlight_symbol("> ");
+
+            let mut state = ListState::default();
+            state.select(Some(app.git_cursor));
+            frame.render_stateful_widget(list, sections[0], &mut state);
+
+            let hint = Paragraph::new(Line::from(Span::styled(
+                "  ↑↓ navegar  Enter ejecutar  Esc cerrar",
+                Style::default().fg(Color::DarkGray),
+            )));
+            frame.render_widget(hint, sections[1]);
+        }
+        GitState::Output => {
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(2)])
+                .split(popup_area);
+
+            let visible_height = sections[0].height.saturating_sub(2) as usize;
+            let start = app.git_output_scroll;
+            let end = (start + visible_height).min(app.git_output.len());
+            let visible_lines: Vec<ListItem> = app.git_output[start..end]
+                .iter()
+                .map(|line| ListItem::new(Line::from(Span::raw(line.clone()))))
+                .collect();
+
+            let total = app.git_output.len();
+            let list = List::new(visible_lines)
+                .block(Block::default()
+                    .title(format!("Salida  ({}/{}  ↑↓ scroll | Esc volver)", start + 1, total))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Green)));
+            frame.render_widget(list, sections[0]);
+
+            let hint = Paragraph::new(Line::from(Span::styled(
+                "  ↑↓ / j k  scroll    Esc volver",
+                Style::default().fg(Color::DarkGray),
+            )));
+            frame.render_widget(hint, sections[1]);
+        }
+        GitState::CommitInput => {
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Length(2)])
+                .split(popup_area);
+
+            let input = Paragraph::new(format!("{}_", app.git_commit_input))
+                .block(Block::default()
+                    .title("Mensaje de commit  (Enter confirmar | Esc cancelar)")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)))
+                .style(Style::default().fg(Color::White));
+            frame.render_widget(input, sections[0]);
+
+            let hint = Paragraph::new(Line::from(Span::styled(
+                "  Enter confirmar   Esc cancelar",
+                Style::default().fg(Color::DarkGray),
+            )));
+            frame.render_widget(hint, sections[1]);
+        }
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

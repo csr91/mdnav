@@ -51,6 +51,29 @@ pub enum Overlay {
     WebLink,
     Search,
     Toc,
+    CommandPalette,
+    Find,
+    Create,
+    Git,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CreateKind {
+    Folder,
+    File,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CreateStep {
+    ChooseKind,
+    EnterName,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitState {
+    CommandList,
+    Output,
+    CommitInput,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,6 +130,24 @@ pub struct App {
     pub toc_entries: Vec<(usize, String)>, // (line_index, heading text)
     pub toc_cursor: usize,
     pub preview_link_cursor: Option<usize>, // index into preview.links
+    // Command palette
+    pub palette_query: String,
+    pub palette_cursor: usize,
+    // Find in file
+    pub find_query: String,
+    pub find_results: Vec<usize>, // line indices in preview
+    pub find_cursor: usize,
+    // Create
+    pub create_kind: CreateKind,
+    pub create_name: String,
+    pub create_step: CreateStep,
+    // Git
+    pub git_cursor: usize,
+    pub git_output: Vec<String>,
+    pub git_output_scroll: usize,
+    pub git_available: bool,
+    pub git_state: GitState,
+    pub git_commit_input: String,
 }
 
 impl App {
@@ -160,6 +201,20 @@ impl App {
             toc_entries: Vec::new(),
             toc_cursor: 0,
             preview_link_cursor: None,
+            palette_query: String::new(),
+            palette_cursor: 0,
+            find_query: String::new(),
+            find_results: Vec::new(),
+            find_cursor: 0,
+            create_kind: CreateKind::File,
+            create_name: String::new(),
+            create_step: CreateStep::ChooseKind,
+            git_cursor: 0,
+            git_output: Vec::new(),
+            git_output_scroll: 0,
+            git_available: git_is_available(),
+            git_state: GitState::CommandList,
+            git_commit_input: String::new(),
         })
     }
 
@@ -204,7 +259,7 @@ impl App {
             KeyCode::Char('$') => self.set_split_level(4),
             KeyCode::Char('%') => self.set_split_level(5),
             KeyCode::Char('G') => self.queue_cd_to_target_dir(),
-            KeyCode::Char('/') => self.open_search(),
+            KeyCode::Char('/') => self.open_command_palette(),
             KeyCode::Char('T') => self.open_toc(),
             _ => {}
         }
@@ -324,6 +379,101 @@ impl App {
                     self.update_search_results();
                 }
                 _ => {}
+            },
+            Overlay::CommandPalette => match key.code {
+                KeyCode::Esc => self.close_overlay("Palette cerrada"),
+                KeyCode::Enter => self.confirm_palette_command(),
+                KeyCode::Backspace => {
+                    self.palette_query.pop();
+                    self.update_palette_cursor();
+                }
+                KeyCode::Down => self.move_palette_cursor(1),
+                KeyCode::Up => self.move_palette_cursor(-1),
+                KeyCode::Char(c) => {
+                    self.palette_query.push(c);
+                    self.update_palette_cursor();
+                }
+                _ => {}
+            },
+            Overlay::Find => match key.code {
+                KeyCode::Esc => self.close_overlay("Búsqueda en archivo cerrada"),
+                KeyCode::Enter => self.confirm_find(),
+                KeyCode::Backspace => {
+                    self.find_query.pop();
+                    self.update_find_results();
+                }
+                KeyCode::Down => self.move_find_cursor(1),
+                KeyCode::Up => self.move_find_cursor(-1),
+                KeyCode::Char(c) => {
+                    self.find_query.push(c);
+                    self.update_find_results();
+                }
+                _ => {}
+            },
+            Overlay::Create => match key.code {
+                KeyCode::Esc => self.close_overlay("Crear cancelado"),
+                KeyCode::Up | KeyCode::Down if self.create_step == CreateStep::ChooseKind => {
+                    self.create_kind = match self.create_kind {
+                        CreateKind::Folder => CreateKind::File,
+                        CreateKind::File => CreateKind::Folder,
+                    };
+                }
+                KeyCode::Enter if self.create_step == CreateStep::ChooseKind => {
+                    self.create_step = CreateStep::EnterName;
+                    self.create_name.clear();
+                    self.status = match self.create_kind {
+                        CreateKind::Folder => String::from("Nombre de la carpeta:"),
+                        CreateKind::File => String::from("Nombre del archivo:"),
+                    };
+                }
+                KeyCode::Enter if self.create_step == CreateStep::EnterName => {
+                    self.confirm_create();
+                }
+                KeyCode::Backspace if self.create_step == CreateStep::EnterName => {
+                    self.create_name.pop();
+                }
+                KeyCode::Char(c) if self.create_step == CreateStep::EnterName => {
+                    self.create_name.push(c);
+                }
+                _ => {}
+            },
+            Overlay::Git => match self.git_state {
+                GitState::CommandList => match key.code {
+                    KeyCode::Esc => self.close_overlay("Git cerrado"),
+                    KeyCode::Up => self.move_git_cursor(-1),
+                    KeyCode::Down => self.move_git_cursor(1),
+                    KeyCode::Enter => self.run_git_command(),
+                    _ => {}
+                },
+                GitState::Output => match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.git_state = GitState::CommandList;
+                        self.status = String::from("Git: elige un comando");
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.git_output_scroll = self.git_output_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.git_output_scroll =
+                            (self.git_output_scroll + 1).min(self.git_output.len().saturating_sub(1));
+                    }
+                    _ => {}
+                },
+                GitState::CommitInput => match key.code {
+                    KeyCode::Esc => {
+                        self.git_state = GitState::CommandList;
+                        self.git_commit_input.clear();
+                        self.status = String::from("Commit cancelado");
+                    }
+                    KeyCode::Enter => self.run_git_commit(),
+                    KeyCode::Backspace => {
+                        self.git_commit_input.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        self.git_commit_input.push(c);
+                    }
+                    _ => {}
+                },
             },
             Overlay::None => {}
         }
@@ -967,6 +1117,294 @@ impl App {
         self.status = String::from("Buscar: escribe para filtrar");
     }
 
+    // ── Command Palette ───────────────────────────────────────────────────────
+
+    fn open_command_palette(&mut self) {
+        self.palette_query.clear();
+        self.palette_cursor = 0;
+        self.overlay = Overlay::CommandPalette;
+        self.status = String::from("Palette: escribe para filtrar");
+    }
+
+    pub fn palette_commands(&self) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("files", "buscar archivo en el árbol"),
+            ("find", "buscar texto en el archivo actual"),
+            ("create", "crear carpeta o archivo"),
+            ("git", "ejecutar comandos git"),
+        ]
+    }
+
+    pub fn palette_filtered(&self) -> Vec<(&'static str, &'static str)> {
+        let q = self.palette_query.to_lowercase();
+        self.palette_commands()
+            .into_iter()
+            .filter(|(name, desc)| {
+                q.is_empty() || name.contains(q.as_str()) || desc.contains(q.as_str())
+            })
+            .collect()
+    }
+
+    fn update_palette_cursor(&mut self) {
+        let n = self.palette_filtered().len();
+        if self.palette_cursor >= n && n > 0 {
+            self.palette_cursor = n - 1;
+        }
+    }
+
+    fn move_palette_cursor(&mut self, delta: isize) {
+        let n = self.palette_filtered().len();
+        if n == 0 {
+            return;
+        }
+        self.palette_cursor =
+            ((self.palette_cursor as isize + delta).rem_euclid(n as isize)) as usize;
+    }
+
+    fn confirm_palette_command(&mut self) {
+        let filtered = self.palette_filtered();
+        let Some(&(name, _)) = filtered.get(self.palette_cursor) else {
+            return;
+        };
+        match name {
+            "files" => self.open_search(),
+            "find" => self.open_find(),
+            "create" => self.open_create(),
+            "git" => self.open_git(),
+            _ => {}
+        }
+    }
+
+    // ── Find in file ──────────────────────────────────────────────────────────
+
+    fn open_find(&mut self) {
+        self.find_query.clear();
+        self.find_results.clear();
+        self.find_cursor = 0;
+        self.overlay = Overlay::Find;
+        self.status = String::from("Find: escribe para buscar en el archivo");
+    }
+
+    fn update_find_results(&mut self) {
+        let q = self.find_query.to_lowercase();
+        if q.is_empty() {
+            self.find_results.clear();
+        } else {
+            self.find_results = self
+                .preview
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.text.to_lowercase().contains(&q))
+                .map(|(i, _)| i)
+                .collect();
+        }
+        self.find_cursor = 0;
+        self.status = format!(
+            "Find: \"{}\" — {} resultado(s)",
+            self.find_query,
+            self.find_results.len()
+        );
+    }
+
+    fn move_find_cursor(&mut self, delta: isize) {
+        let n = self.find_results.len();
+        if n == 0 {
+            return;
+        }
+        self.find_cursor = ((self.find_cursor as isize + delta).rem_euclid(n as isize)) as usize;
+    }
+
+    fn confirm_find(&mut self) {
+        if let Some(&line_index) = self.find_results.get(self.find_cursor) {
+            self.preview_scroll = line_index;
+            self.focus = Focus::Preview;
+        }
+        self.close_overlay("Find: saltando a resultado");
+    }
+
+    // ── Create folder/file ────────────────────────────────────────────────────
+
+    fn open_create(&mut self) {
+        self.create_kind = CreateKind::File;
+        self.create_name.clear();
+        self.create_step = CreateStep::ChooseKind;
+        self.overlay = Overlay::Create;
+        self.status = String::from("Crear: elige el tipo con ↑↓, Enter para confirmar");
+    }
+
+    fn current_tree_dir(&self) -> Option<PathBuf> {
+        let item = self.items.get(self.selected_index)?;
+        if item.is_dir {
+            Some(item.path.clone())
+        } else {
+            item.path.parent().map(|p| p.to_path_buf())
+        }
+    }
+
+    fn confirm_create(&mut self) {
+        let name = self.create_name.trim().to_string();
+        if name.is_empty() {
+            self.status = String::from("Nombre vacío, cancelado");
+            self.overlay = Overlay::None;
+            return;
+        }
+        let Some(dir) = self.current_tree_dir() else {
+            self.status = String::from("No se pudo determinar el directorio");
+            self.overlay = Overlay::None;
+            return;
+        };
+        let target = dir.join(&name);
+        let result = match self.create_kind {
+            CreateKind::Folder => fs::create_dir_all(&target),
+            CreateKind::File => {
+                if let Some(parent) = target.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                fs::write(&target, "").map(|_| ())
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.expanded_dirs.insert(dir);
+                let _ = self.reload_items();
+                if target.is_file() {
+                    if let Some(index) = self.items.iter().position(|item| item.path == target) {
+                        self.selected_index = index;
+                    }
+                    let _ = self.open_file(target.clone());
+                } else if let Some(index) = self.items.iter().position(|item| item.path == target) {
+                    self.selected_index = index;
+                    self.overlay = Overlay::None;
+                } else {
+                    self.overlay = Overlay::None;
+                }
+                let kind_label = match self.create_kind {
+                    CreateKind::Folder => "Carpeta",
+                    CreateKind::File => "Archivo",
+                };
+                self.status = format!("{kind_label} creado: {name}");
+            }
+            Err(e) => {
+                self.status = format!("Error al crear: {e}");
+                self.overlay = Overlay::None;
+            }
+        }
+    }
+
+    // ── Git ───────────────────────────────────────────────────────────────────
+
+    fn open_git(&mut self) {
+        if !self.git_available {
+            self.status = String::from("git no está disponible en PATH");
+            self.overlay = Overlay::None;
+            return;
+        }
+        self.git_cursor = 0;
+        self.git_state = GitState::CommandList;
+        self.git_output.clear();
+        self.git_output_scroll = 0;
+        self.overlay = Overlay::Git;
+        self.status = String::from("Git: elige un comando");
+    }
+
+    pub fn git_commands() -> &'static [(&'static str, &'static str, &'static [&'static str])] {
+        &[
+            ("status",    "git status",             &["status"] as &[&str]),
+            ("log",       "git log --oneline -20",  &["log", "--oneline", "-20"]),
+            ("diff",      "git diff",               &["diff"]),
+            ("add .",     "git add .",              &["add", "."]),
+            ("commit",    "git commit (pide mensaje)", &[]),
+            ("pull",      "git pull",               &["pull"]),
+            ("push",      "git push",               &["push"]),
+            ("branch",    "git branch",             &["branch"]),
+            ("stash",     "git stash",              &["stash"]),
+            ("stash pop", "git stash pop",          &["stash", "pop"]),
+        ]
+    }
+
+    fn move_git_cursor(&mut self, delta: isize) {
+        let n = Self::git_commands().len() as isize;
+        self.git_cursor = ((self.git_cursor as isize + delta).rem_euclid(n)) as usize;
+    }
+
+    fn run_git_command(&mut self) {
+        let cmds = Self::git_commands();
+        let Some(&(name, _, args)) = cmds.get(self.git_cursor) else {
+            return;
+        };
+        if name == "commit" {
+            self.git_commit_input.clear();
+            self.git_state = GitState::CommitInput;
+            self.status = String::from("Mensaje de commit: (Enter para confirmar)");
+            return;
+        }
+        let work_dir = self.root.clone();
+        match Command::new("git")
+            .args(args)
+            .current_dir(&work_dir)
+            .output()
+        {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let combined = if stderr.trim().is_empty() {
+                    stdout
+                } else if stdout.trim().is_empty() {
+                    stderr
+                } else {
+                    format!("{stdout}\n{stderr}")
+                };
+                self.git_output = combined
+                    .lines()
+                    .map(|l| l.to_string())
+                    .collect();
+                if self.git_output.is_empty() {
+                    self.git_output = vec![String::from("(sin salida)")];
+                }
+                self.git_output_scroll = 0;
+                self.git_state = GitState::Output;
+                self.status = format!("git {name}  (Esc para volver)");
+            }
+            Err(e) => {
+                self.status = format!("Error ejecutando git: {e}");
+            }
+        }
+    }
+
+    fn run_git_commit(&mut self) {
+        let msg = self.git_commit_input.trim().to_string();
+        if msg.is_empty() {
+            self.status = String::from("Mensaje vacío, commit cancelado");
+            self.git_state = GitState::CommandList;
+            return;
+        }
+        let work_dir = self.root.clone();
+        match Command::new("git")
+            .args(["commit", "-m", &msg])
+            .current_dir(&work_dir)
+            .output()
+        {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let combined = if stderr.trim().is_empty() { stdout } else { format!("{stdout}\n{stderr}") };
+                self.git_output = combined.lines().map(|l| l.to_string()).collect();
+                if self.git_output.is_empty() {
+                    self.git_output = vec![String::from("(sin salida)")];
+                }
+                self.git_output_scroll = 0;
+                self.git_commit_input.clear();
+                self.git_state = GitState::Output;
+                self.status = String::from("git commit  (Esc para volver)");
+            }
+            Err(e) => {
+                self.status = format!("Error en commit: {e}");
+                self.git_state = GitState::CommandList;
+            }
+        }
+    }
+
     fn update_search_results(&mut self) {
         let query = self.search_query.to_lowercase();
         self.search_results = self
@@ -1158,6 +1596,14 @@ fn copy_to_clipboard(value: &str) -> Result<bool> {
 
     clipboard.set_text(value.to_string())?;
     Ok(true)
+}
+
+fn git_is_available() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn html_escape(value: &str) -> String {

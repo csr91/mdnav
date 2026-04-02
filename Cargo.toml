@@ -1,6 +1,6 @@
 [package]
 name = "mdnav"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Terminal navigator for MkDocs and Markdown documentation trees"
 
