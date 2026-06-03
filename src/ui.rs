@@ -36,7 +36,15 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     let s = app.config.strings();
-    let footer = if app.overlay == Overlay::CommandPalette {
+    let footer = if app.overlay == Overlay::Rename {
+        Paragraph::new(Line::from(vec![
+            Span::styled("Rename: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(app.rename_input.clone(), Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled("  Enter=confirmar  Esc=cancelar", Style::default().fg(Color::DarkGray)),
+        ]))
+        .block(Block::default().borders(Borders::TOP))
+    } else if app.overlay == Overlay::CommandPalette {
         Paragraph::new(Line::from(vec![
             Span::styled(":", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled(app.palette_query.clone(), Style::default().fg(Color::White)),
@@ -52,6 +60,12 @@ pub fn render(frame: &mut Frame, app: &App) {
         Paragraph::new(Line::from(vec![
             Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
             Span::styled(hint, Style::default().fg(Color::Gray)),
+        ]))
+        .block(Block::default().borders(Borders::TOP))
+    } else if app.pending_go_up {
+        Paragraph::new(Line::from(vec![
+            Span::styled("Go up?  ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("← de nuevo para subir un nivel  Esc=cancelar", Style::default().fg(Color::Gray)),
         ]))
         .block(Block::default().borders(Borders::TOP))
     } else if app.selection.is_some() {
@@ -83,6 +97,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Find => render_find_popup(frame, app),
         Overlay::Create => render_create_popup(frame, app),
         Overlay::Git => render_git_popup(frame, app),
+        Overlay::Rename => {}
         Overlay::None => {}
     }
 }

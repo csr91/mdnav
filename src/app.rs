@@ -55,6 +55,7 @@ pub enum Overlay {
     Find,
     Create,
     Git,
+    Rename,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,6 +143,8 @@ pub struct App {
     pub create_kind: CreateKind,
     pub create_name: String,
     pub create_step: CreateStep,
+    // Rename
+    pub rename_input: String,
     // Git
     pub git_cursor: usize,
     pub git_output: Vec<String>,
@@ -152,6 +155,7 @@ pub struct App {
     pub settings_cursor: usize,
     pub file_mtime: Option<SystemTime>,
     pub tree_sig: u64,
+    pub pending_go_up: bool,
 }
 
 impl App {
@@ -216,6 +220,7 @@ impl App {
             create_kind: CreateKind::File,
             create_name: String::new(),
             create_step: CreateStep::ChooseKind,
+            rename_input: String::new(),
             git_cursor: 0,
             git_output: Vec::new(),
             git_output_scroll: 0,
@@ -225,6 +230,7 @@ impl App {
             settings_cursor: 0,
             file_mtime,
             tree_sig,
+            pending_go_up: false,
         })
     }
 
@@ -241,6 +247,9 @@ impl App {
             return self.handle_selection_key(key);
         }
 
+        let was_pending_go_up = self.pending_go_up;
+        self.pending_go_up = false;
+
         match key.code {
             KeyCode::Char('q') => self.running = false,
             KeyCode::Char('?') => self.toggle_help(),
@@ -252,7 +261,13 @@ impl App {
             KeyCode::Right => self.activate_selected()?,
             KeyCode::Enter if self.focus == Focus::Preview => self.follow_active_link()?,
             KeyCode::Enter => self.activate_selected()?,
-            KeyCode::Left | KeyCode::Backspace => self.collapse_or_parent()?,
+            KeyCode::Left | KeyCode::Backspace => {
+                if was_pending_go_up && self.focus == Focus::Tree {
+                    self.go_up_root()?;
+                } else {
+                    self.collapse_or_parent()?;
+                }
+            }
             KeyCode::Char('j') => match self.focus {
                 Focus::Tree => self.move_selection(1),
                 Focus::Preview => self.scroll_preview(1),
@@ -262,7 +277,13 @@ impl App {
                 Focus::Preview => self.scroll_preview(-1),
             },
             KeyCode::Char('h') => match self.focus {
-                Focus::Tree => self.collapse_or_parent()?,
+                Focus::Tree => {
+                    if was_pending_go_up {
+                        self.go_up_root()?;
+                    } else {
+                        self.collapse_or_parent()?;
+                    }
+                }
                 Focus::Preview => self.move_link_cursor(-1),
             },
             KeyCode::Char('l') => match self.focus {
@@ -277,6 +298,7 @@ impl App {
             KeyCode::Char('[') if self.focus == Focus::Preview => self.move_link_cursor(-1),
             KeyCode::Char('Y') => self.toggle_selection_mode(),
             KeyCode::Char('E') => self.edit_target_in_nano()?,
+            KeyCode::Char('R') => self.open_rename()?,
             KeyCode::Char('C') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
                 self.copy_path_to_clipboard()?;
             }
@@ -330,10 +352,10 @@ impl App {
                     self.help_section = HelpSection::Settings
                 }
                 KeyCode::BackTab => self.help_section = HelpSection::Shortcuts,
-                KeyCode::Up if self.help_section == HelpSection::Settings => {
+                KeyCode::Up | KeyCode::Char('k') if self.help_section == HelpSection::Settings => {
                     self.settings_cursor = self.settings_cursor.saturating_sub(1);
                 }
-                KeyCode::Down if self.help_section == HelpSection::Settings => {
+                KeyCode::Down | KeyCode::Char('j') if self.help_section == HelpSection::Settings => {
                     self.settings_cursor = (self.settings_cursor + 1).min(2);
                 }
                 KeyCode::Enter | KeyCode::Char(' ') if self.help_section == HelpSection::Settings => {
@@ -434,13 +456,13 @@ impl App {
             },
             Overlay::CommandPalette => match key.code {
                 KeyCode::Esc => self.close_overlay("Palette cerrada"),
-                KeyCode::Enter => self.confirm_palette_command(),
+                KeyCode::Enter => self.confirm_palette_command()?,
                 KeyCode::Backspace => {
                     self.palette_query.pop();
                     self.update_palette_cursor();
                 }
-                KeyCode::Down => self.move_palette_cursor(1),
-                KeyCode::Up => self.move_palette_cursor(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.move_palette_cursor(1),
+                KeyCode::Up | KeyCode::Char('k') => self.move_palette_cursor(-1),
                 KeyCode::Char(c) => {
                     self.palette_query.push(c);
                     self.update_palette_cursor();
@@ -526,6 +548,13 @@ impl App {
                     }
                     _ => {}
                 },
+            },
+            Overlay::Rename => match key.code {
+                KeyCode::Esc => self.close_overlay("Renombrar cancelado"),
+                KeyCode::Enter => self.confirm_rename(),
+                KeyCode::Backspace => { self.rename_input.pop(); }
+                KeyCode::Char(c) => self.rename_input.push(c),
+                _ => {}
             },
             Overlay::None => {}
         }
@@ -855,9 +884,29 @@ impl App {
             if let Some(index) = self.items.iter().position(|candidate| candidate.path == parent) {
                 self.selected_index = index;
                 self.status = format!("Padre {}", self.items[index].relative.display());
+                return Ok(());
             }
         }
 
+        if self.focus == Focus::Tree {
+            self.pending_go_up = true;
+            self.status = String::from("Go up? ← de nuevo para subir un nivel");
+        }
+
+        Ok(())
+    }
+
+    fn go_up_root(&mut self) -> Result<()> {
+        let Some(parent) = self.root.parent().map(|p| p.to_path_buf()) else {
+            self.status = String::from("Ya estas en el directorio raiz");
+            return Ok(());
+        };
+        self.root = parent.clone();
+        self.expanded_dirs.clear();
+        self.expanded_dirs.insert(parent);
+        self.reload_items()?;
+        self.selected_index = 0;
+        self.status = format!("Subido a {}", self.root.display());
         Ok(())
     }
 
@@ -901,8 +950,12 @@ impl App {
         }
 
         let copied = copy_to_clipboard(&text).unwrap_or(false);
+        if let Some(s) = self.selection.as_mut() {
+            s.anchored = false;
+            s.anchor = s.cursor;
+        }
         self.status = if copied {
-            format!("Copiado! ({} caracteres)  Esc para salir", text.chars().count())
+            format!("Copiado! ({} caracteres)  y=nueva seleccion  Esc=salir", text.chars().count())
         } else {
             String::from("Error al copiar al portapapeles")
         };
@@ -1282,10 +1335,22 @@ impl App {
 
     pub fn palette_commands(&self) -> Vec<(&'static str, &'static str)> {
         vec![
-            ("files", "buscar archivo en el árbol"),
-            ("find", "buscar texto en el archivo actual"),
-            ("create", "crear carpeta o archivo"),
-            ("git", "ejecutar comandos git"),
+            ("files",      "buscar archivo en el arbol"),
+            ("find",       "buscar texto en el archivo actual"),
+            ("create",     "crear carpeta o archivo"),
+            ("git",        "ejecutar comandos git"),
+            ("select",     "activar cursor de seleccion  (Shift+Y)"),
+            ("edit",       "abrir editor sobre el archivo  (Shift+E)"),
+            ("rename",     "renombrar archivo o carpeta  (Shift+R)"),
+            ("goto",       "cd pendiente al directorio  (Shift+G)"),
+            ("toc",        "tabla de contenidos  (Shift+T)"),
+            ("mermaid",    "acciones Mermaid  (Shift+M)"),
+            ("fullscreen", "pantalla completa del panel  (Shift+0)"),
+            ("split1",     "proporcion paneles 1  (Shift+1)"),
+            ("split2",     "proporcion paneles 2  (Shift+2)"),
+            ("split3",     "proporcion paneles 3  (Shift+3)"),
+            ("split4",     "proporcion paneles 4  (Shift+4)"),
+            ("split5",     "proporcion paneles 5  (Shift+5)"),
         ]
     }
 
@@ -1315,18 +1380,31 @@ impl App {
             ((self.palette_cursor as isize + delta).rem_euclid(n as isize)) as usize;
     }
 
-    fn confirm_palette_command(&mut self) {
+    fn confirm_palette_command(&mut self) -> Result<()> {
         let filtered = self.palette_filtered();
         let Some(&(name, _)) = filtered.get(self.palette_cursor) else {
-            return;
+            return Ok(());
         };
         match name {
-            "files" => self.open_search(),
-            "find" => self.open_find(),
-            "create" => self.open_create(),
-            "git" => self.open_git(),
-            _ => {}
+            "files"      => self.open_search(),
+            "find"       => self.open_find(),
+            "create"     => self.open_create(),
+            "git"        => self.open_git(),
+            "select"     => self.toggle_selection_mode(),
+            "edit"       => self.edit_target_in_nano()?,
+            "rename"     => self.open_rename()?,
+            "goto"       => self.queue_cd_to_target_dir(),
+            "toc"        => self.open_toc(),
+            "mermaid"    => self.open_mermaid_flow()?,
+            "fullscreen" => self.toggle_fullscreen(),
+            "split1"     => self.set_split_level(1),
+            "split2"     => self.set_split_level(2),
+            "split3"     => self.set_split_level(3),
+            "split4"     => self.set_split_level(4),
+            "split5"     => self.set_split_level(5),
+            _            => {}
         }
+        Ok(())
     }
 
     // ── Find in file ──────────────────────────────────────────────────────────
@@ -1378,6 +1456,54 @@ impl App {
     }
 
     // ── Create folder/file ────────────────────────────────────────────────────
+
+    fn open_rename(&mut self) -> Result<()> {
+        let Some(target) = self.action_target_path() else {
+            self.status = String::from("No hay item para renombrar");
+            return Ok(());
+        };
+        let name = target.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        self.rename_input = name;
+        self.overlay = Overlay::Rename;
+        Ok(())
+    }
+
+    fn confirm_rename(&mut self) {
+        let new_name = self.rename_input.trim().to_string();
+        if new_name.is_empty() {
+            self.close_overlay("Nombre vacio, cancelado");
+            return;
+        }
+        let Some(target) = self.action_target_path() else {
+            self.close_overlay("No hay item para renombrar");
+            return;
+        };
+        let Some(parent) = target.parent() else {
+            self.close_overlay("No se pudo resolver el directorio");
+            return;
+        };
+        let dest = parent.join(&new_name);
+        match fs::rename(&target, &dest) {
+            Ok(()) => {
+                let _ = self.reload_items();
+                if let Some(index) = self.items.iter().position(|item| item.path == dest) {
+                    self.selected_index = index;
+                }
+                if dest.is_file() {
+                    let _ = self.open_file(dest);
+                }
+                self.overlay = Overlay::None;
+                self.status = format!("Renombrado a: {new_name}");
+            }
+            Err(e) => {
+                self.overlay = Overlay::None;
+                self.status = format!("Error al renombrar: {e}");
+            }
+        }
+    }
 
     fn open_create(&mut self) {
         self.create_kind = CreateKind::File;

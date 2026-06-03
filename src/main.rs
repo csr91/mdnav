@@ -58,7 +58,7 @@ fn resolve_command() -> Result<CliCommand> {
 
     match args.as_slice() {
         [] => Ok(CliCommand::Run {
-            docs_root: PathBuf::from("."),
+            docs_root: env::current_dir().context("No se pudo resolver el directorio actual")?,
         }),
         [flag] if flag == "--version" || flag == "-V" => {
             println!("mdnav {}", env!("CARGO_PKG_VERSION"));
@@ -70,6 +70,7 @@ fn resolve_command() -> Result<CliCommand> {
         [path] => {
             let docs_root = PathBuf::from(path);
             if docs_root.exists() {
+                let docs_root = docs_root.canonicalize().unwrap_or(docs_root);
                 Ok(CliCommand::Run { docs_root })
             } else {
                 Err(anyhow::anyhow!(
