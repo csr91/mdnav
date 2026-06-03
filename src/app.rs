@@ -156,6 +156,7 @@ pub struct App {
     pub file_mtime: Option<SystemTime>,
     pub tree_sig: u64,
     pub pending_go_up: bool,
+    pub pending_delete: Option<PathBuf>,
 }
 
 impl App {
@@ -163,8 +164,9 @@ impl App {
         let mut expanded_dirs = BTreeSet::new();
         expanded_dirs.insert(root.clone());
 
-        let items = collect_markdown_tree(&root, &expanded_dirs, config.only_mds)?;
-        let selected_index = items.iter().position(|item| !item.is_dir).unwrap_or(0);
+        let mut items = collect_markdown_tree(&root, &expanded_dirs, config.only_mds)?;
+        inject_bookmarks(&mut items, &config);
+        let selected_index = items.iter().position(|item| !item.is_dir && !item.is_bookmark).unwrap_or(0);
         let current_file = items
             .get(selected_index)
             .filter(|item| !item.is_dir)
@@ -231,6 +233,7 @@ impl App {
             file_mtime,
             tree_sig,
             pending_go_up: false,
+            pending_delete: None,
         })
     }
 
@@ -249,6 +252,18 @@ impl App {
 
         let was_pending_go_up = self.pending_go_up;
         self.pending_go_up = false;
+
+        if self.pending_delete.is_some() {
+            match key.code {
+                KeyCode::Enter => { self.confirm_delete()?; return Ok(()); }
+                KeyCode::Esc | KeyCode::Char('X') => {
+                    self.pending_delete = None;
+                    self.status = String::from("Eliminacion cancelada");
+                    return Ok(());
+                }
+                _ => { self.pending_delete = None; }
+            }
+        }
 
         match key.code {
             KeyCode::Char('q') => self.running = false,
@@ -299,6 +314,8 @@ impl App {
             KeyCode::Char('Y') => self.toggle_selection_mode(),
             KeyCode::Char('E') => self.edit_target_in_nano()?,
             KeyCode::Char('R') => self.open_rename()?,
+            KeyCode::Char('B') => self.toggle_bookmark()?,
+            KeyCode::Char('X') => self.request_delete()?,
             KeyCode::Char('C') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
                 self.copy_path_to_clipboard()?;
             }
@@ -356,13 +373,14 @@ impl App {
                     self.settings_cursor = self.settings_cursor.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') if self.help_section == HelpSection::Settings => {
-                    self.settings_cursor = (self.settings_cursor + 1).min(2);
+                    self.settings_cursor = (self.settings_cursor + 1).min(3);
                 }
                 KeyCode::Enter | KeyCode::Char(' ') if self.help_section == HelpSection::Settings => {
                     match self.settings_cursor {
                         0 => self.toggle_only_mds()?,
                         1 => self.toggle_editor()?,
                         2 => self.toggle_language()?,
+                        3 => self.toggle_show_bookmarks()?,
                         _ => {}
                     }
                 }
@@ -852,6 +870,16 @@ impl App {
             return Ok(());
         };
 
+        if item.is_bookmark && item.is_dir {
+            self.root = item.path.clone();
+            self.expanded_dirs.clear();
+            self.expanded_dirs.insert(item.path.clone());
+            self.reload_items()?;
+            self.selected_index = 0;
+            self.status = format!("Bookmark: {}", item.name);
+            return Ok(());
+        }
+
         if item.is_dir {
             if self.expanded_dirs.contains(&item.path) {
                 self.expanded_dirs.remove(&item.path);
@@ -1048,17 +1076,58 @@ impl App {
 
     fn reload_items(&mut self) -> Result<()> {
         let selected_path = self.items.get(self.selected_index).map(|item| item.path.clone());
-        self.items = collect_markdown_tree(&self.root, &self.expanded_dirs, self.config.only_mds)?;
+        let mut items = collect_markdown_tree(&self.root, &self.expanded_dirs, self.config.only_mds)?;
+        inject_bookmarks(&mut items, &self.config);
+        self.items = items;
 
         if let Some(path) = selected_path {
             if let Some(index) = self.items.iter().position(|item| item.path == path) {
                 self.selected_index = index;
             } else {
-                self.selected_index = self.items.len().saturating_sub(1);
+                self.selected_index = 0;
             }
         }
 
         self.tree_sig = compute_tree_sig(&self.root, &self.expanded_dirs);
+        Ok(())
+    }
+
+    fn toggle_bookmark(&mut self) -> Result<()> {
+        let Some(target) = self.action_target_path() else {
+            self.status = String::from("No hay item para marcar como bookmark");
+            return Ok(());
+        };
+
+        if !target.is_dir() {
+            self.status = String::from("Solo se pueden marcar carpetas como bookmark");
+            return Ok(());
+        }
+        let path_str = target.display().to_string();
+        let name = target.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path_str.clone());
+
+        if let Some(pos) = self.config.bookmarks.iter().position(|b| b == &path_str) {
+            self.config.bookmarks.remove(pos);
+            self.status = format!("Bookmark eliminado: {name}");
+        } else {
+            self.config.bookmarks.push(path_str);
+            self.status = format!("Bookmark agregado: {name}");
+        }
+
+        self.config.save()?;
+        self.reload_items()?;
+        Ok(())
+    }
+
+    fn toggle_show_bookmarks(&mut self) -> Result<()> {
+        self.config.show_bookmarks = !self.config.show_bookmarks;
+        self.config.save()?;
+        self.reload_items()?;
+        self.status = format!(
+            "Bookmarks: {}",
+            if self.config.show_bookmarks { "visible" } else { "ocultos" }
+        );
         Ok(())
     }
 
@@ -1335,6 +1404,7 @@ impl App {
 
     pub fn palette_commands(&self) -> Vec<(&'static str, &'static str)> {
         vec![
+            ("q",          "salir de mdnav"),
             ("files",      "buscar archivo en el arbol"),
             ("find",       "buscar texto en el archivo actual"),
             ("create",     "crear carpeta o archivo"),
@@ -1346,6 +1416,9 @@ impl App {
             ("toc",        "tabla de contenidos  (Shift+T)"),
             ("mermaid",    "acciones Mermaid  (Shift+M)"),
             ("fullscreen", "pantalla completa del panel  (Shift+0)"),
+            ("delete",     "eliminar archivo o carpeta  (x)"),
+            ("bookmark",   "marcar/desmarcar bookmark  (Shift+B)"),
+            ("bookmarks",  "mostrar/ocultar bookmarks"),
             ("split1",     "proporcion paneles 1  (Shift+1)"),
             ("split2",     "proporcion paneles 2  (Shift+2)"),
             ("split3",     "proporcion paneles 3  (Shift+3)"),
@@ -1386,6 +1459,7 @@ impl App {
             return Ok(());
         };
         match name {
+            "q"          => { self.overlay = Overlay::None; self.running = false; }
             "files"      => self.open_search(),
             "find"       => self.open_find(),
             "create"     => self.open_create(),
@@ -1396,7 +1470,10 @@ impl App {
             "goto"       => self.queue_cd_to_target_dir(),
             "toc"        => self.open_toc(),
             "mermaid"    => self.open_mermaid_flow()?,
-            "fullscreen" => self.toggle_fullscreen(),
+            "fullscreen"  => self.toggle_fullscreen(),
+            "delete"      => self.request_delete()?,
+            "bookmark"    => self.toggle_bookmark()?,
+            "bookmarks"   => self.toggle_show_bookmarks()?,
             "split1"     => self.set_split_level(1),
             "split2"     => self.set_split_level(2),
             "split3"     => self.set_split_level(3),
@@ -1456,6 +1533,47 @@ impl App {
     }
 
     // ── Create folder/file ────────────────────────────────────────────────────
+
+    fn request_delete(&mut self) -> Result<()> {
+        let Some(target) = self.action_target_path() else {
+            self.status = String::from("No hay item para eliminar");
+            return Ok(());
+        };
+        let name = target.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| target.display().to_string());
+        self.status = format!("Eliminar '{name}'?  Enter=confirmar  Esc=cancelar");
+        self.pending_delete = Some(target);
+        Ok(())
+    }
+
+    fn confirm_delete(&mut self) -> Result<()> {
+        let Some(target) = self.pending_delete.take() else {
+            return Ok(());
+        };
+        let name = target.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| target.display().to_string());
+        let result = if target.is_dir() {
+            fs::remove_dir_all(&target)
+        } else {
+            fs::remove_file(&target)
+        };
+        match result {
+            Ok(()) => {
+                if self.current_file.as_ref() == Some(&target) {
+                    self.current_file = None;
+                    self.preview = crate::markdown::PreviewDocument::default();
+                }
+                self.reload_items()?;
+                self.status = format!("Eliminado: {name}");
+            }
+            Err(e) => {
+                self.status = format!("Error al eliminar: {e}");
+            }
+        }
+        Ok(())
+    }
 
     fn open_rename(&mut self) -> Result<()> {
         let Some(target) = self.action_target_path() else {
@@ -1884,6 +2002,35 @@ fn git_is_available() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn inject_bookmarks(items: &mut Vec<DocItem>, config: &AppConfig) {
+    if !config.show_bookmarks || config.bookmarks.is_empty() {
+        return;
+    }
+    let bookmark_items: Vec<DocItem> = config.bookmarks.iter()
+        .filter_map(|bm| {
+            let path = PathBuf::from(bm);
+            if !path.exists() { return None; }
+            let is_dir = path.is_dir();
+            let name = path.file_name()
+                .map(|n| format!("★ {}", n.to_string_lossy()))
+                .unwrap_or_else(|| format!("★ {}", bm));
+            Some(DocItem {
+                path: path.clone(),
+                name,
+                relative: path,
+                depth: 0,
+                is_dir,
+                is_bookmark: true,
+            })
+        })
+        .collect();
+    if !bookmark_items.is_empty() {
+        let mut new_items = bookmark_items;
+        new_items.extend(items.drain(..));
+        *items = new_items;
+    }
 }
 
 fn get_file_mtime(path: &Path) -> Option<SystemTime> {

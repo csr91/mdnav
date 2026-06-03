@@ -9,6 +9,8 @@ pub struct AppConfig {
     pub only_mds: bool,
     pub editor: String,
     pub language: String,
+    pub show_bookmarks: bool,
+    pub bookmarks: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -17,6 +19,8 @@ impl Default for AppConfig {
             only_mds: true,
             editor: String::from("nano"),
             language: String::from("es"),
+            show_bookmarks: true,
+            bookmarks: Vec::new(),
         }
     }
 }
@@ -54,12 +58,17 @@ impl AppConfig {
     }
 
     fn to_toml(&self) -> String {
-        format!(
-            "# mdnav user config\nonly_mds = {}\neditor = \"{}\"\nlanguage = \"{}\"\n",
+        let mut s = format!(
+            "# mdnav user config\nonly_mds = {}\neditor = \"{}\"\nlanguage = \"{}\"\nshow_bookmarks = {}\n",
             if self.only_mds { "true" } else { "false" },
             self.editor,
-            self.language
-        )
+            self.language,
+            if self.show_bookmarks { "true" } else { "false" },
+        );
+        for bm in &self.bookmarks {
+            s.push_str(&format!("bookmark = \"{}\"\n", bm));
+        }
+        s
     }
 }
 
@@ -79,16 +88,13 @@ fn parse_config(content: &str) -> AppConfig {
         let key = key.trim();
         let value = value.trim().trim_matches('"');
 
-        if key == "only_mds" {
-            config.only_mds = matches!(value, "true" | "1" | "yes" | "on");
-        }
-
-        if key == "editor" && matches!(value, "nano" | "vim") {
-            config.editor = value.to_string();
-        }
-
-        if key == "language" && matches!(value, "es" | "en") {
-            config.language = value.to_string();
+        match key {
+            "only_mds"       => config.only_mds = matches!(value, "true" | "1" | "yes" | "on"),
+            "editor" if matches!(value, "nano" | "vim") => config.editor = value.to_string(),
+            "language" if matches!(value, "es" | "en") => config.language = value.to_string(),
+            "show_bookmarks" => config.show_bookmarks = matches!(value, "true" | "1" | "yes" | "on"),
+            "bookmark" if !value.is_empty() => config.bookmarks.push(value.to_string()),
+            _ => {}
         }
     }
 

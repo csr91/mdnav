@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
 
 use std::{
     fs,
@@ -7,8 +8,22 @@ use std::{
 
 use anyhow::{Context, Result};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
 
 use crate::docs::LinkTarget;
+
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+
+fn syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+fn theme_set() -> &'static ThemeSet {
+    THEME_SET.get_or_init(ThemeSet::load_defaults)
+}
 
 #[derive(Clone, Debug)]
 pub enum PreviewLineKind {
@@ -22,6 +37,7 @@ pub enum PreviewLineKind {
 pub struct PreviewLine {
     pub text: String,
     pub kind: PreviewLineKind,
+    pub highlights: Vec<(String, [u8; 3])>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,8 +73,32 @@ pub struct PreviewDocument {
 pub fn load_preview(path: &Path) -> Result<PreviewDocument> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("No se pudo leer {}", path.display()))?;
-    Ok(render_preview(path, &content))
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if matches!(ext.as_str(), "md" | "markdown" | "") {
+        Ok(render_preview(path, &content))
+    } else {
+        Ok(render_source_file(path, &content, &ext))
+    }
 }
+
+fn render_source_file(_path: &Path, content: &str, language: &str) -> PreviewDocument {
+    let raw_lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let highlighted = highlight_code_block(&raw_lines, language);
+    let lines = highlighted.into_iter()
+        .map(|(text, highlights)| PreviewLine {
+            text,
+            kind: PreviewLineKind::Normal,
+            highlights,
+        })
+        .collect();
+    PreviewDocument {
+        lines,
+        links: vec![],
+        mermaid_blocks: 0,
+        mermaid_diagrams: vec![],
+    }
+}
+
 
 pub fn mermaid_terminal_canvas(diagram: &MermaidBlock) -> MermaidCanvas {
     // Diagrams that are not flowcharts can't be rendered as boxes — show source
@@ -169,6 +209,8 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
     let mut mermaid_blocks = 0usize;
     let mut mermaid_diagrams = Vec::new();
     let mut current_mermaid = Vec::new();
+    let mut current_code_language = String::new();
+    let mut code_block_lines: Vec<String> = Vec::new();
 
     for event in parser {
         match event {
@@ -212,18 +254,31 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
                     current_mermaid.clear();
                     mermaid_blocks += 1;
                 } else {
+                    current_code_language = language.clone();
+                    code_block_lines.clear();
                     lines.push(PreviewLine {
                         text: format!("```{language}"),
                         kind: PreviewLineKind::CodeFence,
+                        highlights: vec![],
                     });
                 }
             }
             Event::End(TagEnd::CodeBlock) => {
                 code_block = false;
                 if !mermaid_block {
+                    let highlighted = highlight_code_block(&code_block_lines, &current_code_language);
+                    for (line_text, line_highlights) in highlighted {
+                        lines.push(PreviewLine {
+                            text: line_text,
+                            kind: PreviewLineKind::CodeFence,
+                            highlights: line_highlights,
+                        });
+                    }
+                    code_block_lines.clear();
                     lines.push(PreviewLine {
                         text: String::from("```"),
                         kind: PreviewLineKind::CodeFence,
+                        highlights: vec![],
                     });
                 } else {
                     let source = current_mermaid.join("\n");
@@ -231,11 +286,13 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
                     lines.push(PreviewLine {
                         text: format!("{title}    Shift+M to open"),
                         kind: PreviewLineKind::MermaidTitle,
+                        highlights: vec![],
                     });
                     mermaid_diagrams.push(MermaidBlock { title, source });
                     lines.push(PreviewLine {
                         text: String::new(),
                         kind: PreviewLineKind::Normal,
+                        highlights: vec![],
                     });
                 }
                 mermaid_block = false;
@@ -243,6 +300,7 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
                 lines.push(PreviewLine {
                     text: String::new(),
                     kind: PreviewLineKind::Normal,
+                    highlights: vec![],
                 });
             }
             Event::Start(Tag::Link { dest_url, title, .. }) => {
@@ -268,10 +326,9 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
                         current_mermaid.push(raw_line.to_string());
                     }
                 } else if code_block {
-                    lines.push(PreviewLine {
-                        text: text.to_string(),
-                        kind: PreviewLineKind::CodeFence,
-                    });
+                    for raw_line in text.lines() {
+                        code_block_lines.push(raw_line.to_string());
+                    }
                 } else {
                     current.push_str(&text);
                 }
@@ -289,6 +346,7 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
                 lines.push(PreviewLine {
                     text: String::from("----------------"),
                     kind: PreviewLineKind::Normal,
+                    highlights: vec![],
                 });
             }
             Event::End(TagEnd::Paragraph) => {
@@ -296,6 +354,7 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
                 lines.push(PreviewLine {
                     text: String::new(),
                     kind: PreviewLineKind::Normal,
+                    highlights: vec![],
                 });
             }
             Event::End(TagEnd::Heading(_)) => {
@@ -304,6 +363,7 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
                 lines.push(PreviewLine {
                     text: String::new(),
                     kind: PreviewLineKind::Normal,
+                    highlights: vec![],
                 });
             }
             _ => {}
@@ -325,17 +385,44 @@ fn flush_line(current: &mut String, current_kind: &mut PreviewLineKind, lines: &
         lines.push(PreviewLine {
             text: current.trim_end().to_string(),
             kind: current_kind.clone(),
+            highlights: vec![],
         });
         current.clear();
     } else if !current.is_empty() {
         lines.push(PreviewLine {
             text: String::new(),
             kind: PreviewLineKind::Normal,
+            highlights: vec![],
         });
         current.clear();
     }
 
     *current_kind = PreviewLineKind::Normal;
+}
+
+fn highlight_code_block(lines: &[String], language: &str) -> Vec<(String, Vec<(String, [u8; 3])>)> {
+    let ps = syntax_set();
+    let ts = theme_set();
+    let syntax = ps.find_syntax_by_token(language)
+        .or_else(|| ps.find_syntax_by_extension(language))
+        .unwrap_or_else(|| ps.find_syntax_plain_text());
+    let theme = ts.themes.get("base16-ocean.dark")
+        .or_else(|| ts.themes.values().next());
+    let Some(theme) = theme else {
+        return lines.iter().map(|l| (l.clone(), vec![])).collect();
+    };
+    let mut h = HighlightLines::new(syntax, theme);
+
+    lines.iter().map(|line| {
+        let ranges = h.highlight_line(line, ps).unwrap_or_default();
+        let spans: Vec<(String, [u8; 3])> = ranges.iter()
+            .filter(|(_, text)| !text.is_empty())
+            .map(|(style, text)| {
+                (text.to_string(), [style.foreground.r, style.foreground.g, style.foreground.b])
+            })
+            .collect();
+        (line.clone(), spans)
+    }).collect()
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {

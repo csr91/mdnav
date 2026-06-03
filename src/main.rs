@@ -30,14 +30,16 @@ fn main() -> Result<()> {
 fn run_cli(docs_root: PathBuf) -> Result<()> {
     let config = AppConfig::load()?;
     let mut resume_path: Option<PathBuf> = None;
+    let mut current_root = docs_root;
 
     loop {
         let mut terminal = setup_terminal()?;
-        let result = run(&mut terminal, docs_root.clone(), config.clone(), resume_path.take());
+        let result = run(&mut terminal, current_root.clone(), config.clone(), resume_path.take());
         restore_terminal(&mut terminal)?;
         let app = result?;
 
         if let Some(path) = app.pending_external_edit.clone() {
+            current_root = app.root.clone();
             open_in_editor(&path, &app.config.editor)?;
             resume_path = Some(path);
             continue;
@@ -70,7 +72,11 @@ fn resolve_command() -> Result<CliCommand> {
         [path] => {
             let docs_root = PathBuf::from(path);
             if docs_root.exists() {
-                let docs_root = docs_root.canonicalize().unwrap_or(docs_root);
+                let docs_root = if docs_root.is_absolute() {
+                    docs_root
+                } else {
+                    env::current_dir()?.join(&docs_root)
+                };
                 Ok(CliCommand::Run { docs_root })
             } else {
                 Err(anyhow::anyhow!(
@@ -142,7 +148,9 @@ fn emit_pending_cd(app: &App) {
 }
 
 fn open_in_editor(path: &PathBuf, editor: &str) -> Result<()> {
-    let status = Command::new(editor).arg(path).status()?;
+    let path_str = path.to_string_lossy();
+    let path_str = path_str.trim_start_matches(r"\\?\");
+    let status = Command::new(editor).arg(path_str).status()?;
     if status.success() {
         Ok(())
     } else {

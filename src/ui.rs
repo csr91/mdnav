@@ -62,6 +62,11 @@ pub fn render(frame: &mut Frame, app: &App) {
             Span::styled(hint, Style::default().fg(Color::Gray)),
         ]))
         .block(Block::default().borders(Borders::TOP))
+    } else if app.pending_delete.is_some() {
+        Paragraph::new(Line::from(vec![
+            Span::styled(app.status.clone(), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        ]))
+        .block(Block::default().borders(Borders::TOP))
     } else if app.pending_go_up {
         Paragraph::new(Line::from(vec![
             Span::styled("Go up?  ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -181,32 +186,54 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
     let (start, end, local_selected) =
         tree_window(app.items.len(), app.selected_index, visible_height.max(1));
 
+    let n_bookmarks = app.items.iter().take_while(|i| i.is_bookmark).count();
+    let has_separator = n_bookmarks > 0 && app.items.len() > n_bookmarks;
+    let adjusted_selected = if has_separator && local_selected >= n_bookmarks {
+        local_selected + 1
+    } else {
+        local_selected
+    };
+
     let items = app
         .items
         .iter()
+        .enumerate()
         .skip(start)
         .take(end.saturating_sub(start))
-        .map(|item| {
-            let indent = "  ".repeat(item.depth);
-            let marker = if item.is_dir {
-                if app.expanded_dirs.contains(&item.path) {
-                    "v"
-                } else {
-                    ">"
-                }
-            } else {
-                "-"
-            };
-            let selector = if app.selector_path.as_ref() == Some(&item.path) {
-                "*"
-            } else {
-                " "
-            };
+        .flat_map(|(idx, item)| {
+            let mut result = Vec::new();
 
-            ListItem::new(Line::from(vec![Span::raw(format!(
-                "{selector}{indent}{marker} {}",
-                item.name
-            ))]))
+            // separator between bookmark section and regular items
+            if idx == n_bookmarks && n_bookmarks > 0 {
+                result.push(ListItem::new(Line::from(Span::styled(
+                    " ─────────────────────",
+                    Style::default().fg(Color::DarkGray),
+                ))));
+            }
+
+            if item.is_bookmark {
+                let selector = if app.selector_path.as_ref() == Some(&item.path) { "*" } else { " " };
+                let marker = if item.is_dir { ">" } else { "-" };
+                result.push(ListItem::new(Line::from(vec![
+                    Span::raw(format!("{selector}")),
+                    Span::styled(
+                        format!("{marker} {}", item.name),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ),
+                ])));
+            } else {
+                let indent = "  ".repeat(item.depth);
+                let marker = if item.is_dir {
+                    if app.expanded_dirs.contains(&item.path) { "v" } else { ">" }
+                } else { "-" };
+                let selector = if app.selector_path.as_ref() == Some(&item.path) { "*" } else { " " };
+                result.push(ListItem::new(Line::from(vec![Span::raw(format!(
+                    "{selector}{indent}{marker} {}",
+                    item.name
+                ))])));
+            }
+
+            result
         })
         .collect::<Vec<_>>();
 
@@ -239,7 +266,7 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
         .highlight_symbol(" ");
 
     let mut state = ListState::default();
-    state.select(Some(local_selected));
+    state.select(Some(adjusted_selected));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -590,6 +617,8 @@ fn shortcut_lines(s: &'static Strings) -> Vec<Line<'static>> {
         shortcut_line("Tab / Shift+Tab", s.sc_tab),
         shortcut_line("Shift+Y", s.sc_shift_y),
         shortcut_line("Shift+E", s.sc_shift_e),
+        shortcut_line("Shift+R", s.sc_shift_r),
+        shortcut_line("Shift+B", s.sc_shift_b),
         shortcut_line("Ctrl+Shift+C", s.sc_ctrl_shift_c),
         shortcut_line("Shift+G", s.sc_shift_g),
         shortcut_line("Shift+0", s.sc_shift_0),
@@ -648,6 +677,18 @@ fn settings_lines(app: &App, s: &'static Strings) -> Vec<Line<'static>> {
             Span::styled(s.settings_language_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled(language_value, val_style),
         ]),
+        Line::from(vec![
+            Span::raw(cursor(3)),
+            Span::styled(s.settings_bookmarks_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                if app.config.show_bookmarks { "ON" } else { "OFF" },
+                if app.config.show_bookmarks {
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                },
+            ),
+        ]),
         Line::from(""),
         Line::from(s.settings_only_mds_desc),
         Line::from(s.settings_editor_desc),
@@ -680,9 +721,19 @@ fn styled_preview_line(
 ) -> Line<'static> {
     let mut base_style = preview_line_style(&line.kind);
 
-    // Highlight the line where the active link lives
     if active_link_line == Some(line_index) {
         base_style = base_style.bg(Color::DarkGray);
+    }
+
+    // syntax highlighted code line
+    if !line.highlights.is_empty() {
+        let spans: Vec<Span> = line.highlights.iter()
+            .map(|(text, rgb)| Span::styled(
+                text.clone(),
+                Style::default().fg(Color::Rgb(rgb[0], rgb[1], rgb[2])),
+            ))
+            .collect();
+        return Line::from(spans);
     }
 
     let selected_range = selection_range_for_line(selection, line_index, line.text.chars().count());

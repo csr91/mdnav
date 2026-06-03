@@ -13,6 +13,7 @@ pub struct DocItem {
     pub relative: PathBuf,
     pub depth: usize,
     pub is_dir: bool,
+    pub is_bookmark: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +99,7 @@ fn make_item(root: &Path, path: PathBuf, depth: usize, is_dir: bool) -> Result<D
         relative,
         depth,
         is_dir,
+        is_bookmark: false,
     })
 }
 
