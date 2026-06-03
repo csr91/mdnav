@@ -47,9 +47,13 @@ echo
 
 SHELL_NAME="$(basename "$SHELL")"
 if [[ "$SHELL_NAME" == "bash" || "$SHELL_NAME" == "zsh" ]]; then
-  read -r -p "Instalar shell hook para $SHELL_NAME (cd automatico con Shift+G)? [s/N] " resp </dev/tty
+  RC_FILE="$HOME/.${SHELL_NAME}rc"
+  if [ -t 0 ]; then
+    read -r -p "Instalar shell hook para $SHELL_NAME (cd automatico con Shift+G)? [s/N] " resp
+  else
+    read -r -p "Instalar shell hook para $SHELL_NAME (cd automatico con Shift+G)? [s/N] " resp </dev/tty 2>/dev/null || resp="s"
+  fi
   if [[ "$resp" == "s" || "$resp" == "S" ]]; then
-    RC_FILE="$HOME/.${SHELL_NAME}rc"
     echo "source <(mdnav --shell-hook $SHELL_NAME)" >> "$RC_FILE"
     echo "Hook instalado en $RC_FILE. Abri una nueva terminal para activarlo."
   fi
