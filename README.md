@@ -7,13 +7,13 @@ Explorador TUI para navegar documentacion Markdown y proyectos MkDocs desde la t
 Windows desde PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/csr91/mdnav/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/csr91/mdnav/master/install.ps1 | iex
 ```
 
 Linux desde shell:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/csr91/mdnav/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/csr91/mdnav/master/install.sh | bash
 ```
 
 El instalador pregunta si instalar el shell hook para `Shift+G` (cd automatico al salir).
@@ -23,7 +23,7 @@ El instalador pregunta si instalar el shell hook para `Shift+G` (cd automatico a
 Windows:
 
 ```powershell
-irm https://raw.githubusercontent.com/csr91/mdnav/main/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/csr91/mdnav/master/uninstall.ps1 | iex
 ```
 
 Linux: elimina el binario de `~/.local/bin/mdnav` y la linea del hook en `~/.bashrc` o `~/.zshrc`.
