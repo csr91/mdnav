@@ -2,84 +2,106 @@
 
 Explorador TUI para navegar documentacion Markdown y proyectos MkDocs desde la terminal.
 
-## Instalacion rapida
+Navega el arbol de archivos, previsualiza Markdown con syntax highlighting, editá con tu editor favorito y gestioná tu repo git — todo sin salir de la terminal.
 
-Windows desde PowerShell:
+## Instalacion
 
+**Windows (PowerShell):**
 ```powershell
 irm https://raw.githubusercontent.com/csr91/mdnav/master/install.ps1 | iex
 ```
 
-Linux desde shell:
-
+**Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/csr91/mdnav/master/install.sh | bash
 ```
 
-El instalador pregunta si instalar el shell hook para `Shift+G` (cd automatico al salir).
+El instalador pregunta si configurar el shell hook para cd automático con `Shift+G`.
 
 ## Desinstalacion
 
-Windows:
-
+**Windows:**
 ```powershell
 irm https://raw.githubusercontent.com/csr91/mdnav/master/uninstall.ps1 | iex
 ```
 
-Linux: elimina el binario de `~/.local/bin/mdnav` y la linea del hook en `~/.bashrc` o `~/.zshrc`.
+**Linux:** eliminá `~/.local/bin/mdnav` y la línea del hook en `~/.bashrc` o `~/.zshrc`.
 
 ## Uso
 
 ```bash
 mdnav              # abre el directorio actual
-mdnav ruta/docs    # abre una carpeta especifica
-mdnav --version    # muestra la version instalada
+mdnav ruta/docs    # abre una carpeta específica
+mdnav --version    # versión instalada
 ```
 
 ## Controles
 
-### Navegacion
+### Navegación
 
-| Tecla | Accion |
+| Tecla | Acción |
 |-------|--------|
-| `j` / `k` o `↑` / `↓` | mover seleccion en el arbol |
+| `j` / `k` o `↑` / `↓` | mover selección en el árbol |
 | `l` / `Enter` o `→` | expandir carpeta o abrir archivo |
 | `h` / `Backspace` o `←` | colapsar carpeta o subir al padre |
-| `Tab` / `Shift+Tab` | cambiar foco entre arbol y preview |
-| `Shift+G` | dejar pendiente cd al directorio del item |
-| `Shift+E` | abrir editor sobre el archivo actual |
+| `← ←` (dos veces) | subir un nivel por encima del root |
+| `Tab` / `Shift+Tab` | cambiar foco entre árbol y preview |
+| `Shift+G` | cd pendiente al directorio del item |
+| `Shift+E` | abrir archivo en el editor configurado |
+| `Shift+R` | renombrar archivo o carpeta |
+| `Shift+X` | eliminar con confirmación |
+| `Shift+B` | marcar/desmarcar bookmark |
 | `Shift+0` | pantalla completa del panel enfocado |
-| `Shift+1..5` | ajustar separacion entre paneles |
+| `Shift+1..5` | ajustar proporción entre paneles |
 | `Ctrl+Shift+C` | copiar ruta del archivo seleccionado |
 | `q` | salir |
 
 ### Preview
 
-| Tecla | Accion |
+| Tecla | Acción |
 |-------|--------|
-| `j` / `k` o `,` / `.` | scroll linea a linea |
-| `PgUp` / `PgDn` | scroll rapido |
+| `j` / `k` o `,` / `.` | scroll línea a línea |
+| `PgUp` / `PgDn` | scroll rápido |
 | `h` / `l` o `[` / `]` | navegar links |
 | `Shift+T` | tabla de contenidos |
 | `Shift+M` | acciones Mermaid |
-| `:` | command palette |
-| `?` | ayuda |
 
-### Seleccion y copia
+### Selección y copia
 
-| Tecla | Accion |
+| Tecla | Acción |
 |-------|--------|
-| `Shift+Y` | activar cursor de seleccion |
-| `y` | marcar ancla (inicio de seleccion) |
+| `Shift+Y` | activar cursor de selección |
+| `y` | marcar ancla (inicio de selección) |
 | mover cursor | extiende el highlight |
-| `y` | copiar seleccion al portapapeles |
-| `Esc` | salir del modo seleccion |
+| `y` | copiar al portapapeles y soltar ancla |
+| `Esc` | salir del modo selección |
 
-## Integracion de shell
+### Command palette (estilo vim)
 
-Para cd automatico al salir con `Shift+G`:
+Presioná `:` para abrir. Comandos disponibles:
 
-**PowerShell** (se configura automaticamente con el instalador):
+`:q` `:files` `:find` `:create` `:git` `:select` `:edit` `:rename` `:delete` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:split1..5`
+
+## Settings
+
+Abrí `?` → pestaña **Settings** (o **Ajustes**). Navegá con `j`/`k` y cambiá con `Enter`:
+
+| Setting | Valores | Descripción |
+|---------|---------|-------------|
+| Solo Mds | ON / OFF | muestra solo `.md` en el árbol |
+| Editor | nano / vim | editor que abre `Shift+E` |
+| Idioma | es / en | idioma de la interfaz |
+| Bookmarks | ON / OFF | muestra/oculta bookmarks en el árbol |
+
+La configuración se guarda en:
+- Windows: `%APPDATA%\mdnav\config.toml`
+- Linux: `~/.config/mdnav/config.toml`
+
+## Shell hook
+
+Para que `Shift+G` cambie el directorio automáticamente al salir:
+
+**PowerShell** (se configura solo con el instalador):
 ```powershell
 mdnav --shell-hook powershell >> $PROFILE
 ```
@@ -94,34 +116,10 @@ echo 'source <(mdnav --shell-hook bash)' >> ~/.bashrc
 echo 'source <(mdnav --shell-hook zsh)' >> ~/.zshrc
 ```
 
-## Settings
+## Bookmarks
 
-Abre `?` y ve a la pestana **Settings** (o **Ajustes**). Usa `↑↓` para seleccionar y `Enter` para cambiar:
+Marcá carpetas favoritas con `Shift+B` — aparecen con `★` al tope del árbol. Activar un bookmark cambia el root a esa carpeta. Toglear visibilidad con `:bookmarks` o desde Settings.
 
-- **Solo Mds / Only Mds**: muestra solo archivos `.md` en el arbol
-- **Editor**: `nano` o `vim`, usado con `Shift+E`
-- **Idioma / Language**: `es` (Espanol) o `en` (English)
+## Autor
 
-La configuracion se guarda en:
-- Windows: `%APPDATA%\mdnav\config.toml`
-- Linux: `~/.config/mdnav/config.toml`
-
-## Requisitos para compilar
-
-- Rust
-- Windows: Visual Studio Build Tools con workload C++
-- Linux: `cargo build --release`
-- Cross-build Linux desde Windows: Zig
-
-## Generar release
-
-Windows:
-```powershell
-.\package-release.ps1
-```
-
-Linux:
-```bash
-cargo build --release
-tar -czf mdnav-linux-x86_64.tar.gz -C target/release mdnav
-```
+Cesar Mendoza — cesar.mendoza.77@gmail.com
