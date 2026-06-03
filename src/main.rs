@@ -2,13 +2,14 @@ mod app;
 mod config;
 mod docs;
 mod markdown;
+mod strings;
 mod ui;
 
-use std::{env, io, path::PathBuf, process::Command};
+use std::{env, io, path::PathBuf, process::Command, time::Duration};
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event},
+    event::{self, Event, poll},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -37,7 +38,7 @@ fn run_cli(docs_root: PathBuf) -> Result<()> {
         let app = result?;
 
         if let Some(path) = app.pending_external_edit.clone() {
-            open_in_nano(&path)?;
+            open_in_editor(&path, &app.config.editor)?;
             resume_path = Some(path);
             continue;
         }
@@ -59,6 +60,10 @@ fn resolve_command() -> Result<CliCommand> {
         [] => Ok(CliCommand::Run {
             docs_root: PathBuf::from("."),
         }),
+        [flag] if flag == "--version" || flag == "-V" => {
+            println!("mdnav {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
         [flag, shell] if flag == "--shell-hook" => Ok(CliCommand::ShellHook {
             shell: shell.to_string(),
         }),
@@ -109,8 +114,12 @@ fn run(
     while app.running {
         terminal.draw(|frame| ui::render(frame, &app))?;
 
-        if let Event::Key(key_event) = event::read()? {
-            app.handle_key(key_event)?;
+        if poll(Duration::from_millis(500))? {
+            if let Event::Key(key_event) = event::read()? {
+                app.handle_key(key_event)?;
+            }
+        } else {
+            app.check_external_changes()?;
         }
     }
 
@@ -131,12 +140,12 @@ fn emit_pending_cd(app: &App) {
     println!("Run this in your shell: cd \"{}\"", target.display());
 }
 
-fn open_in_nano(path: &PathBuf) -> Result<()> {
-    let status = Command::new("nano").arg(path).status()?;
+fn open_in_editor(path: &PathBuf, editor: &str) -> Result<()> {
+    let status = Command::new(editor).arg(path).status()?;
     if status.success() {
         Ok(())
     } else {
-        Err(anyhow::anyhow!("nano termino con estado {status}"))
+        Err(anyhow::anyhow!("{editor} termino con estado {status}"))
     }
 }
 
@@ -161,8 +170,24 @@ fn shell_hook_script(shell: &str) -> Result<String> {
 }
 "#,
         )),
+        "powershell" => Ok(String::from(
+            r#"function mdnav {
+  $tmp = [System.IO.Path]::GetTempFileName()
+  $env:MDNAV_CD_FILE = $tmp
+  & "$env:LOCALAPPDATA\mdnav\bin\mdnav.exe" @args
+  Remove-Item Env:\MDNAV_CD_FILE -ErrorAction SilentlyContinue
+  if ((Test-Path $tmp) -and (Get-Item $tmp).Length -gt 0) {
+    $target = (Get-Content $tmp -Raw).Trim()
+    Remove-Item $tmp -Force
+    if ($target) { Set-Location $target }
+  } else {
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+  }
+}
+"#,
+        )),
         _ => Err(anyhow::anyhow!(
-            "Shell no soportada: {shell}. Usa bash o zsh."
+            "Shell no soportada: {shell}. Usa bash, zsh o powershell."
         )),
     }
 }

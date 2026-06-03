@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     env,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -94,6 +94,7 @@ pub struct SelectionState {
     pub cursor: PreviewCursor,
     pub preferred_column: usize,
     pub previous_fullscreen: FullscreenPanel,
+    pub anchored: bool,
 }
 
 pub struct App {
@@ -148,6 +149,9 @@ pub struct App {
     pub git_available: bool,
     pub git_state: GitState,
     pub git_commit_input: String,
+    pub settings_cursor: usize,
+    pub file_mtime: Option<SystemTime>,
+    pub tree_sig: u64,
 }
 
 impl App {
@@ -166,6 +170,9 @@ impl App {
         } else {
             PreviewDocument::default()
         };
+
+        let file_mtime = current_file.as_ref().and_then(|p| get_file_mtime(p));
+        let tree_sig = compute_tree_sig(&root, &expanded_dirs);
 
         Ok(Self {
             root,
@@ -215,6 +222,9 @@ impl App {
             git_available: git_is_available(),
             git_state: GitState::CommandList,
             git_commit_input: String::new(),
+            settings_cursor: 0,
+            file_mtime,
+            tree_sig,
         })
     }
 
@@ -243,8 +253,22 @@ impl App {
             KeyCode::Enter if self.focus == Focus::Preview => self.follow_active_link()?,
             KeyCode::Enter => self.activate_selected()?,
             KeyCode::Left | KeyCode::Backspace => self.collapse_or_parent()?,
-            KeyCode::Char('j') if self.focus == Focus::Preview => self.scroll_preview(1),
-            KeyCode::Char('k') if self.focus == Focus::Preview => self.scroll_preview(-1),
+            KeyCode::Char('j') => match self.focus {
+                Focus::Tree => self.move_selection(1),
+                Focus::Preview => self.scroll_preview(1),
+            },
+            KeyCode::Char('k') => match self.focus {
+                Focus::Tree => self.move_selection(-1),
+                Focus::Preview => self.scroll_preview(-1),
+            },
+            KeyCode::Char('h') => match self.focus {
+                Focus::Tree => self.collapse_or_parent()?,
+                Focus::Preview => self.move_link_cursor(-1),
+            },
+            KeyCode::Char('l') => match self.focus {
+                Focus::Tree => self.activate_selected()?,
+                Focus::Preview => self.move_link_cursor(1),
+            },
             KeyCode::Char('.') if self.focus == Focus::Preview => self.scroll_preview(1),
             KeyCode::Char(',') if self.focus == Focus::Preview => self.scroll_preview(-1),
             KeyCode::PageDown if self.focus == Focus::Preview => self.scroll_preview(20),
@@ -253,13 +277,16 @@ impl App {
             KeyCode::Char('[') if self.focus == Focus::Preview => self.move_link_cursor(-1),
             KeyCode::Char('Y') => self.toggle_selection_mode(),
             KeyCode::Char('E') => self.edit_target_in_nano()?,
+            KeyCode::Char('C') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                self.copy_path_to_clipboard()?;
+            }
             KeyCode::Char('!') => self.set_split_level(1),
             KeyCode::Char('@') => self.set_split_level(2),
             KeyCode::Char('#') => self.set_split_level(3),
             KeyCode::Char('$') => self.set_split_level(4),
             KeyCode::Char('%') => self.set_split_level(5),
             KeyCode::Char('G') => self.queue_cd_to_target_dir(),
-            KeyCode::Char('/') => self.open_command_palette(),
+            KeyCode::Char(':') => self.open_command_palette(),
             KeyCode::Char('T') => self.open_toc(),
             _ => {}
         }
@@ -268,12 +295,26 @@ impl App {
     }
 
     fn handle_selection_key(&mut self, key: KeyEvent) -> Result<()> {
+        let shift = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+        let anchored = self.selection.map(|s| s.anchored).unwrap_or(false);
+        let extend = shift || anchored;
         match key.code {
             KeyCode::Esc | KeyCode::Char('Y') => self.exit_selection_mode(),
-            KeyCode::Left => self.move_selection_cursor(-1, 0, key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)),
-            KeyCode::Right => self.move_selection_cursor(1, 0, key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)),
-            KeyCode::Up => self.move_selection_cursor(0, -1, key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)),
-            KeyCode::Down => self.move_selection_cursor(0, 1, key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)),
+            KeyCode::Char('y') => {
+                if anchored {
+                    self.copy_selected_text()?;
+                } else {
+                    if let Some(s) = self.selection.as_mut() {
+                        s.anchor = s.cursor;
+                        s.anchored = true;
+                    }
+                    self.status = String::from("Select: ON — mover extiende, y para copiar");
+                }
+            }
+            KeyCode::Left  | KeyCode::Char('h') => self.move_selection_cursor(-1, 0, extend),
+            KeyCode::Right | KeyCode::Char('l') => self.move_selection_cursor(1, 0, extend),
+            KeyCode::Up    | KeyCode::Char('k') => self.move_selection_cursor(0, -1, extend),
+            KeyCode::Down  | KeyCode::Char('j') => self.move_selection_cursor(0, 1, extend),
             _ => {}
         }
 
@@ -289,17 +330,28 @@ impl App {
                     self.help_section = HelpSection::Settings
                 }
                 KeyCode::BackTab => self.help_section = HelpSection::Shortcuts,
+                KeyCode::Up if self.help_section == HelpSection::Settings => {
+                    self.settings_cursor = self.settings_cursor.saturating_sub(1);
+                }
+                KeyCode::Down if self.help_section == HelpSection::Settings => {
+                    self.settings_cursor = (self.settings_cursor + 1).min(2);
+                }
                 KeyCode::Enter | KeyCode::Char(' ') if self.help_section == HelpSection::Settings => {
-                    self.toggle_only_mds()?;
+                    match self.settings_cursor {
+                        0 => self.toggle_only_mds()?,
+                        1 => self.toggle_editor()?,
+                        2 => self.toggle_language()?,
+                        _ => {}
+                    }
                 }
                 _ => {}
             },
             Overlay::MermaidSelect => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("Seleccion Mermaid cancelada"),
-                KeyCode::Up => {
+                KeyCode::Up | KeyCode::Char('k') => {
                     self.mermaid_selected_index = self.mermaid_selected_index.saturating_sub(1);
                 }
-                KeyCode::Down => {
+                KeyCode::Down | KeyCode::Char('j') => {
                     let max_index = self.preview.mermaid_diagrams.len().saturating_sub(1);
                     self.mermaid_selected_index = (self.mermaid_selected_index + 1).min(max_index);
                 }
@@ -313,11 +365,11 @@ impl App {
             },
             Overlay::MermaidOutput => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("Salida Mermaid cancelada"),
-                KeyCode::Up => {
+                KeyCode::Up | KeyCode::Char('k') => {
                     self.mermaid_output_selected_index =
                         self.mermaid_output_selected_index.saturating_sub(1);
                 }
-                KeyCode::Down => {
+                KeyCode::Down | KeyCode::Char('j') => {
                     self.mermaid_output_selected_index =
                         (self.mermaid_output_selected_index + 1).min(2);
                 }
@@ -355,10 +407,10 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('T') | KeyCode::Char('q') => {
                     self.close_overlay("TOC cerrado")
                 }
-                KeyCode::Up => {
+                KeyCode::Up | KeyCode::Char('k') => {
                     self.toc_cursor = self.toc_cursor.saturating_sub(1);
                 }
-                KeyCode::Down => {
+                KeyCode::Down | KeyCode::Char('j') => {
                     self.toc_cursor =
                         (self.toc_cursor + 1).min(self.toc_entries.len().saturating_sub(1));
                 }
@@ -440,8 +492,8 @@ impl App {
             Overlay::Git => match self.git_state {
                 GitState::CommandList => match key.code {
                     KeyCode::Esc => self.close_overlay("Git cerrado"),
-                    KeyCode::Up => self.move_git_cursor(-1),
-                    KeyCode::Down => self.move_git_cursor(1),
+                    KeyCode::Up | KeyCode::Char('k') => self.move_git_cursor(-1),
+                    KeyCode::Down | KeyCode::Char('j') => self.move_git_cursor(1),
                     KeyCode::Enter => self.run_git_command(),
                     _ => {}
                 },
@@ -676,6 +728,7 @@ impl App {
             cursor,
             preferred_column: column,
             previous_fullscreen: self.fullscreen,
+            anchored: false,
         });
         self.fullscreen = FullscreenPanel::Preview;
         self.status = String::from("Modo seleccion activo");
@@ -694,7 +747,7 @@ impl App {
 
         self.pending_external_edit = Some(target);
         self.running = false;
-        self.status = String::from("Relanzando mdnav despues de nano");
+        self.status = format!("Relanzando mdnav despues de {}", self.config.editor);
         Ok(())
     }
 
@@ -814,6 +867,63 @@ impl App {
         self.preview_scroll = next;
     }
 
+    fn copy_selected_text(&mut self) -> Result<()> {
+        let Some(selection) = self.selection else {
+            self.status = String::from("Nada seleccionado");
+            return Ok(());
+        };
+
+        let (start, end) = if (selection.anchor.line, selection.anchor.column)
+            <= (selection.cursor.line, selection.cursor.column)
+        {
+            (selection.anchor, selection.cursor)
+        } else {
+            (selection.cursor, selection.anchor)
+        };
+
+        if start == end {
+            self.status = String::from("Nada seleccionado");
+            return Ok(());
+        }
+
+        let mut text = String::new();
+        for line_idx in start.line..=end.line {
+            let Some(line) = self.preview.lines.get(line_idx) else {
+                continue;
+            };
+            let chars: Vec<char> = line.text.chars().collect();
+            let col_start = if line_idx == start.line { start.column.min(chars.len()) } else { 0 };
+            let col_end = if line_idx == end.line { end.column.min(chars.len()) } else { chars.len() };
+            if line_idx > start.line {
+                text.push('\n');
+            }
+            text.extend(&chars[col_start..col_end]);
+        }
+
+        let copied = copy_to_clipboard(&text).unwrap_or(false);
+        self.status = if copied {
+            format!("Copiado! ({} caracteres)  Esc para salir", text.chars().count())
+        } else {
+            String::from("Error al copiar al portapapeles")
+        };
+        Ok(())
+    }
+
+    fn copy_path_to_clipboard(&mut self) -> Result<()> {
+        let Some(target) = self.action_target_path() else {
+            self.status = String::from("No hay archivo seleccionado");
+            return Ok(());
+        };
+        let path_str = target.display().to_string();
+        let copied = copy_to_clipboard(&path_str).unwrap_or(false);
+        self.status = if copied {
+            format!("Ruta copiada: {path_str}")
+        } else {
+            String::from("Error al copiar la ruta")
+        };
+        Ok(())
+    }
+
     fn exit_selection_mode(&mut self) {
         if let Some(selection) = self.selection.take() {
             self.fullscreen = selection.previous_fullscreen;
@@ -895,6 +1005,49 @@ impl App {
             }
         }
 
+        self.tree_sig = compute_tree_sig(&self.root, &self.expanded_dirs);
+        Ok(())
+    }
+
+    pub fn check_external_changes(&mut self) -> Result<()> {
+        if let Some(path) = self.current_file.clone() {
+            let new_mtime = get_file_mtime(&path);
+            if new_mtime != self.file_mtime {
+                self.file_mtime = new_mtime;
+                self.preview = load_preview(&path)?;
+            }
+        }
+
+        let new_sig = compute_tree_sig(&self.root, &self.expanded_dirs);
+        if new_sig != self.tree_sig {
+            self.tree_sig = new_sig;
+            self.reload_items()?;
+        }
+
+        Ok(())
+    }
+
+    fn toggle_language(&mut self) -> Result<()> {
+        self.config.language = if self.config.language == "en" {
+            String::from("es")
+        } else {
+            String::from("en")
+        };
+        let path = self.config.save()?;
+        let display_path = config_path().unwrap_or(path);
+        self.status = format!("Language: {} | {}", self.config.language, display_path.display());
+        Ok(())
+    }
+
+    fn toggle_editor(&mut self) -> Result<()> {
+        self.config.editor = if self.config.editor == "vim" {
+            String::from("nano")
+        } else {
+            String::from("vim")
+        };
+        let path = self.config.save()?;
+        let display_path = config_path().unwrap_or(path);
+        self.status = format!("Editor: {} | {}", self.config.editor, display_path.display());
         Ok(())
     }
 
@@ -923,6 +1076,7 @@ impl App {
     fn open_file(&mut self, path: PathBuf) -> Result<()> {
         self.preview = load_preview(&path)?;
         self.preview_scroll = 0;
+        self.file_mtime = get_file_mtime(&path);
         self.current_file = Some(path.clone());
         self.overlay = Overlay::None;
         self.mermaid_selected_index = 0;
@@ -1604,6 +1758,20 @@ fn git_is_available() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn get_file_mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+fn compute_tree_sig(root: &PathBuf, expanded_dirs: &BTreeSet<PathBuf>) -> u64 {
+    std::iter::once(root)
+        .chain(expanded_dirs.iter())
+        .filter_map(|dir| fs::metadata(dir).ok()?.modified().ok())
+        .filter_map(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+        .fold(0u64, |acc, d| {
+            acc.wrapping_add(d.as_secs()).wrapping_add(d.subsec_nanos() as u64)
+        })
 }
 
 fn html_escape(value: &str) -> String {

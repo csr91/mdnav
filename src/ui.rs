@@ -10,6 +10,7 @@ use ratatui::{
 use crate::{
     app::{App, CreateKind, CreateStep, Focus, FullscreenPanel, GitState, HelpSection, Overlay, PreviewCursor},
     config::config_path,
+    strings::Strings,
 };
 use crate::markdown::{PreviewLine, PreviewLineKind};
 
@@ -34,12 +35,39 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_preview(frame, body[1], app);
     }
 
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled("== For Help Type: ? ==", Style::default().fg(Color::Yellow)),
-        footer_item_span(app),
-        pending_cd_span(app),
-    ]))
-    .block(Block::default().borders(Borders::TOP));
+    let s = app.config.strings();
+    let footer = if app.overlay == Overlay::CommandPalette {
+        Paragraph::new(Line::from(vec![
+            Span::styled(":", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(app.palette_query.clone(), Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+        ]))
+        .block(Block::default().borders(Borders::TOP))
+    } else if app.selection.as_ref().map(|s| s.anchored).unwrap_or(false) {
+        let (label, hint, color) = if app.status.starts_with("Copiado!") {
+            (app.status.clone(), String::new(), Color::Green)
+        } else {
+            (s.select_on.to_string(), s.select_copy_hint.to_string(), Color::Green)
+        };
+        Paragraph::new(Line::from(vec![
+            Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(hint, Style::default().fg(Color::Gray)),
+        ]))
+        .block(Block::default().borders(Borders::TOP))
+    } else if app.selection.is_some() {
+        Paragraph::new(Line::from(vec![
+            Span::styled(s.select_cursor.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(s.select_anchor_hint.to_string(), Style::default().fg(Color::Gray)),
+        ]))
+        .block(Block::default().borders(Borders::TOP))
+    } else {
+        Paragraph::new(Line::from(vec![
+            Span::styled(s.help_hint.to_string(), Style::default().fg(Color::Yellow)),
+            footer_item_span(app),
+            pending_cd_span(app),
+        ]))
+        .block(Block::default().borders(Borders::TOP))
+    };
 
     frame.render_widget(footer, areas[1]);
 
@@ -167,12 +195,13 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect::<Vec<_>>();
 
+    let s = app.config.strings();
     let title = if app.fullscreen == FullscreenPanel::Tree {
-        "Docs [fullscreen]"
+        s.tree_fullscreen
     } else if app.focus == Focus::Tree {
-        "Docs [focus]"
+        s.tree_focus
     } else {
-        "Docs"
+        s.tree_title
     };
 
     let list = List::new(items)
@@ -200,20 +229,21 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
+    let s = app.config.strings();
     let title = if app.fullscreen == FullscreenPanel::Preview {
         if app.selection.is_some() {
-            "Preview [select]"
+            s.preview_select
         } else {
-            "Preview [fullscreen]"
+            s.preview_fullscreen
         }
     } else if app.focus == Focus::Preview {
-        "Preview [focus]"
+        s.preview_focus
     } else {
-        "Preview"
+        s.preview_title
     };
 
     let lines = if app.preview.lines.is_empty() {
-        vec![Line::from("Selecciona un archivo Markdown para ver el contenido")]
+        vec![Line::from(s.preview_empty)]
     } else {
         // Line index of the active link (if any)
         let active_link_line = app
@@ -255,6 +285,7 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_mermaid_select_popup(frame: &mut Frame, app: &App) {
+    let s = app.config.strings();
     let popup_area = centered_rect(60, 40, frame.area());
     frame.render_widget(Clear, popup_area);
 
@@ -272,7 +303,7 @@ fn render_mermaid_select_popup(frame: &mut Frame, app: &App) {
     let list = List::new(items)
         .block(
             Block::default()
-                .title("Seleccionar Mermaid")
+                .title(s.mermaid_select_title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::LightMagenta)),
         )
@@ -288,7 +319,7 @@ fn render_mermaid_select_popup(frame: &mut Frame, app: &App) {
     state.select(Some(app.mermaid_selected_index));
     frame.render_stateful_widget(list, popup_area, &mut state);
 
-    let help = Paragraph::new("Up/Down elegir | Enter abrir | Esc cancelar")
+    let help = Paragraph::new(s.mermaid_select_hint)
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::Gray));
     let help_area = Rect {
@@ -301,19 +332,20 @@ fn render_mermaid_select_popup(frame: &mut Frame, app: &App) {
 }
 
 fn render_mermaid_output_popup(frame: &mut Frame, app: &App) {
+    let s = app.config.strings();
     let popup_area = centered_rect(44, 28, frame.area());
     frame.render_widget(Clear, popup_area);
 
     let items = vec![
-        ListItem::new(Line::from("Render terminal")),
-        ListItem::new(Line::from("Abrir HTML")),
-        ListItem::new(Line::from("Abrir web link")),
+        ListItem::new(Line::from(s.mermaid_render_terminal)),
+        ListItem::new(Line::from(s.mermaid_open_html)),
+        ListItem::new(Line::from(s.mermaid_open_web)),
     ];
 
     let list = List::new(items)
         .block(
             Block::default()
-                .title("Salida Mermaid")
+                .title(s.mermaid_output_title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::LightCyan)),
         )
@@ -406,10 +438,8 @@ fn render_mermaid_terminal_view(frame: &mut Frame, app: &App) {
         })
         .unwrap_or_default();
 
-    let title = format!(
-        "Mermaid [Esc] hjkl/arrows=pan  Tab=nodo{}",
-        node_hint
-    );
+    let s = app.config.strings();
+    let title = format!("{}{}",s.mermaid_view_title, node_hint);
 
     let paragraph = Paragraph::new(lines)
         .block(
@@ -424,11 +454,12 @@ fn render_mermaid_terminal_view(frame: &mut Frame, app: &App) {
 }
 
 fn render_help_popup(frame: &mut Frame, app: &App) {
+    let s = app.config.strings();
     let popup_area = centered_rect(68, 56, frame.area());
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
-        .title("Help")
+        .title(format!("Help  v{}", env!("CARGO_PKG_VERSION")))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
     let inner = block.inner(popup_area);
@@ -439,11 +470,11 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Length(3), Constraint::Min(6), Constraint::Length(2)])
         .split(inner);
 
-    render_help_tabs(frame, sections[0], app.help_section);
+    render_help_tabs(frame, sections[0], app.help_section, s);
 
     let lines = match app.help_section {
-        HelpSection::Shortcuts => shortcut_lines(),
-        HelpSection::Settings => settings_lines(app),
+        HelpSection::Shortcuts => shortcut_lines(s),
+        HelpSection::Settings => settings_lines(app, s),
     };
 
     let paragraph = Paragraph::new(lines)
@@ -456,9 +487,10 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
 
     frame.render_widget(paragraph, sections[1]);
 
+    let s = app.config.strings();
     let footer = match app.help_section {
-        HelpSection::Shortcuts => "Left/Right switch sections | ? or Esc close",
-        HelpSection::Settings => "Enter toggle | Left/Right switch sections | ? or Esc close",
+        HelpSection::Shortcuts => s.help_footer_shortcuts,
+        HelpSection::Settings => s.help_footer_settings,
     };
     frame.render_widget(
         Paragraph::new(footer)
@@ -472,6 +504,7 @@ fn render_web_link_popup(frame: &mut Frame, app: &App) {
     let popup_area = centered_rect(72, 32, frame.area());
     frame.render_widget(Clear, popup_area);
 
+    let s = app.config.strings();
     let link = app
         .web_link_popup
         .as_deref()
@@ -479,7 +512,7 @@ fn render_web_link_popup(frame: &mut Frame, app: &App) {
 
     let lines = vec![
         Line::from(vec![Span::styled(
-            "Link Manual Disponible:",
+            s.weblink_available,
             Style::default()
                 .fg(Color::LightCyan)
                 .add_modifier(Modifier::BOLD),
@@ -491,7 +524,7 @@ fn render_web_link_popup(frame: &mut Frame, app: &App) {
         )]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "Enter o Esc para cerrar",
+            s.weblink_close,
             Style::default().fg(Color::Gray),
         )]),
     ];
@@ -499,7 +532,7 @@ fn render_web_link_popup(frame: &mut Frame, app: &App) {
     let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
-                .title("Web Link")
+                .title(s.weblink_title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::LightGreen)),
         )
@@ -508,14 +541,14 @@ fn render_web_link_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(paragraph, popup_area);
 }
 
-fn render_help_tabs(frame: &mut Frame, area: Rect, selected: HelpSection) {
+fn render_help_tabs(frame: &mut Frame, area: Rect, selected: HelpSection, s: &'static Strings) {
     let tabs = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(18), Constraint::Length(18), Constraint::Min(1)])
         .split(area);
 
-    frame.render_widget(help_tab("Shortcuts", selected == HelpSection::Shortcuts), tabs[0]);
-    frame.render_widget(help_tab("Settings", selected == HelpSection::Settings), tabs[1]);
+    frame.render_widget(help_tab(s.tab_shortcuts, selected == HelpSection::Shortcuts), tabs[0]);
+    frame.render_widget(help_tab(s.tab_settings, selected == HelpSection::Settings), tabs[1]);
 }
 
 fn help_tab(title: &str, active: bool) -> Paragraph<'static> {
@@ -534,30 +567,31 @@ fn help_tab(title: &str, active: bool) -> Paragraph<'static> {
         .block(Block::default().borders(Borders::ALL))
 }
 
-fn shortcut_lines() -> Vec<Line<'static>> {
+fn shortcut_lines(s: &'static Strings) -> Vec<Line<'static>> {
     vec![
-        Line::from(vec![Span::styled("Navigation", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(s.nav_section, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
         Line::from(""),
-        shortcut_line("Enter", "abrir archivo o expandir carpeta"),
-        shortcut_line("Tab / Shift+Tab", "cambiar foco entre arbol y preview"),
-        shortcut_line("Shift+Y", "activar modo seleccion en preview"),
-        shortcut_line("Shift+E", "abrir nano sobre el archivo actual"),
-        shortcut_line("Shift+G", "dejar pendiente cd al directorio del item"),
-        shortcut_line("Shift+0", "pantalla completa del panel enfocado"),
-        shortcut_line("Shift+1..5", "ajustar proporcion entre paneles"),
-        shortcut_line("q", "salir"),
+        shortcut_line("Enter", s.sc_enter),
+        shortcut_line("Tab / Shift+Tab", s.sc_tab),
+        shortcut_line("Shift+Y", s.sc_shift_y),
+        shortcut_line("Shift+E", s.sc_shift_e),
+        shortcut_line("Ctrl+Shift+C", s.sc_ctrl_shift_c),
+        shortcut_line("Shift+G", s.sc_shift_g),
+        shortcut_line("Shift+0", s.sc_shift_0),
+        shortcut_line("Shift+1..5", s.sc_shift_1_5),
+        shortcut_line("q", s.sc_q),
         Line::from(""),
-        Line::from(vec![Span::styled("Preview", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(s.preview_section, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
         Line::from(""),
-        shortcut_line(", / .", "scroll del documento (línea a línea)"),
-        shortcut_line("PgUp / PgDn", "scroll del documento (salto rápido)"),
-        shortcut_line("Arrows", "mover cursor en modo seleccion"),
-        shortcut_line("Shift+Arrows", "extender seleccion en modo seleccion"),
-        shortcut_line("/", "buscar archivo en el arbol"),
-        shortcut_line("Shift+T", "tabla de contenidos del archivo"),
-        shortcut_line("[ / ]", "navegar links del preview  Enter=abrir"),
-        shortcut_line("Shift+M", "abrir acciones Mermaid"),
-        shortcut_line("?", "abrir o cerrar este menu"),
+        shortcut_line(", / .", s.sc_comma_dot),
+        shortcut_line("PgUp / PgDn", s.sc_pgupdn),
+        shortcut_line("Arrows / hjkl", s.sc_arrows),
+        shortcut_line("Shift+Arrows", s.sc_shift_arrows),
+        shortcut_line(":", s.sc_colon),
+        shortcut_line("Shift+T", s.sc_shift_t),
+        shortcut_line("[ / ]", s.sc_brackets),
+        shortcut_line("Shift+M", s.sc_shift_m),
+        shortcut_line("?", s.sc_question),
     ]
 }
 
@@ -568,34 +602,50 @@ fn shortcut_line(keys: &str, description: &str) -> Line<'static> {
     ])
 }
 
-fn settings_lines(app: &App) -> Vec<Line<'static>> {
-    let toggle = if app.config.only_mds { "ON" } else { "OFF" };
-    let toggle_style = if app.config.only_mds {
+fn settings_lines(app: &App, s: &'static Strings) -> Vec<Line<'static>> {
+    let only_mds_toggle = if app.config.only_mds { "ON" } else { "OFF" };
+    let only_mds_style = if app.config.only_mds {
         Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
     };
+    let editor_value = app.config.editor.clone();
+    let language_value = app.config.language.clone();
+    let val_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+
+    let cursor = |i: usize| if app.settings_cursor == i { "▶ " } else { "  " };
 
     vec![
-        Line::from(vec![Span::styled("User Config", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(s.settings_title, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Only Mds        ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled(toggle, toggle_style),
+            Span::raw(cursor(0)),
+            Span::styled(s.settings_only_mds_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(only_mds_toggle, only_mds_style),
+        ]),
+        Line::from(vec![
+            Span::raw(cursor(1)),
+            Span::styled(s.settings_editor_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(editor_value, val_style),
+        ]),
+        Line::from(vec![
+            Span::raw(cursor(2)),
+            Span::styled(s.settings_language_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(language_value, val_style),
         ]),
         Line::from(""),
-        Line::from("When ON, the tree shows only .md files."),
-        Line::from("When OFF, mdnav lists every file in the directory tree."),
+        Line::from(s.settings_only_mds_desc),
+        Line::from(s.settings_editor_desc),
+        Line::from(s.settings_language_desc),
         Line::from(""),
-        Line::from("This setting is stored per user."),
+        Line::from(s.settings_stored),
         Line::from(format!(
-            "Config path: {}",
+            "{}{}",
+            s.settings_config_path,
             config_path()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|_| "unavailable".to_string())
         )),
-        Line::from(""),
-        Line::from("Press Enter to toggle this setting."),
     ]
 }
 
@@ -666,7 +716,7 @@ fn selection_range_for_line(
     line_len: usize,
 ) -> Option<(usize, usize)> {
     let selection = selection?;
-    if selection.anchor == selection.cursor {
+    if !selection.anchored || selection.anchor == selection.cursor {
         return None;
     }
 
@@ -770,6 +820,7 @@ fn tree_window(total_items: usize, selected_index: usize, visible_height: usize)
 }
 
 fn render_toc_popup(frame: &mut Frame, app: &App) {
+    let s = app.config.strings();
     let popup_area = centered_rect(60, 60, frame.area());
     frame.render_widget(Clear, popup_area);
 
@@ -788,7 +839,7 @@ fn render_toc_popup(frame: &mut Frame, app: &App) {
     let list = List::new(items)
         .block(
             Block::default()
-                .title("Tabla de contenidos  Enter=ir | T/Esc=cerrar")
+                .title(s.toc_title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::LightGreen)),
         )
@@ -806,6 +857,7 @@ fn render_toc_popup(frame: &mut Frame, app: &App) {
 }
 
 fn render_search_popup(frame: &mut Frame, app: &App) {
+    let s = app.config.strings();
     let popup_area = centered_rect(60, 60, frame.area());
     frame.render_widget(Clear, popup_area);
 
@@ -818,7 +870,7 @@ fn render_search_popup(frame: &mut Frame, app: &App) {
     let input = Paragraph::new(format!("/{}", app.search_query))
         .block(
             Block::default()
-                .title("Buscar archivo")
+                .title(s.search_title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow)),
         )
@@ -828,7 +880,7 @@ fn render_search_popup(frame: &mut Frame, app: &App) {
     // Results list
     let items = if app.search_results.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            "Sin resultados",
+            s.search_no_results,
             Style::default().fg(Color::DarkGray),
         )))]
     } else {
@@ -846,7 +898,7 @@ fn render_search_popup(frame: &mut Frame, app: &App) {
     let list = List::new(items)
         .block(
             Block::default()
-                .title(format!("Resultados  Up/Down navegar | Enter abrir | Esc cerrar"))
+                .title(s.search_results_title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
@@ -866,25 +918,23 @@ fn render_search_popup(frame: &mut Frame, app: &App) {
 }
 
 fn render_command_palette(frame: &mut Frame, app: &App) {
-    let popup_area = centered_rect(50, 50, frame.area());
-    frame.render_widget(Clear, popup_area);
-
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(2)])
-        .split(popup_area);
-
-    let input = Paragraph::new(format!("> {}", app.palette_query))
-        .block(
-            Block::default()
-                .title("Comando  (Esc cerrar)")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
-        )
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(input, sections[0]);
-
     let filtered = app.palette_filtered();
+    if filtered.is_empty() {
+        return;
+    }
+
+    let total_area = frame.area();
+    let list_height = (filtered.len() as u16 + 2).min(total_area.height.saturating_sub(2));
+    let list_width = 50u16.min(total_area.width);
+    let list_area = Rect {
+        x: 0,
+        y: total_area.height.saturating_sub(list_height + 1),
+        width: list_width,
+        height: list_height,
+    };
+
+    frame.render_widget(Clear, list_area);
+
     let items: Vec<ListItem> = filtered
         .iter()
         .map(|(name, desc)| {
@@ -896,7 +946,7 @@ fn render_command_palette(frame: &mut Frame, app: &App) {
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)))
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)))
         .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD))
         .highlight_symbol("> ");
 
@@ -904,10 +954,11 @@ fn render_command_palette(frame: &mut Frame, app: &App) {
     if !filtered.is_empty() {
         state.select(Some(app.palette_cursor));
     }
-    frame.render_stateful_widget(list, sections[1], &mut state);
+    frame.render_stateful_widget(list, list_area, &mut state);
 }
 
 fn render_find_popup(frame: &mut Frame, app: &App) {
+    let s = app.config.strings();
     let popup_area = centered_rect(65, 65, frame.area());
     frame.render_widget(Clear, popup_area);
 
@@ -919,7 +970,7 @@ fn render_find_popup(frame: &mut Frame, app: &App) {
     let input = Paragraph::new(format!("/{}", app.find_query))
         .block(
             Block::default()
-                .title("Buscar en archivo  (Esc cerrar | Enter saltar)")
+                .title(s.find_title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Green)),
         )
@@ -928,7 +979,7 @@ fn render_find_popup(frame: &mut Frame, app: &App) {
 
     let items: Vec<ListItem> = if app.find_results.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            if app.find_query.is_empty() { "Escribe para buscar..." } else { "Sin resultados" },
+            if app.find_query.is_empty() { s.find_placeholder } else { s.find_no_results },
             Style::default().fg(Color::DarkGray),
         )))]
     } else {
@@ -947,7 +998,7 @@ fn render_find_popup(frame: &mut Frame, app: &App) {
     let list = List::new(items)
         .block(
             Block::default()
-                .title(format!("{} resultado(s)  ↑↓ navegar", app.find_results.len()))
+                .title(format!("{} {}",  app.find_results.len(), s.find_results_suffix))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
@@ -962,6 +1013,7 @@ fn render_find_popup(frame: &mut Frame, app: &App) {
 }
 
 fn render_create_popup(frame: &mut Frame, app: &App) {
+    let s = app.config.strings();
     let popup_area = centered_rect(50, 40, frame.area());
     frame.render_widget(Clear, popup_area);
 
@@ -974,7 +1026,7 @@ fn render_create_popup(frame: &mut Frame, app: &App) {
     let kind_items: Vec<ListItem> = vec![
         ListItem::new(Line::from(vec![
             Span::raw("  "),
-            Span::styled("Carpeta", if app.create_kind == CreateKind::Folder {
+            Span::styled(s.create_folder, if app.create_kind == CreateKind::Folder {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
@@ -982,7 +1034,7 @@ fn render_create_popup(frame: &mut Frame, app: &App) {
         ])),
         ListItem::new(Line::from(vec![
             Span::raw("  "),
-            Span::styled("Archivo", if app.create_kind == CreateKind::File {
+            Span::styled(s.create_file, if app.create_kind == CreateKind::File {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
@@ -997,7 +1049,7 @@ fn render_create_popup(frame: &mut Frame, app: &App) {
     };
 
     let kind_list = List::new(kind_items)
-        .block(Block::default().title("Tipo  (↑↓ elegir | Enter confirmar | Esc cancelar)").borders(Borders::ALL).border_style(kind_block_style))
+        .block(Block::default().title(s.create_type_title).borders(Borders::ALL).border_style(kind_block_style))
         .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black));
 
     let mut kind_state = ListState::default();
@@ -1010,14 +1062,15 @@ fn render_create_popup(frame: &mut Frame, app: &App) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let prompt = match app.create_kind { CreateKind::Folder => "Nombre carpeta", CreateKind::File => "Nombre archivo" };
+    let prompt = match app.create_kind { CreateKind::Folder => s.create_folder_name, CreateKind::File => s.create_file_name };
     let name_input = Paragraph::new(format!("{}_", app.create_name))
-        .block(Block::default().title(format!("{prompt}  (Enter crear)")).borders(Borders::ALL).border_style(name_style))
+        .block(Block::default().title(format!("{prompt}  ({}))", s.create_enter)).borders(Borders::ALL).border_style(name_style))
         .style(Style::default().fg(Color::White));
     frame.render_widget(name_input, sections[1]);
 }
 
 fn render_git_popup(frame: &mut Frame, app: &App) {
+    let s = app.config.strings();
     let popup_area = centered_rect(65, 70, frame.area());
     frame.render_widget(Clear, popup_area);
 
@@ -1040,7 +1093,7 @@ fn render_git_popup(frame: &mut Frame, app: &App) {
                 .collect();
 
             let list = List::new(items)
-                .block(Block::default().title("Git  (↑↓ navegar | Enter ejecutar | Esc cerrar)").borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)))
+                .block(Block::default().title(s.git_title).borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)))
                 .highlight_style(Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
                 .highlight_symbol("> ");
 
@@ -1049,7 +1102,7 @@ fn render_git_popup(frame: &mut Frame, app: &App) {
             frame.render_stateful_widget(list, sections[0], &mut state);
 
             let hint = Paragraph::new(Line::from(Span::styled(
-                "  ↑↓ navegar  Enter ejecutar  Esc cerrar",
+                s.git_hint,
                 Style::default().fg(Color::DarkGray),
             )));
             frame.render_widget(hint, sections[1]);
@@ -1071,13 +1124,13 @@ fn render_git_popup(frame: &mut Frame, app: &App) {
             let total = app.git_output.len();
             let list = List::new(visible_lines)
                 .block(Block::default()
-                    .title(format!("Salida  ({}/{}  ↑↓ scroll | Esc volver)", start + 1, total))
+                    .title(format!("Salida  ({}/{}  {})", start + 1, total, s.git_output_suffix))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Green)));
             frame.render_widget(list, sections[0]);
 
             let hint = Paragraph::new(Line::from(Span::styled(
-                "  ↑↓ / j k  scroll    Esc volver",
+                s.git_output_hint,
                 Style::default().fg(Color::DarkGray),
             )));
             frame.render_widget(hint, sections[1]);
@@ -1090,14 +1143,14 @@ fn render_git_popup(frame: &mut Frame, app: &App) {
 
             let input = Paragraph::new(format!("{}_", app.git_commit_input))
                 .block(Block::default()
-                    .title("Mensaje de commit  (Enter confirmar | Esc cancelar)")
+                    .title(s.git_commit_title)
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan)))
                 .style(Style::default().fg(Color::White));
             frame.render_widget(input, sections[0]);
 
             let hint = Paragraph::new(Line::from(Span::styled(
-                "  Enter confirmar   Esc cancelar",
+                s.git_commit_hint,
                 Style::default().fg(Color::DarkGray),
             )));
             frame.render_widget(hint, sections[1]);

@@ -62,3 +62,13 @@ Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "mdnav $($release.tag_name) instalado en $binDir"
+
+$resp = Read-Host "Instalar shell hook para PowerShell (cd automatico con Shift+G)? [s/N]"
+if ($resp -eq 's' -or $resp -eq 'S') {
+    $profileDir = Split-Path $PROFILE
+    if (-not (Test-Path $profileDir)) {
+        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+    }
+    & "$binDir\mdnav.exe" --shell-hook powershell >> $PROFILE
+    Write-Host "Hook instalado. Abri una nueva terminal para activarlo."
+}

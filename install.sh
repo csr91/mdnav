@@ -44,6 +44,17 @@ esac
 
 echo "Instalacion lista."
 echo
-echo "Para habilitar cd automatico con Shift+G:"
-echo "  bash: echo 'source <(mdnav --shell-hook bash)' >> ~/.bashrc"
-echo "  zsh:  echo 'source <(mdnav --shell-hook zsh)' >> ~/.zshrc"
+
+SHELL_NAME="$(basename "$SHELL")"
+if [[ "$SHELL_NAME" == "bash" || "$SHELL_NAME" == "zsh" ]]; then
+  read -r -p "Instalar shell hook para $SHELL_NAME (cd automatico con Shift+G)? [s/N] " resp
+  if [[ "$resp" == "s" || "$resp" == "S" ]]; then
+    RC_FILE="$HOME/.${SHELL_NAME}rc"
+    echo "source <(mdnav --shell-hook $SHELL_NAME)" >> "$RC_FILE"
+    echo "Hook instalado en $RC_FILE. Abri una nueva terminal para activarlo."
+  fi
+else
+  echo "Para habilitar cd automatico con Shift+G:"
+  echo "  bash: echo 'source <(mdnav --shell-hook bash)' >> ~/.bashrc"
+  echo "  zsh:  echo 'source <(mdnav --shell-hook zsh)' >> ~/.zshrc"
+fi

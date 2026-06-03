@@ -2,14 +2,28 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::strings;
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub only_mds: bool,
+    pub editor: String,
+    pub language: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { only_mds: true }
+        Self {
+            only_mds: true,
+            editor: String::from("nano"),
+            language: String::from("es"),
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn strings(&self) -> &'static strings::Strings {
+        strings::get(&self.language)
     }
 }
 
@@ -41,8 +55,10 @@ impl AppConfig {
 
     fn to_toml(&self) -> String {
         format!(
-            "# mdnav user config\nonly_mds = {}\n",
-            if self.only_mds { "true" } else { "false" }
+            "# mdnav user config\nonly_mds = {}\neditor = \"{}\"\nlanguage = \"{}\"\n",
+            if self.only_mds { "true" } else { "false" },
+            self.editor,
+            self.language
         )
     }
 }
@@ -65,6 +81,14 @@ fn parse_config(content: &str) -> AppConfig {
 
         if key == "only_mds" {
             config.only_mds = matches!(value, "true" | "1" | "yes" | "on");
+        }
+
+        if key == "editor" && matches!(value, "nano" | "vim") {
+            config.editor = value.to_string();
+        }
+
+        if key == "language" && matches!(value, "es" | "en") {
+            config.language = value.to_string();
         }
     }
 
