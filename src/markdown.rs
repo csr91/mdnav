@@ -71,8 +71,9 @@ pub struct PreviewDocument {
 }
 
 pub fn load_preview(path: &Path) -> Result<PreviewDocument> {
-    let content = fs::read_to_string(path)
+    let bytes = fs::read(path)
         .with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let content = String::from_utf8_lossy(&bytes).into_owned();
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if matches!(ext.as_str(), "md" | "markdown" | "") {
         Ok(render_preview(path, &content))

@@ -6,6 +6,12 @@ REPO="${REPO:-csr91/mdnav}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 TMP_DIR="$(mktemp -d)"
 ARCHIVE_PATH="$TMP_DIR/mdnav-linux-x86_64.tar.gz"
+SHELL_NAME="$(basename "${SHELL:-}")"
+RC_FILE=""
+
+if [[ "$SHELL_NAME" == "bash" || "$SHELL_NAME" == "zsh" ]]; then
+  RC_FILE="$HOME/.${SHELL_NAME}rc"
+fi
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -37,28 +43,47 @@ case ":$PATH:" in
     ;;
   *)
     echo "mdnav instalado en $INSTALL_DIR"
-    echo "Agrega esto a tu shell si queres usarlo globalmente:"
-    echo "export PATH=\"$INSTALL_DIR:\$PATH\""
+    if [[ -n "$RC_FILE" ]]; then
+      touch "$RC_FILE"
+      if grep -Fq "$INSTALL_DIR" "$RC_FILE"; then
+        echo "$RC_FILE ya contiene $INSTALL_DIR."
+      else
+        {
+          echo
+          echo "# mdnav"
+          echo "export PATH=\"$INSTALL_DIR:\$PATH\""
+        } >> "$RC_FILE"
+        echo "Se agrego $INSTALL_DIR al PATH en $RC_FILE."
+      fi
+      echo "Para usarlo en esta terminal ejecuta:"
+      echo "export PATH=\"$INSTALL_DIR:\$PATH\""
+    else
+      echo "Agrega esto a tu shell si queres usarlo globalmente:"
+      echo "export PATH=\"$INSTALL_DIR:\$PATH\""
+    fi
     ;;
 esac
 
 echo "Instalacion lista."
 echo
 
-SHELL_NAME="$(basename "$SHELL")"
-if [[ "$SHELL_NAME" == "bash" || "$SHELL_NAME" == "zsh" ]]; then
-  RC_FILE="$HOME/.${SHELL_NAME}rc"
+if [[ -n "$RC_FILE" ]]; then
   if [ -t 0 ]; then
     read -r -p "Instalar shell hook para $SHELL_NAME (cd automatico con Shift+G)? [s/N] " resp
   else
-    read -r -p "Instalar shell hook para $SHELL_NAME (cd automatico con Shift+G)? [s/N] " resp </dev/tty 2>/dev/null || resp="s"
+    read -r -p "Instalar shell hook para $SHELL_NAME (cd automatico con Shift+G)? [s/N] " resp </dev/tty 2>/dev/null || resp="n"
   fi
   if [[ "$resp" == "s" || "$resp" == "S" ]]; then
-    echo "source <(mdnav --shell-hook $SHELL_NAME)" >> "$RC_FILE"
-    echo "Hook instalado en $RC_FILE. Abri una nueva terminal para activarlo."
+    HOOK_LINE="source <(\"$INSTALL_DIR/mdnav\" --shell-hook $SHELL_NAME)"
+    if grep -Fq "$HOOK_LINE" "$RC_FILE"; then
+      echo "El hook ya estaba instalado en $RC_FILE."
+    else
+      echo "$HOOK_LINE" >> "$RC_FILE"
+      echo "Hook instalado en $RC_FILE. Abri una nueva terminal para activarlo."
+    fi
   fi
 else
   echo "Para habilitar cd automatico con Shift+G:"
-  echo "  bash: echo 'source <(mdnav --shell-hook bash)' >> ~/.bashrc"
-  echo "  zsh:  echo 'source <(mdnav --shell-hook zsh)' >> ~/.zshrc"
+  echo "  bash: echo 'source <(\"$INSTALL_DIR/mdnav\" --shell-hook bash)' >> ~/.bashrc"
+  echo "  zsh:  echo 'source <(\"$INSTALL_DIR/mdnav\" --shell-hook zsh)' >> ~/.zshrc"
 fi
