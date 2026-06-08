@@ -1,6 +1,6 @@
 # Roadmap
 
-## v0.1.9 — actual
+## v0.1.10 — actual
 
 - [x] Arbol navegable de carpetas y archivos `.md`
 - [x] Preview Markdown con scroll independiente
