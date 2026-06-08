@@ -27,19 +27,21 @@
 - [x] Auto-refresh del arbol y preview al detectar cambios externos
 - [x] Git integrado: status, log, diff, commit, push, pull (`:git`)
 - [x] Settings persistentes: idioma (es/en), editor, only_mds, bookmarks
+- [x] Info opcional en el arbol: tamanio de archivos o cantidad de lineas (`:treeinfo`)
+- [x] Ordenar arbol por nombre / fecha / tamanio (`:sort`)
+- [x] Git status visual en el arbol (modificado, staged, nuevo, ignorado, renombrado, eliminado, conflicto)
 - [x] Instalador con un comando para Windows y Linux
 
 ## Proximo — v0.2.x
 
-- [ ] Git status visual en el arbol (colores por archivo modificado/nuevo/ignorado)
-- [ ] Mostrar tamaño de archivos en el arbol
-- [ ] Ordenar arbol por nombre / fecha / tamaño
 - [ ] Mover y copiar archivos entre directorios
 - [ ] Plugin vim: abrir mdnav desde vim y volver al archivo seleccionado
 - [ ] Subir de root mostrando el directorio padre completo
 
 ## Ideas a futuro
 
+- [ ] Schema browser interactivo para `erDiagram`: grid de entidades navegable con Tab, relaciones numeradas para saltar entre cajas, resaltado de entidades relacionadas — sin necesidad de renderizar líneas
+- [ ] Telemetría de documentación para teams: evento silencioso al abrir archivo (token por user/team, path hasheado, timestamp) — dashboard web muestra docs más leídas, docs sin actividad, historial de onboarding. Token ya existe vía `MDNAV_WEB_WRITE_TOKEN`, falta definir granularidad (token por equipo vs por usuario) y política de opt-in
 - [ ] Panel de chat integrado (Claude / Codex) — requiere threading
 - [ ] Publicacion en winget para instalacion nativa en Windows
 - [ ] Temas de color configurables

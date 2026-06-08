@@ -75,6 +75,7 @@ Diferencial concreto en el pitch: *"te entregamos la implementación y la docume
 
 ## 5. Otros features de navegación
 
+- Visor diff paralelo / combinado para archivos: mostrar versión vieja y nueva alineadas, o una vista de archivo combinado con líneas agregadas/eliminadas/modificadas resaltadas. MVP posible: `:diff` sobre el archivo seleccionado usando Git; versión posterior con dos columnas y scroll sincronizado.
 - Preview de notebooks `.ipynb`
 - Editar CSV/JSON inline
 - Preview de PDFs (texto extraído)

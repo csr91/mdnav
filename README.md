@@ -80,7 +80,11 @@ mdnav --version    # versión instalada
 
 Presioná `:` para abrir. Comandos disponibles:
 
-`:q` `:files` `:find` `:create` `:git` `:select` `:edit` `:rename` `:delete` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:split1..5`
+`:q` `:files` `:find` `:create` `:git` `:select` `:edit` `:rename` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo`
+
+`:treeinfo` alterna la informacion mostrada a la derecha de cada archivo en el arbol: tamanio, lineas u oculto.
+
+`:sort` alterna el orden del arbol: nombre, fecha de modificacion o tamanio.
 
 ## Settings
 
@@ -119,6 +123,22 @@ echo 'source <(mdnav --shell-hook zsh)' >> ~/.zshrc
 ## Bookmarks
 
 Marcá carpetas favoritas con `Shift+B` — aparecen con `★` al tope del árbol. Activar un bookmark cambia el root a esa carpeta. Toglear visibilidad con `:bookmarks` o desde Settings.
+
+## Git visual
+
+Cuando el root está dentro de un repo Git, el árbol muestra indicadores de estado:
+
+| Símbolo | Estado |
+|---------|--------|
+| `M` | modificado |
+| `A` | staged |
+| `?` | nuevo sin trackear |
+| `!` | ignorado |
+| `R` | renombrado |
+| `D` | eliminado |
+| `U` | conflicto |
+
+Usá `:gitinfo` para mostrar u ocultar estos indicadores.
 
 ## Autor
 

@@ -6,6 +6,8 @@ use std::{
 
 use anyhow::{Context, Result};
 
+use crate::config::TreeSortMode;
+
 #[derive(Clone, Debug)]
 pub struct DocItem {
     pub path: PathBuf,
@@ -28,9 +30,10 @@ pub fn collect_markdown_tree(
     root: &Path,
     expanded_dirs: &BTreeSet<PathBuf>,
     only_mds: bool,
+    sort_mode: &TreeSortMode,
 ) -> Result<Vec<DocItem>> {
     let mut items = Vec::new();
-    visit_dir(root, root, expanded_dirs, 0, only_mds, &mut items)?;
+    visit_dir(root, root, expanded_dirs, 0, only_mds, sort_mode, &mut items)?;
     Ok(items)
 }
 
@@ -40,6 +43,7 @@ fn visit_dir(
     expanded_dirs: &BTreeSet<PathBuf>,
     depth: usize,
     only_mds: bool,
+    sort_mode: &TreeSortMode,
     items: &mut Vec<DocItem>,
 ) -> Result<()> {
     let mut entries = fs::read_dir(current)
@@ -52,7 +56,7 @@ fn visit_dir(
 
         (!left_is_dir)
             .cmp(&!right_is_dir)
-            .then_with(|| left.file_name().cmp(&right.file_name()))
+            .then_with(|| compare_entries(left, right, sort_mode))
     });
 
     for entry in entries {
@@ -65,7 +69,7 @@ fn visit_dir(
             items.push(item);
 
             if should_expand {
-                visit_dir(root, &path, expanded_dirs, depth + 1, only_mds, items)?;
+                visit_dir(root, &path, expanded_dirs, depth + 1, only_mds, sort_mode, items)?;
             }
         } else if !only_mds || is_markdown_file(&path) {
             items.push(make_item(root, path, depth, false)?);
@@ -73,6 +77,30 @@ fn visit_dir(
     }
 
     Ok(())
+}
+
+fn compare_entries(
+    left: &fs::DirEntry,
+    right: &fs::DirEntry,
+    sort_mode: &TreeSortMode,
+) -> std::cmp::Ordering {
+    match sort_mode {
+        TreeSortMode::Name => left.file_name().cmp(&right.file_name()),
+        TreeSortMode::Modified => entry_modified(right)
+            .cmp(&entry_modified(left))
+            .then_with(|| left.file_name().cmp(&right.file_name())),
+        TreeSortMode::Size => entry_size(right)
+            .cmp(&entry_size(left))
+            .then_with(|| left.file_name().cmp(&right.file_name())),
+    }
+}
+
+fn entry_modified(entry: &fs::DirEntry) -> Option<std::time::SystemTime> {
+    entry.metadata().ok()?.modified().ok()
+}
+
+fn entry_size(entry: &fs::DirEntry) -> Option<u64> {
+    entry.metadata().ok().map(|metadata| metadata.len())
 }
 
 fn make_item(root: &Path, path: PathBuf, depth: usize, is_dir: bool) -> Result<DocItem> {

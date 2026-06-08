@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     env,
     fs,
     path::{Path, PathBuf},
@@ -16,7 +16,7 @@ use reqwest::blocking::Client;
 use serde_json::json;
 
 use crate::{
-    config::{config_path, AppConfig},
+    config::{config_path, AppConfig, TreeInfoMode, TreeSortMode},
     docs::{collect_markdown_tree, parent_dir_if_within, DocItem},
     markdown::{load_preview, mermaid_terminal_canvas, MermaidBlock, MermaidCanvas, PreviewDocument},
 };
@@ -75,6 +75,31 @@ pub enum GitState {
     CommandList,
     Output,
     CommitInput,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitStatusKind {
+    Ignored,
+    Untracked,
+    Modified,
+    Staged,
+    Renamed,
+    Deleted,
+    Conflicted,
+}
+
+impl GitStatusKind {
+    fn priority(self) -> u8 {
+        match self {
+            Self::Ignored    => 1,
+            Self::Untracked  => 2,
+            Self::Modified   => 3,
+            Self::Staged     => 4,
+            Self::Renamed    => 5,
+            Self::Deleted    => 6,
+            Self::Conflicted => 7,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,6 +182,9 @@ pub struct App {
     pub tree_sig: u64,
     pub pending_go_up: bool,
     pub pending_delete: Option<PathBuf>,
+    pub tree_info_cache: HashMap<PathBuf, String>,
+    pub line_count_cache: HashMap<PathBuf, (SystemTime, usize)>,
+    pub git_status_cache: HashMap<PathBuf, GitStatusKind>,
 }
 
 impl App {
@@ -164,7 +192,7 @@ impl App {
         let mut expanded_dirs = BTreeSet::new();
         expanded_dirs.insert(root.clone());
 
-        let mut items = collect_markdown_tree(&root, &expanded_dirs, config.only_mds)?;
+        let mut items = collect_markdown_tree(&root, &expanded_dirs, config.only_mds, &config.tree_sort)?;
         inject_bookmarks(&mut items, &config);
         let selected_index = items.iter().position(|item| !item.is_dir && !item.is_bookmark).unwrap_or(0);
         let current_file = items
@@ -180,7 +208,7 @@ impl App {
         let file_mtime = current_file.as_ref().and_then(|p| get_file_mtime(p));
         let tree_sig = compute_tree_sig(&root, &expanded_dirs);
 
-        Ok(Self {
+        let mut app = Self {
             root,
             items,
             selected_index,
@@ -234,7 +262,13 @@ impl App {
             tree_sig,
             pending_go_up: false,
             pending_delete: None,
-        })
+            tree_info_cache: HashMap::new(),
+            line_count_cache: HashMap::new(),
+            git_status_cache: HashMap::new(),
+        };
+        app.rebuild_tree_info_cache();
+        app.refresh_git_status_cache();
+        Ok(app)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -1076,7 +1110,7 @@ impl App {
 
     fn reload_items(&mut self) -> Result<()> {
         let selected_path = self.items.get(self.selected_index).map(|item| item.path.clone());
-        let mut items = collect_markdown_tree(&self.root, &self.expanded_dirs, self.config.only_mds)?;
+        let mut items = collect_markdown_tree(&self.root, &self.expanded_dirs, self.config.only_mds, &self.config.tree_sort)?;
         inject_bookmarks(&mut items, &self.config);
         self.items = items;
 
@@ -1089,6 +1123,8 @@ impl App {
         }
 
         self.tree_sig = compute_tree_sig(&self.root, &self.expanded_dirs);
+        self.rebuild_tree_info_cache();
+        self.refresh_git_status_cache();
         Ok(())
     }
 
@@ -1127,6 +1163,130 @@ impl App {
         self.status = format!(
             "Bookmarks: {}",
             if self.config.show_bookmarks { "visible" } else { "ocultos" }
+        );
+        Ok(())
+    }
+
+    fn toggle_tree_info(&mut self) -> Result<()> {
+        self.config.tree_info = self.config.tree_info.next();
+        self.config.save()?;
+        self.rebuild_tree_info_cache();
+        self.status = format!(
+            "Tree info: {}",
+            match self.config.tree_info {
+                TreeInfoMode::Off   => "off",
+                TreeInfoMode::Size  => "tamaño",
+                TreeInfoMode::Lines => "líneas",
+            }
+        );
+        Ok(())
+    }
+
+    fn toggle_tree_sort(&mut self) -> Result<()> {
+        self.config.tree_sort = self.config.tree_sort.next();
+        self.config.save()?;
+        self.reload_items()?;
+        self.status = format!(
+            "Tree sort: {}",
+            match self.config.tree_sort {
+                TreeSortMode::Name     => "nombre",
+                TreeSortMode::Modified => "fecha",
+                TreeSortMode::Size     => "tamaño",
+            }
+        );
+        Ok(())
+    }
+
+    fn rebuild_tree_info_cache(&mut self) {
+        self.tree_info_cache.clear();
+        if self.config.tree_info == TreeInfoMode::Off {
+            return;
+        }
+        let paths: Vec<PathBuf> = self.items.iter()
+            .filter(|item| !item.is_dir)
+            .map(|item| item.path.clone())
+            .collect();
+        for path in paths {
+            let info = match self.config.tree_info {
+                TreeInfoMode::Off => continue,
+                TreeInfoMode::Size => fs::metadata(&path).ok().map(|m| format_file_size(m.len())),
+                TreeInfoMode::Lines => {
+                    if is_image_path(&path) {
+                        None
+                    } else {
+                        count_lines_cached(&path, &mut self.line_count_cache)
+                            .map(|n| format!("{}L", n))
+                    }
+                }
+            };
+            if let Some(s) = info {
+                self.tree_info_cache.insert(path, s);
+            }
+        }
+    }
+
+    pub fn git_status_for_item(&self, item: &DocItem) -> Option<GitStatusKind> {
+        if !self.config.show_git_status {
+            return None;
+        }
+
+        if item.is_bookmark {
+            return None;
+        }
+
+        if !item.is_dir {
+            return self.git_status_cache.get(&item.path).copied();
+        }
+
+        self.git_status_cache
+            .iter()
+            .filter(|(path, _)| path.starts_with(&item.path))
+            .map(|(_, status)| *status)
+            .max_by_key(|status| status.priority())
+    }
+
+    fn refresh_git_status_cache(&mut self) {
+        self.git_status_cache.clear();
+        if !self.git_available || !self.config.show_git_status {
+            return;
+        }
+
+        let Ok(output) = Command::new("git")
+            .args(["-c", "core.quotePath=false", "status", "--porcelain=v1", "--ignored"])
+            .current_dir(&self.root)
+            .output()
+        else {
+            return;
+        };
+
+        if !output.status.success() {
+            return;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let Some((path, status)) = parse_git_status_line(line) else {
+                continue;
+            };
+            let full_path = self.root.join(path);
+            self.git_status_cache
+                .entry(full_path)
+                .and_modify(|current| {
+                    if status.priority() > current.priority() {
+                        *current = status;
+                    }
+                })
+                .or_insert(status);
+        }
+    }
+
+    fn toggle_git_status_visual(&mut self) -> Result<()> {
+        self.config.show_git_status = !self.config.show_git_status;
+        self.config.save()?;
+        self.refresh_git_status_cache();
+        self.status = format!(
+            "Git status visual: {}",
+            if self.config.show_git_status { "on" } else { "off" }
         );
         Ok(())
     }
@@ -1412,6 +1572,7 @@ impl App {
             ("select",     "activar cursor de seleccion  (Shift+Y)"),
             ("edit",       "abrir editor sobre el archivo  (Shift+E)"),
             ("rename",     "renombrar archivo o carpeta  (Shift+R)"),
+            ("copypath",   "copiar ruta del item seleccionado  (Ctrl+Shift+C)"),
             ("goto",       "cd pendiente al directorio  (Shift+G)"),
             ("toc",        "tabla de contenidos  (Shift+T)"),
             ("mermaid",    "acciones Mermaid  (Shift+M)"),
@@ -1419,11 +1580,14 @@ impl App {
             ("delete",     "eliminar archivo o carpeta  (x)"),
             ("bookmark",   "marcar/desmarcar bookmark  (Shift+B)"),
             ("bookmarks",  "mostrar/ocultar bookmarks"),
+            ("gitinfo",    "mostrar/ocultar info Git en el arbol"),
             ("split1",     "proporcion paneles 1  (Shift+1)"),
             ("split2",     "proporcion paneles 2  (Shift+2)"),
             ("split3",     "proporcion paneles 3  (Shift+3)"),
             ("split4",     "proporcion paneles 4  (Shift+4)"),
             ("split5",     "proporcion paneles 5  (Shift+5)"),
+            ("sort",       "ordenar arbol: nombre / fecha / tamaño"),
+            ("treeinfo",   "info en arbol: tamaño / lineas / off"),
         ]
     }
 
@@ -1467,6 +1631,7 @@ impl App {
             "select"     => self.toggle_selection_mode(),
             "edit"       => self.edit_target_in_nano()?,
             "rename"     => self.open_rename()?,
+            "copypath"   => self.copy_path_to_clipboard()?,
             "goto"       => self.queue_cd_to_target_dir(),
             "toc"        => self.open_toc(),
             "mermaid"    => self.open_mermaid_flow()?,
@@ -1474,11 +1639,14 @@ impl App {
             "delete"      => self.request_delete()?,
             "bookmark"    => self.toggle_bookmark()?,
             "bookmarks"   => self.toggle_show_bookmarks()?,
+            "gitinfo"     => self.toggle_git_status_visual()?,
             "split1"     => self.set_split_level(1),
             "split2"     => self.set_split_level(2),
             "split3"     => self.set_split_level(3),
             "split4"     => self.set_split_level(4),
             "split5"     => self.set_split_level(5),
+            "sort"       => self.toggle_tree_sort()?,
+            "treeinfo"   => self.toggle_tree_info()?,
             _            => {}
         }
         Ok(())
@@ -1763,6 +1931,7 @@ impl App {
                 self.git_output_scroll = 0;
                 self.git_state = GitState::Output;
                 self.status = format!("git {name}  (Esc para volver)");
+                self.refresh_git_status_cache();
             }
             Err(e) => {
                 self.status = format!("Error ejecutando git: {e}");
@@ -1795,6 +1964,7 @@ impl App {
                 self.git_commit_input.clear();
                 self.git_state = GitState::Output;
                 self.status = String::from("git commit  (Esc para volver)");
+                self.refresh_git_status_cache();
             }
             Err(e) => {
                 self.status = format!("Error en commit: {e}");
@@ -2004,6 +2174,43 @@ fn git_is_available() -> bool {
         .unwrap_or(false)
 }
 
+fn parse_git_status_line(line: &str) -> Option<(&str, GitStatusKind)> {
+    if line.len() < 4 {
+        return None;
+    }
+
+    let status = &line[..2];
+    let raw_path = line[3..]
+        .split_once(" -> ")
+        .map(|(_, new_path)| new_path)
+        .unwrap_or(&line[3..])
+        .trim_end_matches('/');
+
+    if raw_path.is_empty() {
+        return None;
+    }
+
+    let kind = if status == "!!" {
+        GitStatusKind::Ignored
+    } else if status == "??" {
+        GitStatusKind::Untracked
+    } else if status.contains('U') || matches!(status, "AA" | "DD") {
+        GitStatusKind::Conflicted
+    } else if status.contains('D') {
+        GitStatusKind::Deleted
+    } else if status.contains('R') {
+        GitStatusKind::Renamed
+    } else if status.as_bytes().first().copied() != Some(b' ') {
+        GitStatusKind::Staged
+    } else if status.as_bytes().get(1).copied() != Some(b' ') {
+        GitStatusKind::Modified
+    } else {
+        return None;
+    };
+
+    Some((raw_path, kind))
+}
+
 fn inject_bookmarks(items: &mut Vec<DocItem>, config: &AppConfig) {
     if !config.show_bookmarks || config.bookmarks.is_empty() {
         return;
@@ -2035,6 +2242,34 @@ fn inject_bookmarks(items: &mut Vec<DocItem>, config: &AppConfig) {
 
 fn get_file_mtime(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
+}
+
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn is_image_path(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "webp" | "bmp" | "tiff" | "tif")
+}
+
+fn count_lines_cached(path: &Path, cache: &mut HashMap<PathBuf, (SystemTime, usize)>) -> Option<usize> {
+    let mtime = fs::metadata(path).ok()?.modified().ok()?;
+    if let Some(&(cached_mtime, count)) = cache.get(path) {
+        if cached_mtime == mtime {
+            return Some(count);
+        }
+    }
+    let content = fs::read_to_string(path).ok()?;
+    let count = content.lines().count();
+    cache.insert(path.to_path_buf(), (mtime, count));
+    Some(count)
 }
 
 fn compute_tree_sig(root: &PathBuf, expanded_dirs: &BTreeSet<PathBuf>) -> u64 {

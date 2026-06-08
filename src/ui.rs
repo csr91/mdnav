@@ -8,8 +8,8 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, CreateKind, CreateStep, Focus, FullscreenPanel, GitState, HelpSection, Overlay, PreviewCursor},
-    config::config_path,
+    app::{App, CreateKind, CreateStep, Focus, FullscreenPanel, GitState, GitStatusKind, HelpSection, Overlay, PreviewCursor},
+    config::{config_path, TreeInfoMode},
     strings::Strings,
 };
 use crate::markdown::{PreviewLine, PreviewLineKind};
@@ -227,10 +227,39 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
                     if app.expanded_dirs.contains(&item.path) { "v" } else { ">" }
                 } else { "-" };
                 let selector = if app.selector_path.as_ref() == Some(&item.path) { "*" } else { " " };
-                result.push(ListItem::new(Line::from(vec![Span::raw(format!(
-                    "{selector}{indent}{marker} {}",
-                    item.name
-                ))])));
+                let (git_label, git_style) = if app.config.show_git_status {
+                    git_status_style(app.git_status_for_item(item))
+                } else {
+                    ("", Style::default())
+                };
+                let prefix_part = format!("{selector}{indent}");
+                let name_part = format!("{prefix_part}{git_label}{marker} {}", item.name);
+
+                let info = if !item.is_dir && app.config.tree_info != TreeInfoMode::Off {
+                    app.tree_info_cache.get(&item.path).map(|s| s.as_str())
+                } else {
+                    None
+                };
+
+                if let Some(info_str) = info {
+                    let content_width = area.width.saturating_sub(2) as usize;
+                    let name_len = name_part.chars().count();
+                    let info_len = info_str.chars().count();
+                    let padding = content_width.saturating_sub(name_len + info_len).max(1);
+                    result.push(ListItem::new(Line::from(vec![
+                        Span::raw(prefix_part),
+                        Span::styled(git_label.to_string(), git_style),
+                        Span::raw(format!("{marker} {}", item.name)),
+                        Span::raw(" ".repeat(padding)),
+                        Span::styled(info_str.to_string(), Style::default().fg(Color::DarkGray)),
+                    ])));
+                } else {
+                    result.push(ListItem::new(Line::from(vec![
+                        Span::raw(prefix_part),
+                        Span::styled(git_label.to_string(), git_style),
+                        Span::raw(format!("{marker} {}", item.name)),
+                    ])));
+                }
             }
 
             result
@@ -268,6 +297,19 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
     let mut state = ListState::default();
     state.select(Some(adjusted_selected));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn git_status_style(status: Option<GitStatusKind>) -> (&'static str, Style) {
+    match status {
+        Some(GitStatusKind::Ignored) => ("! ", Style::default().fg(Color::DarkGray)),
+        Some(GitStatusKind::Untracked) => ("? ", Style::default().fg(Color::Cyan)),
+        Some(GitStatusKind::Modified) => ("M ", Style::default().fg(Color::Yellow)),
+        Some(GitStatusKind::Staged) => ("A ", Style::default().fg(Color::Green)),
+        Some(GitStatusKind::Renamed) => ("R ", Style::default().fg(Color::Cyan)),
+        Some(GitStatusKind::Deleted) => ("D ", Style::default().fg(Color::Red)),
+        Some(GitStatusKind::Conflicted) => ("U ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        None => ("  ", Style::default()),
+    }
 }
 
 fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
