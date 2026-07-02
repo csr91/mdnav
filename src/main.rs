@@ -18,6 +18,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use crate::{app::App, config::AppConfig};
 
 fn main() -> Result<()> {
+    install_panic_hook();
     match resolve_command()? {
         CliCommand::Run { docs_root } => run_cli(docs_root),
         CliCommand::ShellHook { shell } => {
@@ -89,6 +90,18 @@ fn resolve_command() -> Result<CliCommand> {
             "Uso: mdnav [ruta] | mdnav --shell-hook <bash|zsh>"
         )),
     }
+}
+
+/// Restores the terminal before a panic prints, so an unexpected crash never
+/// leaves the user's shell in raw mode / alternate screen. Best-effort: errors
+/// during restore are ignored because we are already unwinding.
+fn install_panic_hook() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        original_hook(panic_info);
+    }));
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
