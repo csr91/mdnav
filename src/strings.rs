@@ -71,6 +71,9 @@ pub struct Strings {
     pub search_title: &'static str,
     pub search_no_results: &'static str,
     pub search_results_title: &'static str,
+    // dest picker (move / copy)
+    pub dest_move_title: &'static str,
+    pub dest_copy_title: &'static str,
     // find
     pub find_title: &'static str,
     pub find_placeholder: &'static str,
@@ -156,6 +159,8 @@ pub static ES: Strings = Strings {
     search_title: "Buscar archivo",
     search_no_results: "Sin resultados",
     search_results_title: "Resultados  Arriba/Abajo navegar | Enter abrir | Esc cerrar",
+    dest_move_title: "Mover a  (l/→ entrar · h/← salir · Enter confirmar · Esc cancelar)",
+    dest_copy_title: "Copiar a  (l/→ entrar · h/← salir · Enter confirmar · Esc cancelar)",
     find_title: "Buscar en archivo  (Esc cerrar | Enter saltar)",
     find_placeholder: "Escribe para buscar...",
     find_no_results: "Sin resultados",
@@ -238,6 +243,8 @@ pub static EN: Strings = Strings {
     search_title: "Search file",
     search_no_results: "No results",
     search_results_title: "Results  Up/Down navigate | Enter open | Esc close",
+    dest_move_title: "Move to  (l/→ enter · h/← up · Enter confirm · Esc cancel)",
+    dest_copy_title: "Copy to  (l/→ enter · h/← up · Enter confirm · Esc cancel)",
     find_title: "Find in file  (Esc close | Enter jump)",
     find_placeholder: "Type to search...",
     find_no_results: "No results",

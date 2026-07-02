@@ -17,7 +17,7 @@ use serde_json::json;
 
 use crate::{
     config::{config_path, AppConfig, TreeInfoMode, TreeSortMode},
-    docs::{collect_markdown_tree, parent_dir_if_within, DocItem},
+    docs::{collect_dir_tree, collect_markdown_tree, copy_dir_recursive, has_subdirs, parent_dir_if_within, DocItem},
     markdown::{load_preview, mermaid_terminal_canvas, MermaidBlock, MermaidCanvas, PreviewDocument},
 };
 
@@ -56,6 +56,13 @@ pub enum Overlay {
     Create,
     Git,
     Rename,
+    DestPicker,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileOpKind {
+    Move,
+    Copy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,6 +161,12 @@ pub struct App {
     pub search_query: String,
     pub search_results: Vec<usize>, // indices into items
     pub search_cursor: usize,       // index into search_results
+    // Move / copy destination picker
+    pub file_op_kind: Option<FileOpKind>,
+    pub file_op_source: Option<PathBuf>,
+    pub picker_dirs: Vec<DocItem>,          // currently visible directory nodes
+    pub picker_expanded: BTreeSet<PathBuf>, // expanded directories in the picker
+    pub picker_cursor: usize,               // index into picker_dirs
     pub toc_entries: Vec<(usize, String)>, // (line_index, heading text)
     pub toc_cursor: usize,
     pub preview_link_cursor: Option<usize>, // index into preview.links
@@ -239,6 +252,11 @@ impl App {
             search_query: String::new(),
             search_results: Vec::new(),
             search_cursor: 0,
+            file_op_kind: None,
+            file_op_source: None,
+            picker_dirs: Vec::new(),
+            picker_expanded: BTreeSet::new(),
+            picker_cursor: 0,
             toc_entries: Vec::new(),
             toc_cursor: 0,
             preview_link_cursor: None,
@@ -506,9 +524,26 @@ impl App {
                 }
                 _ => {}
             },
+            Overlay::DestPicker => match key.code {
+                KeyCode::Esc => self.close_dest_picker("Operacion cancelada"),
+                KeyCode::Enter => self.confirm_dest_picker(),
+                KeyCode::Down | KeyCode::Char('j') => self.move_picker_cursor(1),
+                KeyCode::Up | KeyCode::Char('k') => self.move_picker_cursor(-1),
+                KeyCode::Right | KeyCode::Char('l') => self.expand_picker_dir(),
+                KeyCode::Left | KeyCode::Char('h') => self.collapse_picker_dir(),
+                _ => {}
+            },
             Overlay::CommandPalette => match key.code {
                 KeyCode::Esc => self.close_overlay("Palette cerrada"),
-                KeyCode::Enter => self.confirm_palette_command()?,
+                KeyCode::Enter => {
+                    self.confirm_palette_command()?;
+                    // Close the palette unless the command opened another overlay
+                    // (create, git, dest picker, ...). Otherwise action commands
+                    // like delete or copypath would stay hidden behind it.
+                    if self.overlay == Overlay::CommandPalette {
+                        self.overlay = Overlay::None;
+                    }
+                }
                 KeyCode::Backspace => {
                     self.palette_query.pop();
                     self.update_palette_cursor();
@@ -1572,12 +1607,14 @@ impl App {
             ("select",     "activar cursor de seleccion  (Shift+Y)"),
             ("edit",       "abrir editor sobre el archivo  (Shift+E)"),
             ("rename",     "renombrar archivo o carpeta  (Shift+R)"),
+            ("move",       "mover archivo o carpeta a otro directorio"),
+            ("copy",       "copiar archivo a otro directorio"),
             ("copypath",   "copiar ruta del item seleccionado  (Ctrl+Shift+C)"),
             ("goto",       "cd pendiente al directorio  (Shift+G)"),
             ("toc",        "tabla de contenidos  (Shift+T)"),
             ("mermaid",    "acciones Mermaid  (Shift+M)"),
             ("fullscreen", "pantalla completa del panel  (Shift+0)"),
-            ("delete",     "eliminar archivo o carpeta  (x)"),
+            ("delete",     "eliminar archivo o carpeta  (Shift+X)"),
             ("bookmark",   "marcar/desmarcar bookmark  (Shift+B)"),
             ("bookmarks",  "mostrar/ocultar bookmarks"),
             ("gitinfo",    "mostrar/ocultar info Git en el arbol"),
@@ -1631,6 +1668,8 @@ impl App {
             "select"     => self.toggle_selection_mode(),
             "edit"       => self.edit_target_in_nano()?,
             "rename"     => self.open_rename()?,
+            "move"       => self.open_dest_picker(FileOpKind::Move),
+            "copy"       => self.open_dest_picker(FileOpKind::Copy),
             "copypath"   => self.copy_path_to_clipboard()?,
             "goto"       => self.queue_cd_to_target_dir(),
             "toc"        => self.open_toc(),
@@ -2012,6 +2051,154 @@ impl App {
         self.search_results.clear();
         self.overlay = Overlay::None;
         self.status = String::from("Busqueda cerrada");
+    }
+
+    // ── Move / copy destination picker ──────────────────────────────────────────
+
+    fn open_dest_picker(&mut self, kind: FileOpKind) {
+        let Some(source) = self.action_target_path() else {
+            self.status = String::from("No hay item para mover o copiar");
+            return;
+        };
+        self.file_op_kind = Some(kind);
+        self.file_op_source = Some(source);
+        self.picker_expanded.clear();
+        self.picker_cursor = 0;
+        self.overlay = Overlay::DestPicker;
+        if let Err(e) = self.rebuild_picker_dirs() {
+            self.close_dest_picker(&format!("No se pudo listar carpetas: {e}"));
+            return;
+        }
+        self.update_picker_status();
+    }
+
+    /// Rebuilds the visible directory list from the current expansion state,
+    /// keeping the cursor on the same path when possible.
+    fn rebuild_picker_dirs(&mut self) -> Result<()> {
+        let current = self.picker_dirs.get(self.picker_cursor).map(|item| item.path.clone());
+        self.picker_dirs = collect_dir_tree(&self.root, &self.picker_expanded)?;
+        self.picker_cursor = current
+            .and_then(|path| self.picker_dirs.iter().position(|item| item.path == path))
+            .unwrap_or(0)
+            .min(self.picker_dirs.len().saturating_sub(1));
+        Ok(())
+    }
+
+    fn update_picker_status(&mut self) {
+        let verb = match self.file_op_kind {
+            Some(FileOpKind::Copy) => "Copiar",
+            _ => "Mover",
+        };
+        let dest = self
+            .picker_dirs
+            .get(self.picker_cursor)
+            .map(|item| item.name.as_str())
+            .unwrap_or("");
+        self.status = format!("{verb} a: {dest}  (l/→ entrar | h/← salir | Enter confirmar)");
+    }
+
+    fn move_picker_cursor(&mut self, delta: isize) {
+        if self.picker_dirs.is_empty() {
+            return;
+        }
+        let n = self.picker_dirs.len() as isize;
+        self.picker_cursor =
+            ((self.picker_cursor as isize + delta).rem_euclid(n)) as usize;
+        self.update_picker_status();
+    }
+
+    fn expand_picker_dir(&mut self) {
+        let Some(item) = self.picker_dirs.get(self.picker_cursor) else {
+            return;
+        };
+        let path = item.path.clone();
+        if self.picker_expanded.contains(&path) {
+            // Already open: step into its first child if any.
+            self.move_picker_cursor(1);
+            return;
+        }
+        if has_subdirs(&path) {
+            self.picker_expanded.insert(path);
+            let _ = self.rebuild_picker_dirs();
+            self.move_picker_cursor(1);
+        }
+    }
+
+    fn collapse_picker_dir(&mut self) {
+        let Some(item) = self.picker_dirs.get(self.picker_cursor) else {
+            return;
+        };
+        let path = item.path.clone();
+        if self.picker_expanded.contains(&path) {
+            self.picker_expanded.remove(&path);
+            let _ = self.rebuild_picker_dirs();
+            self.update_picker_status();
+        } else if let Some(parent) = path.parent().map(|p| p.to_path_buf()) {
+            // Jump to the parent node when the current one is already collapsed.
+            if let Some(index) = self.picker_dirs.iter().position(|it| it.path == parent) {
+                self.picker_cursor = index;
+                self.update_picker_status();
+            }
+        }
+    }
+
+    fn confirm_dest_picker(&mut self) {
+        let (Some(kind), Some(source)) = (self.file_op_kind, self.file_op_source.clone()) else {
+            self.close_dest_picker("Operacion cancelada");
+            return;
+        };
+        let Some(dest_dir) = self.picker_dirs.get(self.picker_cursor).map(|item| item.path.clone()) else {
+            return;
+        };
+        let Some(file_name) = source.file_name() else {
+            self.close_dest_picker("Origen invalido");
+            return;
+        };
+        let dest = dest_dir.join(file_name);
+
+        if dest == source {
+            self.close_dest_picker("El destino es la carpeta actual del item");
+            return;
+        }
+        if dest.exists() {
+            self.close_dest_picker("Ya existe un item con ese nombre en el destino");
+            return;
+        }
+        // Evitar mover una carpeta dentro de si misma o de un descendiente.
+        if source.is_dir() && dest_dir.starts_with(&source) {
+            self.close_dest_picker("No se puede mover una carpeta dentro de si misma");
+            return;
+        }
+
+        let result: Result<()> = match kind {
+            FileOpKind::Move => fs::rename(&source, &dest).map(|_| ()).map_err(Into::into),
+            FileOpKind::Copy if source.is_dir() => copy_dir_recursive(&source, &dest),
+            FileOpKind::Copy => fs::copy(&source, &dest).map(|_| ()).map_err(Into::into),
+        };
+
+        match result {
+            Ok(()) => {
+                let _ = self.reload_items();
+                if let Some(index) = self.items.iter().position(|item| item.path == dest) {
+                    self.selected_index = index;
+                }
+                let verb = if kind == FileOpKind::Move { "Movido" } else { "Copiado" };
+                self.close_dest_picker(&format!("{verb} a: {}", dest_dir.display()));
+            }
+            Err(e) => {
+                let verb = if kind == FileOpKind::Move { "mover" } else { "copiar" };
+                self.close_dest_picker(&format!("Error al {verb}: {e}"));
+            }
+        }
+    }
+
+    fn close_dest_picker(&mut self, status: &str) {
+        self.picker_dirs.clear();
+        self.picker_expanded.clear();
+        self.file_op_kind = None;
+        self.file_op_source = None;
+        self.overlay = Overlay::None;
+        self.status = String::from(status);
     }
 }
 

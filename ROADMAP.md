@@ -34,7 +34,7 @@
 
 ## Proximo — v0.2.x
 
-- [ ] Mover y copiar archivos entre directorios
+- [x] Mover y copiar archivos entre directorios (`:move` / `:copy`, picker de carpetas navegable, copia recursiva de carpetas)
 - [ ] Plugin vim: abrir mdnav desde vim y volver al archivo seleccionado
 - [ ] Subir de root mostrando el directorio padre completo
 

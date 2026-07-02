@@ -37,6 +37,79 @@ pub fn collect_markdown_tree(
     Ok(items)
 }
 
+/// Recursively copies `source` (a directory) into `dest`, creating `dest` and
+/// every subdirectory. Files are copied with their contents; symlinks are
+/// followed and permissions are not explicitly preserved. Intended for
+/// documentation trees, not for arbitrary large or special filesystems.
+pub fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir(dest)
+        .with_context(|| format!("No se pudo crear {}", dest.display()))?;
+
+    for entry in fs::read_dir(source)
+        .with_context(|| format!("No se pudo leer {}", source.display()))?
+    {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let target = dest.join(entry.file_name());
+
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry_path, &target)?;
+        } else {
+            fs::copy(&entry_path, &target)
+                .with_context(|| format!("No se pudo copiar {}", entry_path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Builds a navigable directory-only tree under `root` (including `root` itself
+/// as the first entry). Only directories present in `expanded_dirs` reveal their
+/// children, so the caller controls what is visible. Used by the move/copy
+/// destination picker: it starts collapsed and expands as the user navigates.
+pub fn collect_dir_tree(root: &Path, expanded_dirs: &BTreeSet<PathBuf>) -> Result<Vec<DocItem>> {
+    let mut items = vec![make_item(root, root.to_path_buf(), 0, true)?];
+    visit_dir_tree(root, root, expanded_dirs, 1, &mut items)?;
+    Ok(items)
+}
+
+fn visit_dir_tree(
+    root: &Path,
+    current: &Path,
+    expanded_dirs: &BTreeSet<PathBuf>,
+    depth: usize,
+    items: &mut Vec<DocItem>,
+) -> Result<()> {
+    let mut entries = fs::read_dir(current)
+        .with_context(|| format!("No se pudo leer {}", current.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+
+    for entry in entries {
+        if entry.file_type()?.is_dir() {
+            let path = entry.path();
+            items.push(make_item(root, path.clone(), depth, true)?);
+            if expanded_dirs.contains(&path) {
+                visit_dir_tree(root, &path, expanded_dirs, depth + 1, items)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns true when `dir` contains at least one subdirectory. Used by the
+/// picker to decide whether to draw an expand marker.
+pub fn has_subdirs(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+}
+
 fn visit_dir(
     root: &Path,
     current: &Path,

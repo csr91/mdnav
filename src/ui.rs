@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, CreateKind, CreateStep, Focus, FullscreenPanel, GitState, GitStatusKind, HelpSection, Overlay, PreviewCursor},
+    app::{App, CreateKind, CreateStep, FileOpKind, Focus, FullscreenPanel, GitState, GitStatusKind, HelpSection, Overlay, PreviewCursor},
     config::{config_path, TreeInfoMode},
     strings::Strings,
 };
@@ -97,6 +97,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::MermaidTerminalView => render_mermaid_terminal_view(frame, app),
         Overlay::WebLink => render_web_link_popup(frame, app),
         Overlay::Search => render_search_popup(frame, app),
+        Overlay::DestPicker => render_dest_picker_popup(frame, app),
         Overlay::Toc => render_toc_popup(frame, app),
         Overlay::CommandPalette => render_command_palette(frame, app),
         Overlay::Find => render_find_popup(frame, app),
@@ -1023,6 +1024,54 @@ fn render_search_popup(frame: &mut Frame, app: &App) {
         state.select(Some(app.search_cursor));
     }
     frame.render_stateful_widget(list, sections[1], &mut state);
+}
+
+fn render_dest_picker_popup(frame: &mut Frame, app: &App) {
+    let s = app.config.strings();
+    let popup_area = centered_rect(60, 60, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let title = if app.file_op_kind == Some(FileOpKind::Copy) {
+        s.dest_copy_title
+    } else {
+        s.dest_move_title
+    };
+
+    // Collapsible directory tree
+    let items = app
+        .picker_dirs
+        .iter()
+        .map(|item| {
+            let indent = "  ".repeat(item.depth);
+            let marker = if app.picker_expanded.contains(&item.path) {
+                "▾"
+            } else {
+                "▸"
+            };
+            ListItem::new(Line::from(format!("{indent}{marker} {}", item.name)))
+        })
+        .collect::<Vec<_>>();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default();
+    if !app.picker_dirs.is_empty() {
+        state.select(Some(app.picker_cursor));
+    }
+    frame.render_stateful_widget(list, popup_area, &mut state);
 }
 
 fn render_command_palette(frame: &mut Frame, app: &App) {
