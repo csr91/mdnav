@@ -37,3 +37,36 @@ jobs:
 
       - name: Build release
         run: cargo build --locked --release
+
+      - name: Package Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/mdnav-windows-x86_64 | Out-Null
+          Copy-Item target/release/mdnav.exe dist/mdnav-windows-x86_64/mdnav.exe
+          Copy-Item README.md dist/mdnav-windows-x86_64/README.md
+          Compress-Archive -Path dist/mdnav-windows-x86_64/* -DestinationPath dist/mdnav-windows-x86_64.zip -Force
+
+      - name: Package Linux release
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist/mdnav-linux-x86_64
+          cp target/release/mdnav README.md dist/mdnav-linux-x86_64/
+          tar -czf dist/mdnav-linux-x86_64.tar.gz -C dist/mdnav-linux-x86_64 .
+
+      - name: Upload Windows release
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-x86_64
+          path: dist/mdnav-windows-x86_64.zip
+          if-no-files-found: error
+
+      - name: Upload Linux release
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-x86_64
+          path: dist/mdnav-linux-x86_64.tar.gz
+          if-no-files-found: error
