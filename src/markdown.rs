@@ -17,6 +17,9 @@ use crate::docs::LinkTarget;
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
+type HighlightedSegment = (String, [u8; 3]);
+type HighlightedLine = (String, Vec<HighlightedSegment>);
+
 fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
@@ -71,10 +74,13 @@ pub struct PreviewDocument {
 }
 
 pub fn load_preview(path: &Path) -> Result<PreviewDocument> {
-    let bytes = fs::read(path)
-        .with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
     let content = String::from_utf8_lossy(&bytes).into_owned();
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     if matches!(ext.as_str(), "md" | "markdown" | "") {
         Ok(render_preview(path, &content))
     } else {
@@ -85,7 +91,8 @@ pub fn load_preview(path: &Path) -> Result<PreviewDocument> {
 fn render_source_file(_path: &Path, content: &str, language: &str) -> PreviewDocument {
     let raw_lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
     let highlighted = highlight_code_block(&raw_lines, language);
-    let lines = highlighted.into_iter()
+    let lines = highlighted
+        .into_iter()
         .map(|(text, highlights)| PreviewLine {
             text,
             kind: PreviewLineKind::Normal,
@@ -99,7 +106,6 @@ fn render_source_file(_path: &Path, content: &str, language: &str) -> PreviewDoc
         mermaid_diagrams: vec![],
     }
 }
-
 
 pub fn mermaid_terminal_canvas(diagram: &MermaidBlock) -> MermaidCanvas {
     // Diagrams that are not flowcharts can't be rendered as boxes — show source
@@ -188,7 +194,10 @@ fn render_source_canvas(diagram: &MermaidBlock, kind: &str) -> MermaidCanvas {
     for line in diagram.source.lines() {
         lines.push(line.to_string());
     }
-    MermaidCanvas { lines, nodes: vec![] }
+    MermaidCanvas {
+        lines,
+        nodes: vec![],
+    }
 }
 
 fn is_subgraph_keyword(line: &str) -> bool {
@@ -267,7 +276,8 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
             Event::End(TagEnd::CodeBlock) => {
                 code_block = false;
                 if !mermaid_block {
-                    let highlighted = highlight_code_block(&code_block_lines, &current_code_language);
+                    let highlighted =
+                        highlight_code_block(&code_block_lines, &current_code_language);
                     for (line_text, line_highlights) in highlighted {
                         lines.push(PreviewLine {
                             text: line_text,
@@ -304,7 +314,9 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
                     highlights: vec![],
                 });
             }
-            Event::Start(Tag::Link { dest_url, title, .. }) => {
+            Event::Start(Tag::Link {
+                dest_url, title, ..
+            }) => {
                 let label = if title.is_empty() {
                     dest_url.to_string()
                 } else {
@@ -381,7 +393,11 @@ pub fn render_preview(current_path: &Path, markdown: &str) -> PreviewDocument {
     }
 }
 
-fn flush_line(current: &mut String, current_kind: &mut PreviewLineKind, lines: &mut Vec<PreviewLine>) {
+fn flush_line(
+    current: &mut String,
+    current_kind: &mut PreviewLineKind,
+    lines: &mut Vec<PreviewLine>,
+) {
     if !current.trim().is_empty() {
         lines.push(PreviewLine {
             text: current.trim_end().to_string(),
@@ -401,29 +417,39 @@ fn flush_line(current: &mut String, current_kind: &mut PreviewLineKind, lines: &
     *current_kind = PreviewLineKind::Normal;
 }
 
-fn highlight_code_block(lines: &[String], language: &str) -> Vec<(String, Vec<(String, [u8; 3])>)> {
+fn highlight_code_block(lines: &[String], language: &str) -> Vec<HighlightedLine> {
     let ps = syntax_set();
     let ts = theme_set();
-    let syntax = ps.find_syntax_by_token(language)
+    let syntax = ps
+        .find_syntax_by_token(language)
         .or_else(|| ps.find_syntax_by_extension(language))
         .unwrap_or_else(|| ps.find_syntax_plain_text());
-    let theme = ts.themes.get("base16-ocean.dark")
+    let theme = ts
+        .themes
+        .get("base16-ocean.dark")
         .or_else(|| ts.themes.values().next());
     let Some(theme) = theme else {
         return lines.iter().map(|l| (l.clone(), vec![])).collect();
     };
     let mut h = HighlightLines::new(syntax, theme);
 
-    lines.iter().map(|line| {
-        let ranges = h.highlight_line(line, ps).unwrap_or_default();
-        let spans: Vec<(String, [u8; 3])> = ranges.iter()
-            .filter(|(_, text)| !text.is_empty())
-            .map(|(style, text)| {
-                (text.to_string(), [style.foreground.r, style.foreground.g, style.foreground.b])
-            })
-            .collect();
-        (line.clone(), spans)
-    }).collect()
+    lines
+        .iter()
+        .map(|line| {
+            let ranges = h.highlight_line(line, ps).unwrap_or_default();
+            let spans: Vec<(String, [u8; 3])> = ranges
+                .iter()
+                .filter(|(_, text)| !text.is_empty())
+                .map(|(style, text)| {
+                    (
+                        text.to_string(),
+                        [style.foreground.r, style.foreground.g, style.foreground.b],
+                    )
+                })
+                .collect();
+            (line.clone(), spans)
+        })
+        .collect()
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {
@@ -552,8 +578,7 @@ fn cleanup_mermaid_label(value: &str) -> String {
         .replace("<br>", " / ")
         .replace(['[', ']', '{', '}', '(', ')'], " ")
         .replace("%%", " ")
-        .replace('"', "")
-        .replace('\'', "")
+        .replace(['"', '\''], "")
         .replace("==", " ")
         .replace("-.", " ")
         .replace("..", " ")
@@ -572,7 +597,8 @@ fn collect_mermaid_aliases(lines: &[&str]) -> HashMap<String, String> {
     let mut aliases = HashMap::new();
 
     for line in lines {
-        for segment in line.split("->") {
+        let normalized = normalize_mermaid_edge(line);
+        for segment in normalized.split("->") {
             let trimmed = segment.trim();
             if let Some((id, label)) = extract_mermaid_alias(trimmed) {
                 aliases.insert(id, label);
@@ -663,10 +689,7 @@ fn normalize_mermaid_edge(line: &str) -> String {
         normalized = normalized.replace(pattern, "->");
     }
 
-    normalized
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Parse `click NodeId href "url"` or `click NodeId "url"` lines.
@@ -777,12 +800,10 @@ fn render_mermaid_canvas_from_edges(
             + (0..=max_level)
                 .map(|l| level_widths.get(&l).copied().unwrap_or(12) + x_gap)
                 .sum::<usize>();
-        let h = top_margin * 2
-            + level_heights.values().copied().max().unwrap_or(12).max(12);
+        let h = top_margin * 2 + level_heights.values().copied().max().unwrap_or(12).max(12);
         (w.max(40), h.max(12))
     } else {
-        let w = left_margin * 2
-            + level_widths.values().copied().max().unwrap_or(40).max(40);
+        let w = left_margin * 2 + level_widths.values().copied().max().unwrap_or(40).max(40);
         let h = top_margin * 2
             + (0..=max_level)
                 .map(|l| level_heights.get(&l).copied().unwrap_or(3) + y_gap)
@@ -805,8 +826,7 @@ fn render_mermaid_canvas_from_edges(
             let col_h = level_heights.get(&level).copied().unwrap_or(12);
             let col_w = level_widths.get(&level).copied().unwrap_or(12);
             // Center the stack vertically
-            let stack_start_y =
-                top_margin + total_height.saturating_sub(col_h) / 2;
+            let stack_start_y = top_margin + total_height.saturating_sub(col_h) / 2;
             let mut cursor_y = stack_start_y;
             for node in level_nodes {
                 let (width, height, lines) = node_layouts
@@ -886,7 +906,7 @@ fn render_mermaid_canvas_from_edges(
             let end_y = to_y;
             let mid_y = start_y + 1 + (end_y.saturating_sub(start_y + 1)) / 2;
 
-            if start_y + 1 <= mid_y {
+            if start_y < mid_y {
                 draw_vertical(&mut canvas, from_center, start_y + 1, mid_y);
             }
             if from_center != to_center {
@@ -895,7 +915,7 @@ fn render_mermaid_canvas_from_edges(
                     draw_edge_label(&mut canvas, from_center, to_center, mid_y, lbl);
                 }
             }
-            if mid_y + 1 <= end_y.saturating_sub(1) {
+            if mid_y < end_y.saturating_sub(1) {
                 draw_vertical(&mut canvas, to_center, mid_y + 1, end_y.saturating_sub(1));
             }
             if end_y > 0 {
@@ -949,7 +969,12 @@ fn box_line(width: usize, text: &str) -> String {
     let padding = inner.saturating_sub(content.chars().count());
     let left_pad = padding / 2;
     let right_pad = padding.saturating_sub(left_pad);
-    format!("│{}{}{}│", " ".repeat(left_pad), content, " ".repeat(right_pad))
+    format!(
+        "│{}{}{}│",
+        " ".repeat(left_pad),
+        content,
+        " ".repeat(right_pad)
+    )
 }
 
 fn draw_vertical(canvas: &mut [Vec<char>], x: usize, y1: usize, y2: usize) {
@@ -1006,9 +1031,17 @@ fn fix_junctions(canvas: &mut [Vec<char>]) {
             // Skip chars adjacent to box corners (part of box border)
             let neighbors = [
                 if y > 0 { snapshot[y - 1][x] } else { ' ' },
-                if y + 1 < height { snapshot[y + 1][x] } else { ' ' },
+                if y + 1 < height {
+                    snapshot[y + 1][x]
+                } else {
+                    ' '
+                },
                 if x > 0 { snapshot[y][x - 1] } else { ' ' },
-                if x + 1 < width { snapshot[y][x + 1] } else { ' ' },
+                if x + 1 < width {
+                    snapshot[y][x + 1]
+                } else {
+                    ' '
+                },
             ];
             if neighbors.iter().any(|&c| is_box_corner(c)) {
                 continue;
@@ -1229,4 +1262,95 @@ fn trim_canvas(canvas: Vec<Vec<char>>) -> Vec<String> {
         .into_iter()
         .map(|line| line.trim_end().to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_extracts_headings_links_code_and_mermaid() {
+        let current = Path::new("docs/guide/current.md");
+        let markdown = r#"# Title
+
+[Local](../README.md#install) and [Web](https://example.com).
+
+```rust
+fn main() {}
+```
+
+```mermaid
+flowchart LR
+    A[Start] --> B[Done]
+```
+"#;
+
+        let preview = render_preview(current, markdown);
+
+        assert!(
+            preview
+                .lines
+                .iter()
+                .any(|line| matches!(line.kind, PreviewLineKind::Heading(1))
+                    && line.text == "# Title")
+        );
+        assert!(preview.lines.iter().any(|line| line.text == "```rust"));
+        assert_eq!(preview.links.len(), 2);
+        assert_eq!(
+            preview.links[0].resolved,
+            Some(PathBuf::from("docs/guide/../README.md"))
+        );
+        assert_eq!(preview.links[1].resolved, None);
+        assert_eq!(preview.mermaid_blocks, 1);
+        assert_eq!(
+            preview.mermaid_diagrams[0].source,
+            "flowchart LR\n    A[Start] --> B[Done]"
+        );
+    }
+
+    #[test]
+    fn mermaid_flowchart_builds_navigable_nodes() {
+        let diagram = MermaidBlock {
+            title: String::from("Flow"),
+            source: String::from(
+                "flowchart LR\nA[Start] -->|next| B[Done]\nclick B https://example.com",
+            ),
+        };
+
+        let canvas = mermaid_terminal_canvas(&diagram);
+
+        assert!(!canvas.lines.is_empty());
+        assert_eq!(canvas.nodes.len(), 2);
+        assert_eq!(canvas.nodes[0].label, "Start");
+        assert_eq!(canvas.nodes[1].label, "Done");
+        assert_eq!(canvas.nodes[1].url.as_deref(), Some("https://example.com"));
+
+        let source_lines = diagram.source.lines().collect::<Vec<_>>();
+        let aliases = collect_mermaid_aliases(&source_lines);
+        assert_eq!(
+            simplify_mermaid_edge("A[Start] -->|next| B[Done]", &aliases),
+            Some((
+                String::from("Start"),
+                String::from("Done"),
+                Some(String::from("next"))
+            ))
+        );
+    }
+
+    #[test]
+    fn non_flowchart_mermaid_falls_back_to_source() {
+        let diagram = MermaidBlock {
+            title: String::from("Sequence"),
+            source: String::from("sequenceDiagram\nAlice->>Bob: Hello"),
+        };
+
+        let canvas = mermaid_terminal_canvas(&diagram);
+
+        assert!(canvas.nodes.is_empty());
+        assert!(canvas
+            .lines
+            .iter()
+            .any(|line| line.contains("sequenceDiagram")));
+        assert!(canvas.lines.iter().any(|line| line.contains("Alice->>Bob")));
+    }
 }

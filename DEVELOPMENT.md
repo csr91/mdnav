@@ -18,6 +18,16 @@
 cargo build --release
 ```
 
+## Validar cambios
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+```
+
+El mismo conjunto se ejecuta en Windows y Linux mediante GitHub Actions.
+
 ## Generar release
 
 **Windows:**

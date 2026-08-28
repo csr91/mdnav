@@ -1,18 +1,21 @@
 use ratatui::{
+    layout::Position,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
-    layout::Position,
     Frame,
 };
 
+use crate::markdown::{PreviewLine, PreviewLineKind};
 use crate::{
-    app::{App, CreateKind, CreateStep, FileOpKind, Focus, FullscreenPanel, GitState, GitStatusKind, HelpSection, Overlay, PreviewCursor},
+    app::{
+        App, CreateKind, CreateStep, FileOpKind, Focus, FullscreenPanel, GitState, GitStatusKind,
+        HelpSection, Overlay, PreviewCursor,
+    },
     config::{config_path, TreeInfoMode},
     strings::Strings,
 };
-use crate::markdown::{PreviewLine, PreviewLineKind};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let areas = Layout::default()
@@ -38,15 +41,28 @@ pub fn render(frame: &mut Frame, app: &App) {
     let s = app.config.strings();
     let footer = if app.overlay == Overlay::Rename {
         Paragraph::new(Line::from(vec![
-            Span::styled("Rename: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Rename: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(app.rename_input.clone(), Style::default().fg(Color::White)),
             Span::styled("█", Style::default().fg(Color::Yellow)),
-            Span::styled("  Enter=confirmar  Esc=cancelar", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  Enter=confirmar  Esc=cancelar",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]))
         .block(Block::default().borders(Borders::TOP))
     } else if app.overlay == Overlay::CommandPalette {
         Paragraph::new(Line::from(vec![
-            Span::styled(":", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                ":",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(app.palette_query.clone(), Style::default().fg(Color::White)),
             Span::styled("█", Style::default().fg(Color::Yellow)),
         ]))
@@ -55,28 +71,52 @@ pub fn render(frame: &mut Frame, app: &App) {
         let (label, hint, color) = if app.status.starts_with("Copiado!") {
             (app.status.clone(), String::new(), Color::Green)
         } else {
-            (s.select_on.to_string(), s.select_copy_hint.to_string(), Color::Green)
+            (
+                s.select_on.to_string(),
+                s.select_copy_hint.to_string(),
+                Color::Green,
+            )
         };
         Paragraph::new(Line::from(vec![
-            Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                label,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(hint, Style::default().fg(Color::Gray)),
         ]))
         .block(Block::default().borders(Borders::TOP))
     } else if app.pending_delete.is_some() {
-        Paragraph::new(Line::from(vec![
-            Span::styled(app.status.clone(), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        ]))
+        Paragraph::new(Line::from(vec![Span::styled(
+            app.status.clone(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )]))
         .block(Block::default().borders(Borders::TOP))
     } else if app.pending_go_up {
         Paragraph::new(Line::from(vec![
-            Span::styled("Go up?  ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled("← de nuevo para subir un nivel  Esc=cancelar", Style::default().fg(Color::Gray)),
+            Span::styled(
+                "Go up?  ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "← de nuevo para subir un nivel  Esc=cancelar",
+                Style::default().fg(Color::Gray),
+            ),
         ]))
         .block(Block::default().borders(Borders::TOP))
     } else if app.selection.is_some() {
         Paragraph::new(Line::from(vec![
-            Span::styled(s.select_cursor.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(s.select_anchor_hint.to_string(), Style::default().fg(Color::Gray)),
+            Span::styled(
+                s.select_cursor.to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                s.select_anchor_hint.to_string(),
+                Style::default().fg(Color::Gray),
+            ),
         ]))
         .block(Block::default().borders(Borders::TOP))
     } else {
@@ -142,7 +182,9 @@ fn pending_cd_span(app: &App) -> Span<'static> {
 
     Span::styled(
         format!("   Go: {display}"),
-        Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD),
     )
 }
 
@@ -213,21 +255,37 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
             }
 
             if item.is_bookmark {
-                let selector = if app.selector_path.as_ref() == Some(&item.path) { "*" } else { " " };
+                let selector = if app.selector_path.as_ref() == Some(&item.path) {
+                    "*"
+                } else {
+                    " "
+                };
                 let marker = if item.is_dir { ">" } else { "-" };
                 result.push(ListItem::new(Line::from(vec![
-                    Span::raw(format!("{selector}")),
+                    Span::raw(selector.to_string()),
                     Span::styled(
                         format!("{marker} {}", item.name),
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
                     ),
                 ])));
             } else {
                 let indent = "  ".repeat(item.depth);
                 let marker = if item.is_dir {
-                    if app.expanded_dirs.contains(&item.path) { "v" } else { ">" }
-                } else { "-" };
-                let selector = if app.selector_path.as_ref() == Some(&item.path) { "*" } else { " " };
+                    if app.expanded_dirs.contains(&item.path) {
+                        "v"
+                    } else {
+                        ">"
+                    }
+                } else {
+                    "-"
+                };
+                let selector = if app.selector_path.as_ref() == Some(&item.path) {
+                    "*"
+                } else {
+                    " "
+                };
                 let (git_label, git_style) = if app.config.show_git_status {
                     git_status_style(app.git_status_for_item(item))
                 } else {
@@ -308,7 +366,10 @@ fn git_status_style(status: Option<GitStatusKind>) -> (&'static str, Style) {
         Some(GitStatusKind::Staged) => ("A ", Style::default().fg(Color::Green)),
         Some(GitStatusKind::Renamed) => ("R ", Style::default().fg(Color::Cyan)),
         Some(GitStatusKind::Deleted) => ("D ", Style::default().fg(Color::Red)),
-        Some(GitStatusKind::Conflicted) => ("U ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Some(GitStatusKind::Conflicted) => (
+            "U ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
         None => ("  ", Style::default()),
     }
 }
@@ -341,9 +402,7 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
             .iter()
             .enumerate()
             .skip(app.preview_scroll)
-            .map(|(index, line)| {
-                styled_preview_line(line, app.selection, index, active_link_line)
-            })
+            .map(|(index, line)| styled_preview_line(line, app.selection, index, active_link_line))
             .collect::<Vec<_>>()
     };
 
@@ -458,7 +517,9 @@ fn render_mermaid_terminal_view(frame: &mut Frame, app: &App) {
         .mermaid_selected_node
         .and_then(|i| app.mermaid_canvas.nodes.get(i));
 
-    let normal_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let normal_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
     let highlight_style = Style::default()
         .fg(Color::Black)
         .bg(Color::Cyan)
@@ -484,11 +545,11 @@ fn render_mermaid_terminal_view(frame: &mut Frame, app: &App) {
             if let Some(node) = selected_node {
                 if canvas_y >= node.y && canvas_y < node.y + node.height {
                     let node_col_start = node.x.saturating_sub(app.mermaid_canvas_x);
-                    let node_col_end =
-                        (node.x + node.width).saturating_sub(app.mermaid_canvas_x);
+                    let node_col_end = (node.x + node.width).saturating_sub(app.mermaid_canvas_x);
 
                     if node_col_start < inner_width {
-                        let before: String = chars[..node_col_start.min(chars.len())].iter().collect();
+                        let before: String =
+                            chars[..node_col_start.min(chars.len())].iter().collect();
                         let hl_start = node_col_start.min(chars.len());
                         let hl_end = node_col_end.min(chars.len());
                         let highlighted: String = chars[hl_start..hl_end].iter().collect();
@@ -524,7 +585,7 @@ fn render_mermaid_terminal_view(frame: &mut Frame, app: &App) {
         .unwrap_or_default();
 
     let s = app.config.strings();
-    let title = format!("{}{}",s.mermaid_view_title, node_hint);
+    let title = format!("{}{}", s.mermaid_view_title, node_hint);
 
     let paragraph = Paragraph::new(lines)
         .block(
@@ -552,7 +613,11 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(6), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(6),
+            Constraint::Length(2),
+        ])
         .split(inner);
 
     render_help_tabs(frame, sections[0], app.help_section, s);
@@ -629,11 +694,21 @@ fn render_web_link_popup(frame: &mut Frame, app: &App) {
 fn render_help_tabs(frame: &mut Frame, area: Rect, selected: HelpSection, s: &'static Strings) {
     let tabs = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(18), Constraint::Length(18), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(18),
+            Constraint::Length(18),
+            Constraint::Min(1),
+        ])
         .split(area);
 
-    frame.render_widget(help_tab(s.tab_shortcuts, selected == HelpSection::Shortcuts), tabs[0]);
-    frame.render_widget(help_tab(s.tab_settings, selected == HelpSection::Settings), tabs[1]);
+    frame.render_widget(
+        help_tab(s.tab_shortcuts, selected == HelpSection::Shortcuts),
+        tabs[0],
+    );
+    frame.render_widget(
+        help_tab(s.tab_settings, selected == HelpSection::Settings),
+        tabs[1],
+    );
 }
 
 fn help_tab(title: &str, active: bool) -> Paragraph<'static> {
@@ -654,7 +729,12 @@ fn help_tab(title: &str, active: bool) -> Paragraph<'static> {
 
 fn shortcut_lines(s: &'static Strings) -> Vec<Line<'static>> {
     vec![
-        Line::from(vec![Span::styled(s.nav_section, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            s.nav_section,
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(""),
         shortcut_line("Enter", s.sc_enter),
         shortcut_line("Tab / Shift+Tab", s.sc_tab),
@@ -668,7 +748,12 @@ fn shortcut_lines(s: &'static Strings) -> Vec<Line<'static>> {
         shortcut_line("Shift+1..5", s.sc_shift_1_5),
         shortcut_line("q", s.sc_q),
         Line::from(""),
-        Line::from(vec![Span::styled(s.preview_section, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            s.preview_section,
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(""),
         shortcut_line(", / .", s.sc_comma_dot),
         shortcut_line("PgUp / PgDn", s.sc_pgupdn),
@@ -684,7 +769,12 @@ fn shortcut_lines(s: &'static Strings) -> Vec<Line<'static>> {
 
 fn shortcut_line(keys: &str, description: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{keys:<18}"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{keys:<18}"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(description.to_string(), Style::default().fg(Color::Gray)),
     ])
 }
@@ -692,41 +782,82 @@ fn shortcut_line(keys: &str, description: &str) -> Line<'static> {
 fn settings_lines(app: &App, s: &'static Strings) -> Vec<Line<'static>> {
     let only_mds_toggle = if app.config.only_mds { "ON" } else { "OFF" };
     let only_mds_style = if app.config.only_mds {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
     };
     let editor_value = app.config.editor.clone();
     let language_value = app.config.language.clone();
-    let val_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let val_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
 
-    let cursor = |i: usize| if app.settings_cursor == i { "▶ " } else { "  " };
+    let cursor = |i: usize| {
+        if app.settings_cursor == i {
+            "▶ "
+        } else {
+            "  "
+        }
+    };
 
     vec![
-        Line::from(vec![Span::styled(s.settings_title, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            s.settings_title,
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(""),
         Line::from(vec![
             Span::raw(cursor(0)),
-            Span::styled(s.settings_only_mds_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                s.settings_only_mds_label,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(only_mds_toggle, only_mds_style),
         ]),
         Line::from(vec![
             Span::raw(cursor(1)),
-            Span::styled(s.settings_editor_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                s.settings_editor_label,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(editor_value, val_style),
         ]),
         Line::from(vec![
             Span::raw(cursor(2)),
-            Span::styled(s.settings_language_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                s.settings_language_label,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(language_value, val_style),
         ]),
         Line::from(vec![
             Span::raw(cursor(3)),
-            Span::styled(s.settings_bookmarks_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled(
-                if app.config.show_bookmarks { "ON" } else { "OFF" },
+                s.settings_bookmarks_label,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
                 if app.config.show_bookmarks {
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    "ON"
+                } else {
+                    "OFF"
+                },
+                if app.config.show_bookmarks {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                 },
@@ -770,11 +901,15 @@ fn styled_preview_line(
 
     // syntax highlighted code line
     if !line.highlights.is_empty() {
-        let spans: Vec<Span> = line.highlights.iter()
-            .map(|(text, rgb)| Span::styled(
-                text.clone(),
-                Style::default().fg(Color::Rgb(rgb[0], rgb[1], rgb[2])),
-            ))
+        let spans: Vec<Span> = line
+            .highlights
+            .iter()
+            .map(|(text, rgb)| {
+                Span::styled(
+                    text.clone(),
+                    Style::default().fg(Color::Rgb(rgb[0], rgb[1], rgb[2])),
+                )
+            })
             .collect();
         return Line::from(spans);
     }
@@ -784,11 +919,7 @@ fn styled_preview_line(
     match line.kind {
         PreviewLineKind::MermaidTitle => {
             if let Some((title, hint)) = line.text.split_once("    ") {
-                styled_selected_text(
-                    &format!("{title}    {hint}"),
-                    base_style,
-                    selected_range,
-                )
+                styled_selected_text(&format!("{title}    {hint}"), base_style, selected_range)
             } else {
                 styled_selected_text(&line.text, base_style, selected_range)
             }
@@ -834,8 +965,16 @@ fn selection_range_for_line(
         return None;
     }
 
-    let start_col = if line_index == start.line { start.column } else { 0 };
-    let end_col = if line_index == end.line { end.column } else { line_len };
+    let start_col = if line_index == start.line {
+        start.column
+    } else {
+        0
+    };
+    let end_col = if line_index == end.line {
+        end.column
+    } else {
+        line_len
+    };
 
     if start_col == end_col {
         None
@@ -844,7 +983,10 @@ fn selection_range_for_line(
     }
 }
 
-fn normalized_selection_bounds(left: PreviewCursor, right: PreviewCursor) -> (PreviewCursor, PreviewCursor) {
+fn normalized_selection_bounds(
+    left: PreviewCursor,
+    right: PreviewCursor,
+) -> (PreviewCursor, PreviewCursor) {
     if (left.line, left.column) <= (right.line, right.column) {
         (left, right)
     } else {
@@ -852,14 +994,22 @@ fn normalized_selection_bounds(left: PreviewCursor, right: PreviewCursor) -> (Pr
     }
 }
 
-fn styled_selected_text(text: &str, base: Style, selected: Option<(usize, usize)>) -> Line<'static> {
+fn styled_selected_text(
+    text: &str,
+    base: Style,
+    selected: Option<(usize, usize)>,
+) -> Line<'static> {
     let Some((start, end)) = selected else {
         return Line::from(Span::styled(text.to_string(), base));
     };
 
     let chars = text.chars().collect::<Vec<_>>();
     let prefix = chars.iter().take(start).collect::<String>();
-    let middle = chars.iter().skip(start).take(end.saturating_sub(start)).collect::<String>();
+    let middle = chars
+        .iter()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect::<String>();
     let suffix = chars.iter().skip(end).collect::<String>();
     let selected_style = base.bg(Color::LightCyan).fg(Color::Black);
 
@@ -909,8 +1059,11 @@ fn preview_cursor_position(app: &App, area: Rect, cursor: PreviewCursor) -> Opti
     ))
 }
 
-
-fn tree_window(total_items: usize, selected_index: usize, visible_height: usize) -> (usize, usize, usize) {
+fn tree_window(
+    total_items: usize,
+    selected_index: usize,
+    visible_height: usize,
+) -> (usize, usize, usize) {
     if total_items <= visible_height {
         return (0, total_items, selected_index);
     }
@@ -1096,15 +1249,29 @@ fn render_command_palette(frame: &mut Frame, app: &App) {
         .iter()
         .map(|(name, desc)| {
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<10}", name), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{:<10}", name),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!("  {desc}"), Style::default().fg(Color::Gray)),
             ]))
         })
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)))
-        .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol("> ");
 
     let mut state = ListState::default();
@@ -1136,7 +1303,11 @@ fn render_find_popup(frame: &mut Frame, app: &App) {
 
     let items: Vec<ListItem> = if app.find_results.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            if app.find_query.is_empty() { s.find_placeholder } else { s.find_no_results },
+            if app.find_query.is_empty() {
+                s.find_placeholder
+            } else {
+                s.find_no_results
+            },
             Style::default().fg(Color::DarkGray),
         )))]
     } else {
@@ -1145,7 +1316,10 @@ fn render_find_popup(frame: &mut Frame, app: &App) {
             .filter_map(|&i| app.preview.lines.get(i).map(|l| (i, l)))
             .map(|(i, line)| {
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("{:>4} ", i + 1), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{:>4} ", i + 1),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                     Span::raw(line.text.chars().take(80).collect::<String>()),
                 ]))
             })
@@ -1155,11 +1329,20 @@ fn render_find_popup(frame: &mut Frame, app: &App) {
     let list = List::new(items)
         .block(
             Block::default()
-                .title(format!("{} {}",  app.find_results.len(), s.find_results_suffix))
+                .title(format!(
+                    "{} {}",
+                    app.find_results.len(),
+                    s.find_results_suffix
+                ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
-        .highlight_style(Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD))
+        .highlight_style(
+            Style::default()
+                .bg(Color::Green)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol("> ");
 
     let mut state = ListState::default();
@@ -1183,19 +1366,29 @@ fn render_create_popup(frame: &mut Frame, app: &App) {
     let kind_items: Vec<ListItem> = vec![
         ListItem::new(Line::from(vec![
             Span::raw("  "),
-            Span::styled(s.create_folder, if app.create_kind == CreateKind::Folder {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            }),
+            Span::styled(
+                s.create_folder,
+                if app.create_kind == CreateKind::Folder {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
         ])),
         ListItem::new(Line::from(vec![
             Span::raw("  "),
-            Span::styled(s.create_file, if app.create_kind == CreateKind::File {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            }),
+            Span::styled(
+                s.create_file,
+                if app.create_kind == CreateKind::File {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
         ])),
     ];
 
@@ -1206,11 +1399,19 @@ fn render_create_popup(frame: &mut Frame, app: &App) {
     };
 
     let kind_list = List::new(kind_items)
-        .block(Block::default().title(s.create_type_title).borders(Borders::ALL).border_style(kind_block_style))
+        .block(
+            Block::default()
+                .title(s.create_type_title)
+                .borders(Borders::ALL)
+                .border_style(kind_block_style),
+        )
         .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black));
 
     let mut kind_state = ListState::default();
-    kind_state.select(Some(match app.create_kind { CreateKind::Folder => 0, CreateKind::File => 1 }));
+    kind_state.select(Some(match app.create_kind {
+        CreateKind::Folder => 0,
+        CreateKind::File => 1,
+    }));
     frame.render_stateful_widget(kind_list, sections[0], &mut kind_state);
 
     // Name input
@@ -1219,9 +1420,17 @@ fn render_create_popup(frame: &mut Frame, app: &App) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let prompt = match app.create_kind { CreateKind::Folder => s.create_folder_name, CreateKind::File => s.create_file_name };
+    let prompt = match app.create_kind {
+        CreateKind::Folder => s.create_folder_name,
+        CreateKind::File => s.create_file_name,
+    };
     let name_input = Paragraph::new(format!("{}_", app.create_name))
-        .block(Block::default().title(format!("{prompt}  ({}))", s.create_enter)).borders(Borders::ALL).border_style(name_style))
+        .block(
+            Block::default()
+                .title(format!("{prompt}  ({}))", s.create_enter))
+                .borders(Borders::ALL)
+                .border_style(name_style),
+        )
         .style(Style::default().fg(Color::White));
     frame.render_widget(name_input, sections[1]);
 }
@@ -1243,15 +1452,30 @@ fn render_git_popup(frame: &mut Frame, app: &App) {
                 .iter()
                 .map(|(name, desc, _)| {
                     ListItem::new(Line::from(vec![
-                        Span::styled(format!("{:<12}", name), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            format!("{:<12}", name),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(format!("  {desc}"), Style::default().fg(Color::Gray)),
                     ]))
                 })
                 .collect();
 
             let list = List::new(items)
-                .block(Block::default().title(s.git_title).borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)))
-                .highlight_style(Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
+                .block(
+                    Block::default()
+                        .title(s.git_title)
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow)),
+                )
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::Yellow)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .highlight_symbol("> ");
 
             let mut state = ListState::default();
@@ -1279,11 +1503,17 @@ fn render_git_popup(frame: &mut Frame, app: &App) {
                 .collect();
 
             let total = app.git_output.len();
-            let list = List::new(visible_lines)
-                .block(Block::default()
-                    .title(format!("Salida  ({}/{}  {})", start + 1, total, s.git_output_suffix))
+            let list = List::new(visible_lines).block(
+                Block::default()
+                    .title(format!(
+                        "Salida  ({}/{}  {})",
+                        start + 1,
+                        total,
+                        s.git_output_suffix
+                    ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Green)));
+                    .border_style(Style::default().fg(Color::Green)),
+            );
             frame.render_widget(list, sections[0]);
 
             let hint = Paragraph::new(Line::from(Span::styled(
@@ -1299,10 +1529,12 @@ fn render_git_popup(frame: &mut Frame, app: &App) {
                 .split(popup_area);
 
             let input = Paragraph::new(format!("{}_", app.git_commit_input))
-                .block(Block::default()
-                    .title(s.git_commit_title)
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan)))
+                .block(
+                    Block::default()
+                        .title(s.git_commit_title)
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan)),
+                )
                 .style(Style::default().fg(Color::White));
             frame.render_widget(input, sections[0]);
 

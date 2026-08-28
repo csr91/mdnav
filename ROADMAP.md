@@ -1,6 +1,6 @@
 # Roadmap
 
-## v0.1.10 — actual
+## v0.1.11 — actual
 
 - [x] Arbol navegable de carpetas y archivos `.md`
 - [x] Preview Markdown con scroll independiente
@@ -31,10 +31,13 @@
 - [x] Ordenar arbol por nombre / fecha / tamanio (`:sort`)
 - [x] Git status visual en el arbol (modificado, staged, nuevo, ignorado, renombrado, eliminado, conflicto)
 - [x] Instalador con un comando para Windows y Linux
+- [x] Mover y copiar archivos entre directorios (`:move` / `:copy`, picker de carpetas navegable, copia recursiva de carpetas)
+- [x] Configuracion TOML robusta con migracion automatica del formato anterior
+- [x] Operaciones move/copy seguras: sin sobrescritura, rollback y fallback entre filesystems
+- [x] Tests automatizados y CI en Windows/Linux
 
 ## Proximo — v0.2.x
 
-- [x] Mover y copiar archivos entre directorios (`:move` / `:copy`, picker de carpetas navegable, copia recursiva de carpetas)
 - [ ] Plugin vim: abrir mdnav desde vim y volver al archivo seleccionado
 - [ ] Subir de root mostrando el directorio padre completo
 

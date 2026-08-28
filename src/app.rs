@@ -1,24 +1,26 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use arboard::Clipboard;
 use anyhow::Result;
-use crossterm::{
-    event::{KeyCode, KeyEvent, KeyEventKind},
-};
+use arboard::Clipboard;
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use reqwest::blocking::Client;
 use serde_json::json;
 
 use crate::{
     config::{config_path, AppConfig, TreeInfoMode, TreeSortMode},
-    docs::{collect_dir_tree, collect_markdown_tree, copy_dir_recursive, has_subdirs, parent_dir_if_within, DocItem},
-    markdown::{load_preview, mermaid_terminal_canvas, MermaidBlock, MermaidCanvas, PreviewDocument},
+    docs::{
+        collect_dir_tree, collect_markdown_tree, copy_path, has_subdirs, move_path,
+        parent_dir_if_within, DocItem,
+    },
+    markdown::{
+        load_preview, mermaid_terminal_canvas, MermaidBlock, MermaidCanvas, PreviewDocument,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,12 +100,12 @@ pub enum GitStatusKind {
 impl GitStatusKind {
     fn priority(self) -> u8 {
         match self {
-            Self::Ignored    => 1,
-            Self::Untracked  => 2,
-            Self::Modified   => 3,
-            Self::Staged     => 4,
-            Self::Renamed    => 5,
-            Self::Deleted    => 6,
+            Self::Ignored => 1,
+            Self::Untracked => 2,
+            Self::Modified => 3,
+            Self::Staged => 4,
+            Self::Renamed => 5,
+            Self::Deleted => 6,
             Self::Conflicted => 7,
         }
     }
@@ -164,9 +166,9 @@ pub struct App {
     // Move / copy destination picker
     pub file_op_kind: Option<FileOpKind>,
     pub file_op_source: Option<PathBuf>,
-    pub picker_dirs: Vec<DocItem>,          // currently visible directory nodes
+    pub picker_dirs: Vec<DocItem>, // currently visible directory nodes
     pub picker_expanded: BTreeSet<PathBuf>, // expanded directories in the picker
-    pub picker_cursor: usize,               // index into picker_dirs
+    pub picker_cursor: usize,      // index into picker_dirs
     pub toc_entries: Vec<(usize, String)>, // (line_index, heading text)
     pub toc_cursor: usize,
     pub preview_link_cursor: Option<usize>, // index into preview.links
@@ -205,9 +207,13 @@ impl App {
         let mut expanded_dirs = BTreeSet::new();
         expanded_dirs.insert(root.clone());
 
-        let mut items = collect_markdown_tree(&root, &expanded_dirs, config.only_mds, &config.tree_sort)?;
+        let mut items =
+            collect_markdown_tree(&root, &expanded_dirs, config.only_mds, &config.tree_sort)?;
         inject_bookmarks(&mut items, &config);
-        let selected_index = items.iter().position(|item| !item.is_dir && !item.is_bookmark).unwrap_or(0);
+        let selected_index = items
+            .iter()
+            .position(|item| !item.is_dir && !item.is_bookmark)
+            .unwrap_or(0);
         let current_file = items
             .get(selected_index)
             .filter(|item| !item.is_dir)
@@ -307,13 +313,18 @@ impl App {
 
         if self.pending_delete.is_some() {
             match key.code {
-                KeyCode::Enter => { self.confirm_delete()?; return Ok(()); }
+                KeyCode::Enter => {
+                    self.confirm_delete()?;
+                    return Ok(());
+                }
                 KeyCode::Esc | KeyCode::Char('X') => {
                     self.pending_delete = None;
                     self.status = String::from("Eliminacion cancelada");
                     return Ok(());
                 }
-                _ => { self.pending_delete = None; }
+                _ => {
+                    self.pending_delete = None;
+                }
             }
         }
 
@@ -368,7 +379,11 @@ impl App {
             KeyCode::Char('R') => self.open_rename()?,
             KeyCode::Char('B') => self.toggle_bookmark()?,
             KeyCode::Char('X') => self.request_delete()?,
-            KeyCode::Char('C') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+            KeyCode::Char('C')
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
                 self.copy_path_to_clipboard()?;
             }
             KeyCode::Char('!') => self.set_split_level(1),
@@ -386,7 +401,9 @@ impl App {
     }
 
     fn handle_selection_key(&mut self, key: KeyEvent) -> Result<()> {
-        let shift = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+        let shift = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::SHIFT);
         let anchored = self.selection.map(|s| s.anchored).unwrap_or(false);
         let extend = shift || anchored;
         match key.code {
@@ -402,10 +419,10 @@ impl App {
                     self.status = String::from("Select: ON — mover extiende, y para copiar");
                 }
             }
-            KeyCode::Left  | KeyCode::Char('h') => self.move_selection_cursor(-1, 0, extend),
+            KeyCode::Left | KeyCode::Char('h') => self.move_selection_cursor(-1, 0, extend),
             KeyCode::Right | KeyCode::Char('l') => self.move_selection_cursor(1, 0, extend),
-            KeyCode::Up    | KeyCode::Char('k') => self.move_selection_cursor(0, -1, extend),
-            KeyCode::Down  | KeyCode::Char('j') => self.move_selection_cursor(0, 1, extend),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection_cursor(0, -1, extend),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection_cursor(0, 1, extend),
             _ => {}
         }
 
@@ -424,10 +441,14 @@ impl App {
                 KeyCode::Up | KeyCode::Char('k') if self.help_section == HelpSection::Settings => {
                     self.settings_cursor = self.settings_cursor.saturating_sub(1);
                 }
-                KeyCode::Down | KeyCode::Char('j') if self.help_section == HelpSection::Settings => {
+                KeyCode::Down | KeyCode::Char('j')
+                    if self.help_section == HelpSection::Settings =>
+                {
                     self.settings_cursor = (self.settings_cursor + 1).min(3);
                 }
-                KeyCode::Enter | KeyCode::Char(' ') if self.help_section == HelpSection::Settings => {
+                KeyCode::Enter | KeyCode::Char(' ')
+                    if self.help_section == HelpSection::Settings =>
+                {
                     match self.settings_cursor {
                         0 => self.toggle_only_mds()?,
                         1 => self.toggle_editor()?,
@@ -439,7 +460,9 @@ impl App {
                 _ => {}
             },
             Overlay::MermaidSelect => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("Seleccion Mermaid cancelada"),
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.close_overlay("Seleccion Mermaid cancelada")
+                }
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.mermaid_selected_index = self.mermaid_selected_index.saturating_sub(1);
                 }
@@ -615,8 +638,8 @@ impl App {
                         self.git_output_scroll = self.git_output_scroll.saturating_sub(1);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        self.git_output_scroll =
-                            (self.git_output_scroll + 1).min(self.git_output.len().saturating_sub(1));
+                        self.git_output_scroll = (self.git_output_scroll + 1)
+                            .min(self.git_output.len().saturating_sub(1));
                     }
                     _ => {}
                 },
@@ -639,7 +662,9 @@ impl App {
             Overlay::Rename => match key.code {
                 KeyCode::Esc => self.close_overlay("Renombrar cancelado"),
                 KeyCode::Enter => self.confirm_rename(),
-                KeyCode::Backspace => { self.rename_input.pop(); }
+                KeyCode::Backspace => {
+                    self.rename_input.pop();
+                }
                 KeyCode::Char(c) => self.rename_input.push(c),
                 _ => {}
             },
@@ -836,7 +861,9 @@ impl App {
             return;
         }
 
-        let line = self.preview_scroll.min(self.preview.lines.len().saturating_sub(1));
+        let line = self
+            .preview_scroll
+            .min(self.preview.lines.len().saturating_sub(1));
         let column = 0;
         let cursor = PreviewCursor { line, column };
         self.selection = Some(SelectionState {
@@ -978,7 +1005,11 @@ impl App {
         }
 
         if let Some(parent) = parent_dir_if_within(&self.root, &item.path) {
-            if let Some(index) = self.items.iter().position(|candidate| candidate.path == parent) {
+            if let Some(index) = self
+                .items
+                .iter()
+                .position(|candidate| candidate.path == parent)
+            {
                 self.selected_index = index;
                 self.status = format!("Padre {}", self.items[index].relative.display());
                 return Ok(());
@@ -1038,8 +1069,16 @@ impl App {
                 continue;
             };
             let chars: Vec<char> = line.text.chars().collect();
-            let col_start = if line_idx == start.line { start.column.min(chars.len()) } else { 0 };
-            let col_end = if line_idx == end.line { end.column.min(chars.len()) } else { chars.len() };
+            let col_start = if line_idx == start.line {
+                start.column.min(chars.len())
+            } else {
+                0
+            };
+            let col_end = if line_idx == end.line {
+                end.column.min(chars.len())
+            } else {
+                chars.len()
+            };
             if line_idx > start.line {
                 text.push('\n');
             }
@@ -1052,7 +1091,10 @@ impl App {
             s.anchor = s.cursor;
         }
         self.status = if copied {
-            format!("Copiado! ({} caracteres)  y=nueva seleccion  Esc=salir", text.chars().count())
+            format!(
+                "Copiado! ({} caracteres)  y=nueva seleccion  Esc=salir",
+                text.chars().count()
+            )
         } else {
             String::from("Error al copiar al portapapeles")
         };
@@ -1144,8 +1186,16 @@ impl App {
     }
 
     fn reload_items(&mut self) -> Result<()> {
-        let selected_path = self.items.get(self.selected_index).map(|item| item.path.clone());
-        let mut items = collect_markdown_tree(&self.root, &self.expanded_dirs, self.config.only_mds, &self.config.tree_sort)?;
+        let selected_path = self
+            .items
+            .get(self.selected_index)
+            .map(|item| item.path.clone());
+        let mut items = collect_markdown_tree(
+            &self.root,
+            &self.expanded_dirs,
+            self.config.only_mds,
+            &self.config.tree_sort,
+        )?;
         inject_bookmarks(&mut items, &self.config);
         self.items = items;
 
@@ -1174,7 +1224,8 @@ impl App {
             return Ok(());
         }
         let path_str = target.display().to_string();
-        let name = target.file_name()
+        let name = target
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path_str.clone());
 
@@ -1197,7 +1248,11 @@ impl App {
         self.reload_items()?;
         self.status = format!(
             "Bookmarks: {}",
-            if self.config.show_bookmarks { "visible" } else { "ocultos" }
+            if self.config.show_bookmarks {
+                "visible"
+            } else {
+                "ocultos"
+            }
         );
         Ok(())
     }
@@ -1209,8 +1264,8 @@ impl App {
         self.status = format!(
             "Tree info: {}",
             match self.config.tree_info {
-                TreeInfoMode::Off   => "off",
-                TreeInfoMode::Size  => "tamaño",
+                TreeInfoMode::Off => "off",
+                TreeInfoMode::Size => "tamaño",
                 TreeInfoMode::Lines => "líneas",
             }
         );
@@ -1224,9 +1279,9 @@ impl App {
         self.status = format!(
             "Tree sort: {}",
             match self.config.tree_sort {
-                TreeSortMode::Name     => "nombre",
+                TreeSortMode::Name => "nombre",
                 TreeSortMode::Modified => "fecha",
-                TreeSortMode::Size     => "tamaño",
+                TreeSortMode::Size => "tamaño",
             }
         );
         Ok(())
@@ -1237,7 +1292,9 @@ impl App {
         if self.config.tree_info == TreeInfoMode::Off {
             return;
         }
-        let paths: Vec<PathBuf> = self.items.iter()
+        let paths: Vec<PathBuf> = self
+            .items
+            .iter()
             .filter(|item| !item.is_dir)
             .map(|item| item.path.clone())
             .collect();
@@ -1287,7 +1344,13 @@ impl App {
         }
 
         let Ok(output) = Command::new("git")
-            .args(["-c", "core.quotePath=false", "status", "--porcelain=v1", "--ignored"])
+            .args([
+                "-c",
+                "core.quotePath=false",
+                "status",
+                "--porcelain=v1",
+                "--ignored",
+            ])
             .current_dir(&self.root)
             .output()
         else {
@@ -1321,7 +1384,11 @@ impl App {
         self.refresh_git_status_cache();
         self.status = format!(
             "Git status visual: {}",
-            if self.config.show_git_status { "on" } else { "off" }
+            if self.config.show_git_status {
+                "on"
+            } else {
+                "off"
+            }
         );
         Ok(())
     }
@@ -1352,7 +1419,11 @@ impl App {
         };
         let path = self.config.save()?;
         let display_path = config_path().unwrap_or(path);
-        self.status = format!("Language: {} | {}", self.config.language, display_path.display());
+        self.status = format!(
+            "Language: {} | {}",
+            self.config.language,
+            display_path.display()
+        );
         Ok(())
     }
 
@@ -1364,7 +1435,11 @@ impl App {
         };
         let path = self.config.save()?;
         let display_path = config_path().unwrap_or(path);
-        self.status = format!("Editor: {} | {}", self.config.editor, display_path.display());
+        self.status = format!(
+            "Editor: {} | {}",
+            self.config.editor,
+            display_path.display()
+        );
         Ok(())
     }
 
@@ -1415,7 +1490,10 @@ impl App {
                 } else {
                     "externo"
                 };
-                format!(" | primer link: {} -> {} ({resolution})", link.label, link.raw_target)
+                format!(
+                    " | primer link: {} -> {} ({resolution})",
+                    link.label, link.raw_target
+                )
             })
             .unwrap_or_default();
         self.status = format!(
@@ -1501,17 +1579,28 @@ impl App {
         }
         self.preview_link_cursor = Some(match self.preview_link_cursor {
             None => {
-                if delta > 0 { 0 } else { n - 1 }
+                if delta > 0 {
+                    0
+                } else {
+                    n - 1
+                }
             }
             Some(i) => ((i as isize + delta).rem_euclid(n as isize)) as usize,
         });
         if let Some(idx) = self.preview_link_cursor {
             if let Some(link) = self.preview.links.get(idx) {
                 self.preview_scroll = link.line_index;
-                let kind = if link.resolved.is_some() { "interno" } else { "externo" };
+                let kind = if link.resolved.is_some() {
+                    "interno"
+                } else {
+                    "externo"
+                };
                 self.status = format!(
                     "Link {}/{}: {} → {} ({kind})  Enter=abrir",
-                    idx + 1, n, link.label, link.raw_target
+                    idx + 1,
+                    n,
+                    link.label,
+                    link.raw_target
                 );
             }
         }
@@ -1599,32 +1688,35 @@ impl App {
 
     pub fn palette_commands(&self) -> Vec<(&'static str, &'static str)> {
         vec![
-            ("q",          "salir de mdnav"),
-            ("files",      "buscar archivo en el arbol"),
-            ("find",       "buscar texto en el archivo actual"),
-            ("create",     "crear carpeta o archivo"),
-            ("git",        "ejecutar comandos git"),
-            ("select",     "activar cursor de seleccion  (Shift+Y)"),
-            ("edit",       "abrir editor sobre el archivo  (Shift+E)"),
-            ("rename",     "renombrar archivo o carpeta  (Shift+R)"),
-            ("move",       "mover archivo o carpeta a otro directorio"),
-            ("copy",       "copiar archivo a otro directorio"),
-            ("copypath",   "copiar ruta del item seleccionado  (Ctrl+Shift+C)"),
-            ("goto",       "cd pendiente al directorio  (Shift+G)"),
-            ("toc",        "tabla de contenidos  (Shift+T)"),
-            ("mermaid",    "acciones Mermaid  (Shift+M)"),
+            ("q", "salir de mdnav"),
+            ("files", "buscar archivo en el arbol"),
+            ("find", "buscar texto en el archivo actual"),
+            ("create", "crear carpeta o archivo"),
+            ("git", "ejecutar comandos git"),
+            ("select", "activar cursor de seleccion  (Shift+Y)"),
+            ("edit", "abrir editor sobre el archivo  (Shift+E)"),
+            ("rename", "renombrar archivo o carpeta  (Shift+R)"),
+            ("move", "mover archivo o carpeta a otro directorio"),
+            ("copy", "copiar archivo a otro directorio"),
+            (
+                "copypath",
+                "copiar ruta del item seleccionado  (Ctrl+Shift+C)",
+            ),
+            ("goto", "cd pendiente al directorio  (Shift+G)"),
+            ("toc", "tabla de contenidos  (Shift+T)"),
+            ("mermaid", "acciones Mermaid  (Shift+M)"),
             ("fullscreen", "pantalla completa del panel  (Shift+0)"),
-            ("delete",     "eliminar archivo o carpeta  (Shift+X)"),
-            ("bookmark",   "marcar/desmarcar bookmark  (Shift+B)"),
-            ("bookmarks",  "mostrar/ocultar bookmarks"),
-            ("gitinfo",    "mostrar/ocultar info Git en el arbol"),
-            ("split1",     "proporcion paneles 1  (Shift+1)"),
-            ("split2",     "proporcion paneles 2  (Shift+2)"),
-            ("split3",     "proporcion paneles 3  (Shift+3)"),
-            ("split4",     "proporcion paneles 4  (Shift+4)"),
-            ("split5",     "proporcion paneles 5  (Shift+5)"),
-            ("sort",       "ordenar arbol: nombre / fecha / tamaño"),
-            ("treeinfo",   "info en arbol: tamaño / lineas / off"),
+            ("delete", "eliminar archivo o carpeta  (Shift+X)"),
+            ("bookmark", "marcar/desmarcar bookmark  (Shift+B)"),
+            ("bookmarks", "mostrar/ocultar bookmarks"),
+            ("gitinfo", "mostrar/ocultar info Git en el arbol"),
+            ("split1", "proporcion paneles 1  (Shift+1)"),
+            ("split2", "proporcion paneles 2  (Shift+2)"),
+            ("split3", "proporcion paneles 3  (Shift+3)"),
+            ("split4", "proporcion paneles 4  (Shift+4)"),
+            ("split5", "proporcion paneles 5  (Shift+5)"),
+            ("sort", "ordenar arbol: nombre / fecha / tamaño"),
+            ("treeinfo", "info en arbol: tamaño / lineas / off"),
         ]
     }
 
@@ -1660,33 +1752,36 @@ impl App {
             return Ok(());
         };
         match name {
-            "q"          => { self.overlay = Overlay::None; self.running = false; }
-            "files"      => self.open_search(),
-            "find"       => self.open_find(),
-            "create"     => self.open_create(),
-            "git"        => self.open_git(),
-            "select"     => self.toggle_selection_mode(),
-            "edit"       => self.edit_target_in_nano()?,
-            "rename"     => self.open_rename()?,
-            "move"       => self.open_dest_picker(FileOpKind::Move),
-            "copy"       => self.open_dest_picker(FileOpKind::Copy),
-            "copypath"   => self.copy_path_to_clipboard()?,
-            "goto"       => self.queue_cd_to_target_dir(),
-            "toc"        => self.open_toc(),
-            "mermaid"    => self.open_mermaid_flow()?,
-            "fullscreen"  => self.toggle_fullscreen(),
-            "delete"      => self.request_delete()?,
-            "bookmark"    => self.toggle_bookmark()?,
-            "bookmarks"   => self.toggle_show_bookmarks()?,
-            "gitinfo"     => self.toggle_git_status_visual()?,
-            "split1"     => self.set_split_level(1),
-            "split2"     => self.set_split_level(2),
-            "split3"     => self.set_split_level(3),
-            "split4"     => self.set_split_level(4),
-            "split5"     => self.set_split_level(5),
-            "sort"       => self.toggle_tree_sort()?,
-            "treeinfo"   => self.toggle_tree_info()?,
-            _            => {}
+            "q" => {
+                self.overlay = Overlay::None;
+                self.running = false;
+            }
+            "files" => self.open_search(),
+            "find" => self.open_find(),
+            "create" => self.open_create(),
+            "git" => self.open_git(),
+            "select" => self.toggle_selection_mode(),
+            "edit" => self.edit_target_in_nano()?,
+            "rename" => self.open_rename()?,
+            "move" => self.open_dest_picker(FileOpKind::Move),
+            "copy" => self.open_dest_picker(FileOpKind::Copy),
+            "copypath" => self.copy_path_to_clipboard()?,
+            "goto" => self.queue_cd_to_target_dir(),
+            "toc" => self.open_toc(),
+            "mermaid" => self.open_mermaid_flow()?,
+            "fullscreen" => self.toggle_fullscreen(),
+            "delete" => self.request_delete()?,
+            "bookmark" => self.toggle_bookmark()?,
+            "bookmarks" => self.toggle_show_bookmarks()?,
+            "gitinfo" => self.toggle_git_status_visual()?,
+            "split1" => self.set_split_level(1),
+            "split2" => self.set_split_level(2),
+            "split3" => self.set_split_level(3),
+            "split4" => self.set_split_level(4),
+            "split5" => self.set_split_level(5),
+            "sort" => self.toggle_tree_sort()?,
+            "treeinfo" => self.toggle_tree_info()?,
+            _ => {}
         }
         Ok(())
     }
@@ -1746,7 +1841,8 @@ impl App {
             self.status = String::from("No hay item para eliminar");
             return Ok(());
         };
-        let name = target.file_name()
+        let name = target
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| target.display().to_string());
         self.status = format!("Eliminar '{name}'?  Enter=confirmar  Esc=cancelar");
@@ -1758,7 +1854,8 @@ impl App {
         let Some(target) = self.pending_delete.take() else {
             return Ok(());
         };
-        let name = target.file_name()
+        let name = target
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| target.display().to_string());
         let result = if target.is_dir() {
@@ -1787,7 +1884,8 @@ impl App {
             self.status = String::from("No hay item para renombrar");
             return Ok(());
         };
-        let name = target.file_name()
+        let name = target
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_string();
@@ -1915,16 +2013,16 @@ impl App {
 
     pub fn git_commands() -> &'static [(&'static str, &'static str, &'static [&'static str])] {
         &[
-            ("status",    "git status",             &["status"] as &[&str]),
-            ("log",       "git log --oneline -20",  &["log", "--oneline", "-20"]),
-            ("diff",      "git diff",               &["diff"]),
-            ("add .",     "git add .",              &["add", "."]),
-            ("commit",    "git commit (pide mensaje)", &[]),
-            ("pull",      "git pull",               &["pull"]),
-            ("push",      "git push",               &["push"]),
-            ("branch",    "git branch",             &["branch"]),
-            ("stash",     "git stash",              &["stash"]),
-            ("stash pop", "git stash pop",          &["stash", "pop"]),
+            ("status", "git status", &["status"] as &[&str]),
+            ("log", "git log --oneline -20", &["log", "--oneline", "-20"]),
+            ("diff", "git diff", &["diff"]),
+            ("add .", "git add .", &["add", "."]),
+            ("commit", "git commit (pide mensaje)", &[]),
+            ("pull", "git pull", &["pull"]),
+            ("push", "git push", &["push"]),
+            ("branch", "git branch", &["branch"]),
+            ("stash", "git stash", &["stash"]),
+            ("stash pop", "git stash pop", &["stash", "pop"]),
         ]
     }
 
@@ -1960,10 +2058,7 @@ impl App {
                 } else {
                     format!("{stdout}\n{stderr}")
                 };
-                self.git_output = combined
-                    .lines()
-                    .map(|l| l.to_string())
-                    .collect();
+                self.git_output = combined.lines().map(|l| l.to_string()).collect();
                 if self.git_output.is_empty() {
                     self.git_output = vec![String::from("(sin salida)")];
                 }
@@ -1994,7 +2089,11 @@ impl App {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let combined = if stderr.trim().is_empty() { stdout } else { format!("{stdout}\n{stderr}") };
+                let combined = if stderr.trim().is_empty() {
+                    stdout
+                } else {
+                    format!("{stdout}\n{stderr}")
+                };
                 self.git_output = combined.lines().map(|l| l.to_string()).collect();
                 if self.git_output.is_empty() {
                     self.git_output = vec![String::from("(sin salida)")];
@@ -2034,8 +2133,7 @@ impl App {
             return;
         }
         let n = self.search_results.len() as isize;
-        self.search_cursor =
-            ((self.search_cursor as isize + delta).rem_euclid(n)) as usize;
+        self.search_cursor = ((self.search_cursor as isize + delta).rem_euclid(n)) as usize;
     }
 
     fn confirm_search(&mut self) {
@@ -2075,7 +2173,10 @@ impl App {
     /// Rebuilds the visible directory list from the current expansion state,
     /// keeping the cursor on the same path when possible.
     fn rebuild_picker_dirs(&mut self) -> Result<()> {
-        let current = self.picker_dirs.get(self.picker_cursor).map(|item| item.path.clone());
+        let current = self
+            .picker_dirs
+            .get(self.picker_cursor)
+            .map(|item| item.path.clone());
         self.picker_dirs = collect_dir_tree(&self.root, &self.picker_expanded)?;
         self.picker_cursor = current
             .and_then(|path| self.picker_dirs.iter().position(|item| item.path == path))
@@ -2102,8 +2203,7 @@ impl App {
             return;
         }
         let n = self.picker_dirs.len() as isize;
-        self.picker_cursor =
-            ((self.picker_cursor as isize + delta).rem_euclid(n)) as usize;
+        self.picker_cursor = ((self.picker_cursor as isize + delta).rem_euclid(n)) as usize;
         self.update_picker_status();
     }
 
@@ -2147,7 +2247,11 @@ impl App {
             self.close_dest_picker("Operacion cancelada");
             return;
         };
-        let Some(dest_dir) = self.picker_dirs.get(self.picker_cursor).map(|item| item.path.clone()) else {
+        let Some(dest_dir) = self
+            .picker_dirs
+            .get(self.picker_cursor)
+            .map(|item| item.path.clone())
+        else {
             return;
         };
         let Some(file_name) = source.file_name() else {
@@ -2171,9 +2275,8 @@ impl App {
         }
 
         let result: Result<()> = match kind {
-            FileOpKind::Move => fs::rename(&source, &dest).map(|_| ()).map_err(Into::into),
-            FileOpKind::Copy if source.is_dir() => copy_dir_recursive(&source, &dest),
-            FileOpKind::Copy => fs::copy(&source, &dest).map(|_| ()).map_err(Into::into),
+            FileOpKind::Move => move_path(&source, &dest),
+            FileOpKind::Copy => copy_path(&source, &dest),
         };
 
         match result {
@@ -2182,11 +2285,19 @@ impl App {
                 if let Some(index) = self.items.iter().position(|item| item.path == dest) {
                     self.selected_index = index;
                 }
-                let verb = if kind == FileOpKind::Move { "Movido" } else { "Copiado" };
+                let verb = if kind == FileOpKind::Move {
+                    "Movido"
+                } else {
+                    "Copiado"
+                };
                 self.close_dest_picker(&format!("{verb} a: {}", dest_dir.display()));
             }
             Err(e) => {
-                let verb = if kind == FileOpKind::Move { "mover" } else { "copiar" };
+                let verb = if kind == FileOpKind::Move {
+                    "mover"
+                } else {
+                    "copiar"
+                };
                 self.close_dest_picker(&format!("Error al {verb}: {e}"));
             }
         }
@@ -2226,7 +2337,9 @@ fn share_mermaid_via_web(diagram: &MermaidBlock) -> Result<String> {
     let response = request.send()?;
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().unwrap_or_else(|_| String::from("sin detalle"));
+        let body = response
+            .text()
+            .unwrap_or_else(|_| String::from("sin detalle"));
         return Err(anyhow::anyhow!("Error web Mermaid {status}: {body}"));
     }
 
@@ -2289,7 +2402,7 @@ h1 {{ font-size: 18px; margin-top: 0; color: #7cc7ff; }}\
     Ok(path)
 }
 
-fn open_in_browser(path: &PathBuf) -> Result<bool> {
+fn open_in_browser(path: &Path) -> Result<bool> {
     #[cfg(target_os = "windows")]
     {
         Command::new("cmd")
@@ -2402,12 +2515,17 @@ fn inject_bookmarks(items: &mut Vec<DocItem>, config: &AppConfig) {
     if !config.show_bookmarks || config.bookmarks.is_empty() {
         return;
     }
-    let bookmark_items: Vec<DocItem> = config.bookmarks.iter()
+    let bookmark_items: Vec<DocItem> = config
+        .bookmarks
+        .iter()
         .filter_map(|bm| {
             let path = PathBuf::from(bm);
-            if !path.exists() { return None; }
+            if !path.exists() {
+                return None;
+            }
             let is_dir = path.is_dir();
-            let name = path.file_name()
+            let name = path
+                .file_name()
                 .map(|n| format!("★ {}", n.to_string_lossy()))
                 .unwrap_or_else(|| format!("★ {}", bm));
             Some(DocItem {
@@ -2422,7 +2540,7 @@ fn inject_bookmarks(items: &mut Vec<DocItem>, config: &AppConfig) {
         .collect();
     if !bookmark_items.is_empty() {
         let mut new_items = bookmark_items;
-        new_items.extend(items.drain(..));
+        new_items.append(items);
         *items = new_items;
     }
 }
@@ -2442,11 +2560,21 @@ fn format_file_size(bytes: u64) -> String {
 }
 
 fn is_image_path(path: &Path) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "webp" | "bmp" | "tiff" | "tif")
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "webp" | "bmp" | "tiff" | "tif"
+    )
 }
 
-fn count_lines_cached(path: &Path, cache: &mut HashMap<PathBuf, (SystemTime, usize)>) -> Option<usize> {
+fn count_lines_cached(
+    path: &Path,
+    cache: &mut HashMap<PathBuf, (SystemTime, usize)>,
+) -> Option<usize> {
     let mtime = fs::metadata(path).ok()?.modified().ok()?;
     if let Some(&(cached_mtime, count)) = cache.get(path) {
         if cached_mtime == mtime {
@@ -2465,7 +2593,8 @@ fn compute_tree_sig(root: &PathBuf, expanded_dirs: &BTreeSet<PathBuf>) -> u64 {
         .filter_map(|dir| fs::metadata(dir).ok()?.modified().ok())
         .filter_map(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
         .fold(0u64, |acc, d| {
-            acc.wrapping_add(d.as_secs()).wrapping_add(d.subsec_nanos() as u64)
+            acc.wrapping_add(d.as_secs())
+                .wrapping_add(d.subsec_nanos() as u64)
         })
 }
 
@@ -2476,4 +2605,65 @@ fn html_escape(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_git_porcelain_statuses() {
+        let cases = [
+            (
+                " M docs/changed.md",
+                "docs/changed.md",
+                GitStatusKind::Modified,
+            ),
+            ("A  docs/new.md", "docs/new.md", GitStatusKind::Staged),
+            (
+                "?? docs/untracked.md",
+                "docs/untracked.md",
+                GitStatusKind::Untracked,
+            ),
+            ("!! target/", "target", GitStatusKind::Ignored),
+            (
+                " D docs/deleted.md",
+                "docs/deleted.md",
+                GitStatusKind::Deleted,
+            ),
+            (
+                "R  docs/old.md -> docs/new.md",
+                "docs/new.md",
+                GitStatusKind::Renamed,
+            ),
+            (
+                "UU docs/conflict.md",
+                "docs/conflict.md",
+                GitStatusKind::Conflicted,
+            ),
+        ];
+
+        for (line, expected_path, expected_kind) in cases {
+            assert_eq!(
+                parse_git_status_line(line),
+                Some((expected_path, expected_kind)),
+                "line: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_git_porcelain_lines() {
+        assert_eq!(parse_git_status_line(""), None);
+        assert_eq!(parse_git_status_line("M"), None);
+        assert_eq!(parse_git_status_line("   "), None);
+    }
+
+    #[test]
+    fn escapes_html_for_generated_mermaid_files() {
+        assert_eq!(
+            html_escape("<tag title=\"a&b\">'text'</tag>"),
+            "&lt;tag title=&quot;a&amp;b&quot;&gt;&#39;text&#39;&lt;/tag&gt;"
+        );
+    }
 }

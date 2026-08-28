@@ -264,5 +264,9 @@ pub static EN: Strings = Strings {
 };
 
 pub fn get(lang: &str) -> &'static Strings {
-    if lang == "en" { &EN } else { &ES }
+    if lang == "en" {
+        &EN
+    } else {
+        &ES
+    }
 }

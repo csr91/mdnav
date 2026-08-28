@@ -80,7 +80,9 @@ mdnav --version    # versión instalada
 
 Presioná `:` para abrir. Comandos disponibles:
 
-`:q` `:files` `:find` `:create` `:git` `:select` `:edit` `:rename` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo`
+`:q` `:files` `:find` `:create` `:git` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo`
+
+`:move` y `:copy` abren un selector navegable de carpetas. Las operaciones no sobrescriben destinos existentes y la copia de carpetas se revierte si ocurre un error.
 
 `:treeinfo` alterna la informacion mostrada a la derecha de cada archivo en el arbol: tamanio, lineas u oculto.
 

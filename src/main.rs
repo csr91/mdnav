@@ -5,11 +5,16 @@ mod markdown;
 mod strings;
 mod ui;
 
-use std::{env, io, path::PathBuf, process::Command, time::Duration};
+use std::{
+    env, io,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event, poll},
+    event::{self, poll, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -35,7 +40,12 @@ fn run_cli(docs_root: PathBuf) -> Result<()> {
 
     loop {
         let mut terminal = setup_terminal()?;
-        let result = run(&mut terminal, current_root.clone(), config.clone(), resume_path.take());
+        let result = run(
+            &mut terminal,
+            current_root.clone(),
+            config.clone(),
+            resume_path.take(),
+        );
         restore_terminal(&mut terminal)?;
         let app = result?;
 
@@ -116,7 +126,9 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
     disable_raw_mode().context("No se pudo desactivar raw mode")?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)
         .context("No se pudo salir de alternate screen")?;
-    terminal.show_cursor().context("No se pudo restaurar el cursor")
+    terminal
+        .show_cursor()
+        .context("No se pudo restaurar el cursor")
 }
 
 fn run(
@@ -160,7 +172,7 @@ fn emit_pending_cd(app: &App) {
     println!("Run this in your shell: cd \"{}\"", target.display());
 }
 
-fn open_in_editor(path: &PathBuf, editor: &str) -> Result<()> {
+fn open_in_editor(path: &Path, editor: &str) -> Result<()> {
     let path_str = path.to_string_lossy();
     let path_str = path_str.trim_start_matches(r"\\?\");
     let status = Command::new(editor).arg(path_str).status()?;
