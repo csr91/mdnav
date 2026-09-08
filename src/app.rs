@@ -3,17 +3,17 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arboard::Clipboard;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use reqwest::blocking::Client;
 use serde_json::json;
 
 use crate::{
-    config::{config_path, AppConfig, TreeInfoMode, TreeSortMode},
+    config::{config_path, trash_dir, AppConfig, TreeInfoMode, TreeSortMode},
     docs::{
         collect_dir_tree, collect_markdown_tree, copy_path, has_subdirs, move_path,
         parent_dir_if_within, DocItem,
@@ -59,7 +59,35 @@ pub enum Overlay {
     Git,
     Rename,
     DestPicker,
+    Alert,
 }
+
+/// The single reversible file operation kept around for `undo`. Nothing is ever
+/// hard-deleted: a delete parks the item in the trash and an undone copy goes
+/// to the trash as well, so a wrong `u` cannot destroy anything either.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LastOperation {
+    Delete { trashed: PathBuf, original: PathBuf },
+    Moved { from: PathBuf, to: PathBuf },
+    Copied { created: PathBuf },
+}
+
+/// Trash entries older than this are pruned on startup so undo storage stays
+/// bounded without ever surprising a user who deleted something last week.
+const TRASH_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// One entry of the destination folder shown next to the picker tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PickerPreviewEntry {
+    pub name: String,
+    pub is_dir: bool,
+    /// True when the entry has the same name as the item being moved or
+    /// copied, so confirming here would hit an existing path.
+    pub collides: bool,
+}
+
+/// Upper bound on preview rows: big folders must not slow the picker down.
+const PICKER_PREVIEW_LIMIT: usize = 200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileOpKind {
@@ -169,12 +197,21 @@ pub struct App {
     pub picker_dirs: Vec<DocItem>, // currently visible directory nodes
     pub picker_expanded: BTreeSet<PathBuf>, // expanded directories in the picker
     pub picker_cursor: usize,      // index into picker_dirs
+    pub picker_preview: Vec<PickerPreviewEntry>, // contents of the highlighted directory
+    pub picker_preview_total: usize, // entries before truncation
+    pub picker_preview_error: Option<String>, // set when the directory is unreadable
+    /// Last reversible file operation, consumed by `undo`.
+    pub last_operation: Option<LastOperation>,
     pub toc_entries: Vec<(usize, String)>, // (line_index, heading text)
     pub toc_cursor: usize,
     pub preview_link_cursor: Option<usize>, // index into preview.links
     // Command palette
     pub palette_query: String,
     pub palette_cursor: usize,
+    /// When true the palette lists every command instead of the recent ones.
+    pub palette_show_all: bool,
+    // Alert popup
+    pub alert_message: String,
     // Find in file
     pub find_query: String,
     pub find_results: Vec<usize>, // line indices in preview
@@ -263,11 +300,17 @@ impl App {
             picker_dirs: Vec::new(),
             picker_expanded: BTreeSet::new(),
             picker_cursor: 0,
+            picker_preview: Vec::new(),
+            picker_preview_total: 0,
+            picker_preview_error: None,
+            last_operation: None,
             toc_entries: Vec::new(),
             toc_cursor: 0,
             preview_link_cursor: None,
             palette_query: String::new(),
             palette_cursor: 0,
+            palette_show_all: false,
+            alert_message: String::new(),
             find_query: String::new(),
             find_results: Vec::new(),
             find_cursor: 0,
@@ -292,6 +335,7 @@ impl App {
         };
         app.rebuild_tree_info_cache();
         app.refresh_git_status_cache();
+        prune_trash();
         Ok(app)
     }
 
@@ -394,6 +438,7 @@ impl App {
             KeyCode::Char('G') => self.queue_cd_to_target_dir(),
             KeyCode::Char(':') => self.open_command_palette(),
             KeyCode::Char('T') => self.open_toc(),
+            KeyCode::Char('u') => self.undo_last_operation()?,
             _ => {}
         }
 
@@ -556,14 +601,21 @@ impl App {
                 KeyCode::Left | KeyCode::Char('h') => self.collapse_picker_dir(),
                 _ => {}
             },
+            Overlay::Alert => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    self.alert_message.clear();
+                    self.close_overlay("Aviso cerrado");
+                }
+                _ => {}
+            },
             Overlay::CommandPalette => match key.code {
                 KeyCode::Esc => self.close_overlay("Palette cerrada"),
                 KeyCode::Enter => {
-                    self.confirm_palette_command()?;
+                    let keep_open = self.confirm_palette_command()?;
                     // Close the palette unless the command opened another overlay
                     // (create, git, dest picker, ...). Otherwise action commands
                     // like delete or copypath would stay hidden behind it.
-                    if self.overlay == Overlay::CommandPalette {
+                    if !keep_open && self.overlay == Overlay::CommandPalette {
                         self.overlay = Overlay::None;
                     }
                 }
@@ -571,8 +623,8 @@ impl App {
                     self.palette_query.pop();
                     self.update_palette_cursor();
                 }
-                KeyCode::Down | KeyCode::Char('j') => self.move_palette_cursor(1),
-                KeyCode::Up | KeyCode::Char('k') => self.move_palette_cursor(-1),
+                KeyCode::Down => self.move_palette_cursor(1),
+                KeyCode::Up => self.move_palette_cursor(-1),
                 KeyCode::Char(c) => {
                     self.palette_query.push(c);
                     self.update_palette_cursor();
@@ -682,6 +734,14 @@ impl App {
             self.help_section = HelpSection::Shortcuts;
             self.status = String::from("Ayuda abierta");
         }
+    }
+
+    /// Shows a blocking alert popup. Used for recoverable failures (permission
+    /// denied, unreadable file, ...) that must never take the whole app down.
+    pub fn show_alert(&mut self, message: impl Into<String>) {
+        self.alert_message = message.into();
+        self.status = self.alert_message.clone();
+        self.overlay = Overlay::Alert;
     }
 
     fn close_overlay(&mut self, status: &str) {
@@ -981,6 +1041,16 @@ impl App {
                 self.expanded_dirs.remove(&item.path);
                 self.status = format!("Colapsada {}", item.relative.display());
             } else {
+                if let Err(err) = std::fs::read_dir(&item.path) {
+                    self.show_alert(format!(
+                        "No se puede abrir {}
+
+{}",
+                        item.path.display(),
+                        err
+                    ));
+                    return Ok(());
+                }
                 self.expanded_dirs.insert(item.path.clone());
                 self.status = format!("Expandida {}", item.relative.display());
             }
@@ -1682,45 +1752,84 @@ impl App {
     fn open_command_palette(&mut self) {
         self.palette_query.clear();
         self.palette_cursor = 0;
+        self.palette_show_all = false;
         self.overlay = Overlay::CommandPalette;
         self.status = String::from("Palette: escribe para filtrar");
     }
 
+    /// Every palette command, sorted alphabetically by name.
     pub fn palette_commands(&self) -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("q", "salir de mdnav"),
-            ("files", "buscar archivo en el arbol"),
-            ("find", "buscar texto en el archivo actual"),
-            ("create", "crear carpeta o archivo"),
-            ("git", "ejecutar comandos git"),
-            ("select", "activar cursor de seleccion  (Shift+Y)"),
-            ("edit", "abrir editor sobre el archivo  (Shift+E)"),
-            ("rename", "renombrar archivo o carpeta  (Shift+R)"),
-            ("move", "mover archivo o carpeta a otro directorio"),
+        let mut commands: Vec<(&'static str, &'static str)> = vec![
+            ("bookmark", "marcar/desmarcar bookmark  (Shift+B)"),
+            ("bookmarks", "mostrar/ocultar bookmarks"),
+            ("commands", "ver la lista completa de comandos"),
             ("copy", "copiar archivo a otro directorio"),
             (
                 "copypath",
                 "copiar ruta del item seleccionado  (Ctrl+Shift+C)",
             ),
-            ("goto", "cd pendiente al directorio  (Shift+G)"),
-            ("toc", "tabla de contenidos  (Shift+T)"),
-            ("mermaid", "acciones Mermaid  (Shift+M)"),
-            ("fullscreen", "pantalla completa del panel  (Shift+0)"),
+            ("create", "crear carpeta o archivo"),
             ("delete", "eliminar archivo o carpeta  (Shift+X)"),
-            ("bookmark", "marcar/desmarcar bookmark  (Shift+B)"),
-            ("bookmarks", "mostrar/ocultar bookmarks"),
+            ("edit", "abrir editor sobre el archivo  (Shift+E)"),
+            ("files", "buscar archivo en el arbol"),
+            ("find", "buscar texto en el archivo actual"),
+            ("fullscreen", "pantalla completa del panel  (Shift+0)"),
+            ("git", "ejecutar comandos git"),
             ("gitinfo", "mostrar/ocultar info Git en el arbol"),
+            ("goto", "cd pendiente al directorio  (Shift+G)"),
+            ("mermaid", "acciones Mermaid  (Shift+M)"),
+            ("move", "mover archivo o carpeta a otro directorio"),
+            ("q", "salir de mdnav"),
+            ("rename", "renombrar archivo o carpeta  (Shift+R)"),
+            ("select", "activar cursor de seleccion  (Shift+Y)"),
+            ("sort", "ordenar arbol: nombre / fecha / tamaño"),
             ("split1", "proporcion paneles 1  (Shift+1)"),
             ("split2", "proporcion paneles 2  (Shift+2)"),
             ("split3", "proporcion paneles 3  (Shift+3)"),
             ("split4", "proporcion paneles 4  (Shift+4)"),
             ("split5", "proporcion paneles 5  (Shift+5)"),
-            ("sort", "ordenar arbol: nombre / fecha / tamaño"),
+            ("toc", "tabla de contenidos  (Shift+T)"),
             ("treeinfo", "info en arbol: tamaño / lineas / off"),
-        ]
+            ("undo", "deshacer la ultima operacion de archivo  (u)"),
+        ];
+        commands.sort_by_key(|(name, _)| *name);
+        commands
+    }
+
+    /// The most recently used commands, newest first, followed by the entry
+    /// that opens the full list. Empty until the user runs a command.
+    fn palette_recent(&self) -> Vec<(&'static str, &'static str)> {
+        let all = self.palette_commands();
+        let mut recent: Vec<(&'static str, &'static str)> = self
+            .config
+            .recent_commands
+            .iter()
+            .filter_map(|name| all.iter().find(|(cmd, _)| cmd == name).copied())
+            .collect();
+
+        if recent.is_empty() {
+            return recent;
+        }
+
+        if let Some(entry) = all.iter().find(|(cmd, _)| *cmd == "commands") {
+            if !recent.iter().any(|(cmd, _)| *cmd == "commands") {
+                recent.push(*entry);
+            }
+        }
+        recent
+    }
+
+    /// True when the palette is showing the recent-commands shortlist rather
+    /// than the full catalogue.
+    pub fn palette_showing_recent(&self) -> bool {
+        self.palette_query.is_empty() && !self.palette_show_all && !self.palette_recent().is_empty()
     }
 
     pub fn palette_filtered(&self) -> Vec<(&'static str, &'static str)> {
+        if self.palette_showing_recent() {
+            return self.palette_recent();
+        }
+
         let q = self.palette_query.to_lowercase();
         self.palette_commands()
             .into_iter()
@@ -1746,11 +1855,25 @@ impl App {
             ((self.palette_cursor as isize + delta).rem_euclid(n as isize)) as usize;
     }
 
-    fn confirm_palette_command(&mut self) -> Result<()> {
+    /// Runs the selected command. Returns true when the palette should stay
+    /// open (only `commands`, which switches to the full catalogue).
+    fn confirm_palette_command(&mut self) -> Result<bool> {
         let filtered = self.palette_filtered();
         let Some(&(name, _)) = filtered.get(self.palette_cursor) else {
-            return Ok(());
+            return Ok(false);
         };
+
+        if name == "commands" {
+            self.palette_show_all = true;
+            self.palette_query.clear();
+            self.palette_cursor = 0;
+            self.status = String::from("Palette: lista completa");
+            return Ok(true);
+        }
+
+        self.config.record_recent_command(name);
+        self.config.save()?;
+
         match name {
             "q" => {
                 self.overlay = Overlay::None;
@@ -1781,9 +1904,10 @@ impl App {
             "split5" => self.set_split_level(5),
             "sort" => self.toggle_tree_sort()?,
             "treeinfo" => self.toggle_tree_info()?,
+            "undo" => self.undo_last_operation()?,
             _ => {}
         }
-        Ok(())
+        Ok(false)
     }
 
     // ── Find in file ──────────────────────────────────────────────────────────
@@ -1858,25 +1982,76 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| target.display().to_string());
-        let result = if target.is_dir() {
-            fs::remove_dir_all(&target)
-        } else {
-            fs::remove_file(&target)
-        };
-        match result {
-            Ok(()) => {
+        match move_to_trash(&target) {
+            Ok(trashed) => {
                 if self.current_file.as_ref() == Some(&target) {
                     self.current_file = None;
                     self.preview = crate::markdown::PreviewDocument::default();
                 }
+                self.last_operation = Some(LastOperation::Delete {
+                    trashed,
+                    original: target,
+                });
                 self.reload_items()?;
-                self.status = format!("Eliminado: {name}");
+                self.status = format!("Eliminado: {name}  (u para deshacer)");
             }
             Err(e) => {
-                self.status = format!("Error al eliminar: {e}");
+                self.status = format!("Error al eliminar: {e:#}");
             }
         }
         Ok(())
+    }
+
+    /// Reverts the last file operation. Restores a deleted item from the trash,
+    /// moves a renamed or moved item back, or sends an unwanted copy to the
+    /// trash. Only one step is kept: this is a safety net, not a history.
+    fn undo_last_operation(&mut self) -> Result<()> {
+        let Some(operation) = self.last_operation.take() else {
+            self.status = String::from("No hay nada para deshacer");
+            return Ok(());
+        };
+
+        let outcome: Result<String> = match &operation {
+            LastOperation::Delete { trashed, original } => move_path(trashed, original)
+                .map(|()| format!("Restaurado: {}", display_name(original))),
+            LastOperation::Moved { from, to } => {
+                move_path(to, from).map(|()| format!("Revertido: {}", display_name(from)))
+            }
+            LastOperation::Copied { created } => move_to_trash(created)
+                .map(|_| format!("Copia descartada: {}", display_name(created))),
+        };
+
+        match outcome {
+            Ok(status) => {
+                self.reload_items()?;
+                self.clear_preview_if_missing();
+                self.status = status;
+            }
+            Err(e) => {
+                // Keep the slot so the user can retry once the cause is fixed.
+                self.last_operation = Some(operation);
+                self.show_alert(format!(
+                    "No se pudo deshacer:
+
+{e:#}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops the preview when the open file no longer exists on disk.
+    fn clear_preview_if_missing(&mut self) {
+        let missing = self
+            .current_file
+            .as_ref()
+            .map(|path| !path.exists())
+            .unwrap_or(false);
+        if missing {
+            self.current_file = None;
+            self.preview = crate::markdown::PreviewDocument::default();
+            self.file_mtime = None;
+        }
     }
 
     fn open_rename(&mut self) -> Result<()> {
@@ -1911,6 +2086,10 @@ impl App {
         let dest = parent.join(&new_name);
         match fs::rename(&target, &dest) {
             Ok(()) => {
+                self.last_operation = Some(LastOperation::Moved {
+                    from: target.clone(),
+                    to: dest.clone(),
+                });
                 let _ = self.reload_items();
                 if let Some(index) = self.items.iter().position(|item| item.path == dest) {
                     self.selected_index = index;
@@ -1919,7 +2098,7 @@ impl App {
                     let _ = self.open_file(dest);
                 }
                 self.overlay = Overlay::None;
-                self.status = format!("Renombrado a: {new_name}");
+                self.status = format!("Renombrado a: {new_name}  (u para deshacer)");
             }
             Err(e) => {
                 self.overlay = Overlay::None;
@@ -2186,6 +2365,8 @@ impl App {
     }
 
     fn update_picker_status(&mut self) {
+        self.refresh_picker_preview();
+
         let verb = match self.file_op_kind {
             Some(FileOpKind::Copy) => "Copiar",
             _ => "Mover",
@@ -2193,9 +2374,75 @@ impl App {
         let dest = self
             .picker_dirs
             .get(self.picker_cursor)
-            .map(|item| item.name.as_str())
-            .unwrap_or("");
+            .map(|item| item.name.clone())
+            .unwrap_or_default();
+
+        if let Some(error) = &self.picker_preview_error {
+            self.status = format!("{verb} a: {dest}  — no se puede leer: {error}");
+            return;
+        }
+
+        if let Some(entry) = self.picker_preview.iter().find(|entry| entry.collides) {
+            self.status = format!("{verb} a: {dest}  — ya existe \"{}\" ahi", entry.name);
+            return;
+        }
+
         self.status = format!("{verb} a: {dest}  (l/→ entrar | h/← salir | Enter confirmar)");
+    }
+
+    /// Reloads the listing of the highlighted destination so the user sees what
+    /// is already inside the folder — and whether the operation would collide —
+    /// before confirming.
+    fn refresh_picker_preview(&mut self) {
+        self.picker_preview.clear();
+        self.picker_preview_total = 0;
+        self.picker_preview_error = None;
+
+        let Some(dir) = self
+            .picker_dirs
+            .get(self.picker_cursor)
+            .map(|item| item.path.clone())
+        else {
+            return;
+        };
+
+        let source_name = self
+            .file_op_source
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string());
+
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                self.picker_preview_error = Some(err.to_string());
+                return;
+            }
+        };
+
+        let mut rows: Vec<PickerPreviewEntry> = entries
+            .flatten()
+            .map(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                let collides = source_name.as_deref() == Some(name.as_str());
+                PickerPreviewEntry {
+                    name,
+                    is_dir,
+                    collides,
+                }
+            })
+            .collect();
+
+        rows.sort_by(|left, right| {
+            (!left.is_dir)
+                .cmp(&!right.is_dir)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
+
+        self.picker_preview_total = rows.len();
+        rows.truncate(PICKER_PREVIEW_LIMIT);
+        self.picker_preview = rows;
     }
 
     fn move_picker_cursor(&mut self, delta: isize) {
@@ -2281,6 +2528,15 @@ impl App {
 
         match result {
             Ok(()) => {
+                self.last_operation = Some(match kind {
+                    FileOpKind::Move => LastOperation::Moved {
+                        from: source.clone(),
+                        to: dest.clone(),
+                    },
+                    FileOpKind::Copy => LastOperation::Copied {
+                        created: dest.clone(),
+                    },
+                });
                 let _ = self.reload_items();
                 if let Some(index) = self.items.iter().position(|item| item.path == dest) {
                     self.selected_index = index;
@@ -2290,7 +2546,10 @@ impl App {
                 } else {
                     "Copiado"
                 };
-                self.close_dest_picker(&format!("{verb} a: {}", dest_dir.display()));
+                self.close_dest_picker(&format!(
+                    "{verb} a: {}  (u para deshacer)",
+                    dest_dir.display()
+                ));
             }
             Err(e) => {
                 let verb = if kind == FileOpKind::Move {
@@ -2464,6 +2723,70 @@ fn copy_to_clipboard(value: &str) -> Result<bool> {
 
     clipboard.set_text(value.to_string())?;
     Ok(true)
+}
+
+/// Short, human readable name of a path, for status messages.
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Moves `target` into the trash under a unique, timestamped name and returns
+/// where it landed. Used by delete and by undoing a copy, so no user action in
+/// mdnav ever removes bytes outright.
+fn move_to_trash(target: &Path) -> Result<PathBuf> {
+    let trash = trash_dir()?;
+    fs::create_dir_all(&trash).with_context(|| format!("No se pudo crear {}", trash.display()))?;
+
+    let name = display_name(target);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+
+    let mut dest = trash.join(format!("{stamp}-{name}"));
+    let mut attempt = 1u32;
+    while dest.exists() {
+        dest = trash.join(format!("{stamp}-{attempt}-{name}"));
+        attempt += 1;
+    }
+
+    move_path(target, &dest)?;
+    Ok(dest)
+}
+
+/// Removes trash entries older than `TRASH_MAX_AGE`. Best effort: a failure
+/// here must never keep mdnav from starting.
+fn prune_trash() {
+    let Ok(trash) = trash_dir() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&trash) else {
+        return;
+    };
+    let now = SystemTime::now();
+
+    for entry in entries.flatten() {
+        let expired = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .map(|age| age > TRASH_MAX_AGE)
+            .unwrap_or(false);
+
+        if !expired {
+            continue;
+        }
+
+        let path = entry.path();
+        let _ = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+    }
 }
 
 fn git_is_available() -> bool {

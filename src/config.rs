@@ -56,7 +56,12 @@ pub struct AppConfig {
     pub tree_info: TreeInfoMode,
     pub tree_sort: TreeSortMode,
     pub show_git_status: bool,
+    /// Names of the last palette commands the user ran, most recent first.
+    pub recent_commands: Vec<String>,
 }
+
+/// How many recent commands the palette keeps and shows by default.
+pub const RECENT_COMMANDS_LIMIT: usize = 5;
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -69,6 +74,7 @@ impl Default for AppConfig {
             tree_info: TreeInfoMode::Off,
             tree_sort: TreeSortMode::Name,
             show_git_status: true,
+            recent_commands: Vec::new(),
         }
     }
 }
@@ -124,6 +130,23 @@ impl AppConfig {
             }
         }
         self.bookmarks = unique_bookmarks;
+
+        let mut unique_commands = Vec::with_capacity(self.recent_commands.len());
+        for command in self.recent_commands.drain(..) {
+            if !command.trim().is_empty() && !unique_commands.contains(&command) {
+                unique_commands.push(command);
+            }
+        }
+        unique_commands.truncate(RECENT_COMMANDS_LIMIT);
+        self.recent_commands = unique_commands;
+    }
+
+    /// Records `name` as the most recently used palette command, keeping the
+    /// list deduplicated and capped at `RECENT_COMMANDS_LIMIT`.
+    pub fn record_recent_command(&mut self, name: &str) {
+        self.recent_commands.retain(|command| command != name);
+        self.recent_commands.insert(0, name.to_string());
+        self.recent_commands.truncate(RECENT_COMMANDS_LIMIT);
     }
 }
 
@@ -199,6 +222,16 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(base.join("mdnav").join("config.toml"))
 }
 
+/// Directory where deleted items are parked so `undo` can bring them back.
+/// Lives next to the config file, never inside the user's docs tree.
+pub fn trash_dir() -> Result<PathBuf> {
+    let path = config_path()?
+        .parent()
+        .context("No se pudo resolver la carpeta de config del usuario")?
+        .join("trash");
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +251,26 @@ mod tests {
 
         assert_eq!(decoded, config);
         assert!(encoded.contains("bookmarks = ["));
+    }
+
+    #[test]
+    fn recent_commands_are_deduplicated_and_capped() {
+        let mut config = AppConfig::default();
+        for name in ["files", "git", "toc", "find", "sort", "delete"] {
+            config.record_recent_command(name);
+        }
+        config.record_recent_command("git");
+
+        assert_eq!(config.recent_commands.len(), RECENT_COMMANDS_LIMIT);
+        assert_eq!(config.recent_commands[0], "git");
+        assert_eq!(
+            config
+                .recent_commands
+                .iter()
+                .filter(|c| *c == "git")
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -143,6 +143,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Find => render_find_popup(frame, app),
         Overlay::Create => render_create_popup(frame, app),
         Overlay::Git => render_git_popup(frame, app),
+        Overlay::Alert => render_alert_popup(frame, app),
         Overlay::Rename => {}
         Overlay::None => {}
     }
@@ -742,6 +743,7 @@ fn shortcut_lines(s: &'static Strings) -> Vec<Line<'static>> {
         shortcut_line("Shift+E", s.sc_shift_e),
         shortcut_line("Shift+R", s.sc_shift_r),
         shortcut_line("Shift+B", s.sc_shift_b),
+        shortcut_line("u", s.sc_u),
         shortcut_line("Ctrl+Shift+C", s.sc_ctrl_shift_c),
         shortcut_line("Shift+G", s.sc_shift_g),
         shortcut_line("Shift+0", s.sc_shift_0),
@@ -1181,8 +1183,20 @@ fn render_search_popup(frame: &mut Frame, app: &App) {
 
 fn render_dest_picker_popup(frame: &mut Frame, app: &App) {
     let s = app.config.strings();
-    let popup_area = centered_rect(60, 60, frame.area());
+    let popup_area = centered_rect(78, 62, frame.area());
     frame.render_widget(Clear, popup_area);
+
+    // Tree on the left, contents of the highlighted destination on the right.
+    // Narrow terminals keep the tree only: a 20-column preview is useless.
+    let panes = if popup_area.width >= 60 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(popup_area)
+            .to_vec()
+    } else {
+        vec![popup_area]
+    };
 
     let title = if app.file_op_kind == Some(FileOpKind::Copy) {
         s.dest_copy_title
@@ -1224,7 +1238,75 @@ fn render_dest_picker_popup(frame: &mut Frame, app: &App) {
     if !app.picker_dirs.is_empty() {
         state.select(Some(app.picker_cursor));
     }
-    frame.render_stateful_widget(list, popup_area, &mut state);
+    frame.render_stateful_widget(list, panes[0], &mut state);
+
+    if let Some(&preview_area) = panes.get(1) {
+        render_dest_picker_preview(frame, app, preview_area);
+    }
+}
+
+fn render_dest_picker_preview(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(" contenido ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    if let Some(error) = &app.picker_preview_error {
+        let paragraph = Paragraph::new(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )))
+        .wrap(Wrap { trim: false })
+        .block(block);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    if app.picker_preview.is_empty() {
+        let paragraph = Paragraph::new(Line::from(Span::styled(
+            "(vacia)",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .block(block);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let mut lines: Vec<Line> = app
+        .picker_preview
+        .iter()
+        .map(|entry| {
+            let marker = if entry.is_dir { "▸ " } else { "  " };
+            let style = if entry.collides {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else if entry.is_dir {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let suffix = if entry.collides {
+                "  ← ya existe"
+            } else {
+                ""
+            };
+            Line::from(Span::styled(
+                format!("{marker}{}{suffix}", entry.name),
+                style,
+            ))
+        })
+        .collect();
+
+    let hidden = app
+        .picker_preview_total
+        .saturating_sub(app.picker_preview.len());
+    if hidden > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("… {hidden} mas"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn render_command_palette(frame: &mut Frame, app: &App) {
@@ -1260,9 +1342,16 @@ fn render_command_palette(frame: &mut Frame, app: &App) {
         })
         .collect();
 
+    let title = if app.palette_showing_recent() {
+        " recientes "
+    } else {
+        " comandos "
+    };
+
     let list = List::new(items)
         .block(
             Block::default()
+                .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
         )
@@ -1279,6 +1368,35 @@ fn render_command_palette(frame: &mut Frame, app: &App) {
         state.select(Some(app.palette_cursor));
     }
     frame.render_stateful_widget(list, list_area, &mut state);
+}
+
+fn render_alert_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(60, 30, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let lines: Vec<Line> = app
+        .alert_message
+        .lines()
+        .map(|line| {
+            Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::White),
+            ))
+        })
+        .chain(std::iter::once(Line::from(Span::styled(
+            "Esc / Enter para cerrar",
+            Style::default().fg(Color::DarkGray),
+        ))))
+        .collect();
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .title(" Aviso ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+    );
+
+    frame.render_widget(paragraph, popup_area);
 }
 
 fn render_find_popup(frame: &mut Frame, app: &App) {

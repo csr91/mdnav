@@ -146,12 +146,16 @@ fn run(
     while app.running {
         terminal.draw(|frame| ui::render(frame, &app))?;
 
+        // A failing action (permission denied, file vanished, ...) must never
+        // tear down the TUI: surface it as an on-screen alert and keep going.
         if poll(Duration::from_millis(500))? {
             if let Event::Key(key_event) = event::read()? {
-                app.handle_key(key_event)?;
+                if let Err(err) = app.handle_key(key_event) {
+                    app.show_alert(format!("{err:#}"));
+                }
             }
-        } else {
-            app.check_external_changes()?;
+        } else if let Err(err) = app.check_external_changes() {
+            app.show_alert(format!("{err:#}"));
         }
     }
 

@@ -190,6 +190,18 @@ pub fn collect_dir_tree(root: &Path, expanded_dirs: &BTreeSet<PathBuf>) -> Resul
     Ok(items)
 }
 
+/// Reads the entries of `current`. A directory we cannot read (permission
+/// denied, removed mid-walk, ...) is skipped by returning `None` so a single
+/// locked folder never aborts the whole tree — only the root is fatal.
+fn read_dir_entries(root: &Path, current: &Path) -> Result<Option<Vec<fs::DirEntry>>> {
+    match fs::read_dir(current) {
+        Ok(entries) => Ok(Some(entries.flatten().collect())),
+        Err(err) if current == root => Err(anyhow::Error::new(err))
+            .with_context(|| format!("No se pudo leer {}", current.display())),
+        Err(_) => Ok(None),
+    }
+}
+
 fn visit_dir_tree(
     root: &Path,
     current: &Path,
@@ -197,14 +209,14 @@ fn visit_dir_tree(
     depth: usize,
     items: &mut Vec<DocItem>,
 ) -> Result<()> {
-    let mut entries = fs::read_dir(current)
-        .with_context(|| format!("No se pudo leer {}", current.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let Some(mut entries) = read_dir_entries(root, current)? else {
+        return Ok(());
+    };
 
     entries.sort_by_key(|left| left.file_name());
 
     for entry in entries {
-        if entry.file_type()?.is_dir() {
+        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
             let path = entry.path();
             items.push(make_item(root, path.clone(), depth, true)?);
             if expanded_dirs.contains(&path) {
@@ -236,9 +248,9 @@ fn visit_dir(
     sort_mode: &TreeSortMode,
     items: &mut Vec<DocItem>,
 ) -> Result<()> {
-    let mut entries = fs::read_dir(current)
-        .with_context(|| format!("No se pudo leer {}", current.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let Some(mut entries) = read_dir_entries(root, current)? else {
+        return Ok(());
+    };
 
     entries.sort_by(|left, right| {
         let left_is_dir = left.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
@@ -251,7 +263,9 @@ fn visit_dir(
 
     for entry in entries {
         let path = entry.path();
-        let file_type = entry.file_type()?;
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
 
         if file_type.is_dir() {
             let item = make_item(root, path.clone(), depth, true)?;
