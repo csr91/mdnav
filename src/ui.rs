@@ -67,16 +67,26 @@ pub fn render(frame: &mut Frame, app: &App) {
             Span::styled("█", Style::default().fg(Color::Yellow)),
         ]))
         .block(Block::default().borders(Borders::TOP))
-    } else if app.selection.as_ref().map(|s| s.anchored).unwrap_or(false) {
-        let (label, hint, color) = if app.status.starts_with("Copiado!") {
-            (app.status.clone(), String::new(), Color::Green)
+    } else if app.selection.is_some()
+        && (app.status.starts_with("Text copied!")
+            || app.status.starts_with("Clipboard copy failed"))
+    {
+        let color = if app.status.starts_with("Text copied!") {
+            Color::Green
         } else {
-            (
-                s.select_on.to_string(),
-                s.select_copy_hint.to_string(),
-                Color::Green,
-            )
+            Color::Red
         };
+        Paragraph::new(Line::from(Span::styled(
+            app.status.clone(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )))
+        .block(Block::default().borders(Borders::TOP))
+    } else if app.selection.as_ref().map(|s| s.anchored).unwrap_or(false) {
+        let (label, hint, color) = (
+            s.select_on.to_string(),
+            s.select_copy_hint.to_string(),
+            Color::Green,
+        );
         Paragraph::new(Line::from(vec![
             Span::styled(
                 label,
@@ -120,12 +130,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         ]))
         .block(Block::default().borders(Borders::TOP))
     } else {
-        Paragraph::new(Line::from(vec![
-            Span::styled(s.help_hint.to_string(), Style::default().fg(Color::Yellow)),
-            footer_item_span(app),
-            pending_cd_span(app),
-        ]))
-        .block(Block::default().borders(Borders::TOP))
+        Paragraph::new(Line::from(context_footer_spans(app, s)))
+            .block(Block::default().borders(Borders::TOP))
     };
 
     frame.render_widget(footer, areas[1]);
@@ -140,6 +146,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::DestPicker => render_dest_picker_popup(frame, app),
         Overlay::Toc => render_toc_popup(frame, app),
         Overlay::CommandPalette => render_command_palette(frame, app),
+        Overlay::RecentFiles => render_recent_files_popup(frame, app),
         Overlay::Find => render_find_popup(frame, app),
         Overlay::Create => render_create_popup(frame, app),
         Overlay::Git => render_git_popup(frame, app),
@@ -147,6 +154,38 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Rename => {}
         Overlay::None => {}
     }
+}
+
+fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let focus = match app.focus {
+        Focus::Tree => "TREE",
+        Focus::Preview => "PREVIEW",
+    };
+    spans.push(Span::styled(
+        format!("{focus}  "),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    let hint = match app.focus {
+        Focus::Tree => "↑↓/jk move · Enter/l open · h parent · Tab preview · : command · ? help  ",
+        Focus::Preview => "↑↓/jk scroll · [] links · T toc · Y select · Tab tree · : command  ",
+    };
+    spans.push(Span::styled(hint, Style::default().fg(Color::Gray)));
+
+    if let Some(metadata) = app.current_file_metadata() {
+        spans.push(Span::styled(metadata, Style::default().fg(Color::DarkGray)));
+    } else {
+        spans.push(Span::styled(
+            s.help_hint.to_string(),
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(footer_item_span(app));
+    }
+    spans.push(pending_cd_span(app));
+    spans
 }
 
 fn footer_item_span(app: &App) -> Span<'static> {
@@ -261,7 +300,7 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
                 } else {
                     " "
                 };
-                let marker = if item.is_dir { ">" } else { "-" };
+                let marker = item_marker(app, item);
                 result.push(ListItem::new(Line::from(vec![
                     Span::raw(selector.to_string()),
                     Span::styled(
@@ -273,15 +312,7 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &App) {
                 ])));
             } else {
                 let indent = "  ".repeat(item.depth);
-                let marker = if item.is_dir {
-                    if app.expanded_dirs.contains(&item.path) {
-                        "v"
-                    } else {
-                        ">"
-                    }
-                } else {
-                    "-"
-                };
+                let marker = item_marker(app, item);
                 let selector = if app.selector_path.as_ref() == Some(&item.path) {
                     "*"
                 } else {
@@ -375,9 +406,33 @@ fn git_status_style(status: Option<GitStatusKind>) -> (&'static str, Style) {
     }
 }
 
+fn item_marker<'a>(app: &App, item: &'a crate::docs::DocItem) -> &'static str {
+    if item.is_dir {
+        if app.expanded_dirs.contains(&item.path) {
+            "▾"
+        } else {
+            "▸"
+        }
+    } else {
+        match item
+            .path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_lowercase())
+            .as_deref()
+        {
+            Some("md" | "markdown") => "M",
+            Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") => "I",
+            Some("rs" | "js" | "ts" | "tsx" | "jsx" | "py" | "sh" | "ps1") => "C",
+            Some("json" | "toml" | "yaml" | "yml") => "D",
+            _ => "•",
+        }
+    }
+}
+
 fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
     let s = app.config.strings();
-    let title = if app.fullscreen == FullscreenPanel::Preview {
+    let base_title = if app.fullscreen == FullscreenPanel::Preview {
         if app.selection.is_some() {
             s.preview_select
         } else {
@@ -388,9 +443,16 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         s.preview_title
     };
+    let title = app
+        .current_file_breadcrumb()
+        .map(|breadcrumb| format!("{base_title} · {breadcrumb}"))
+        .unwrap_or_else(|| base_title.to_string());
 
     let lines = if app.preview.lines.is_empty() {
-        vec![Line::from(s.preview_empty)]
+        vec![Line::from(Span::styled(
+            s.preview_empty,
+            Style::default().fg(Color::DarkGray),
+        ))]
     } else {
         // Line index of the active link (if any)
         let active_link_line = app
@@ -403,7 +465,15 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
             .iter()
             .enumerate()
             .skip(app.preview_scroll)
-            .map(|(index, line)| styled_preview_line(line, app.selection, index, active_link_line))
+            .map(|(index, line)| {
+                styled_preview_line(
+                    line,
+                    app.selection,
+                    index,
+                    active_link_line,
+                    app.active_find_query.as_str(),
+                )
+            })
             .collect::<Vec<_>>()
     };
 
@@ -883,9 +953,11 @@ fn settings_lines(app: &App, s: &'static Strings) -> Vec<Line<'static>> {
 
 fn border_style(is_focused: bool) -> Style {
     if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
         Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
     }
 }
 
@@ -894,6 +966,7 @@ fn styled_preview_line(
     selection: Option<crate::app::SelectionState>,
     line_index: usize,
     active_link_line: Option<usize>,
+    active_find_query: &str,
 ) -> Line<'static> {
     let mut base_style = preview_line_style(&line.kind);
 
@@ -921,12 +994,17 @@ fn styled_preview_line(
     match line.kind {
         PreviewLineKind::MermaidTitle => {
             if let Some((title, hint)) = line.text.split_once("    ") {
-                styled_selected_text(&format!("{title}    {hint}"), base_style, selected_range)
+                styled_find_and_selection(
+                    &format!("{title}    {hint}"),
+                    base_style,
+                    selected_range,
+                    active_find_query,
+                )
             } else {
-                styled_selected_text(&line.text, base_style, selected_range)
+                styled_find_and_selection(&line.text, base_style, selected_range, active_find_query)
             }
         }
-        _ => styled_selected_text(&line.text, base_style, selected_range),
+        _ => styled_find_and_selection(&line.text, base_style, selected_range, active_find_query),
     }
 }
 
@@ -1031,6 +1109,76 @@ fn styled_selected_text(
     } else {
         Line::from(spans)
     }
+}
+
+fn styled_find_and_selection(
+    text: &str,
+    base: Style,
+    selected_range: Option<(usize, usize)>,
+    active_find_query: &str,
+) -> Line<'static> {
+    if selected_range.is_some() || active_find_query.trim().is_empty() {
+        return styled_selected_text(text, base, selected_range);
+    }
+
+    let lower_query = active_find_query.to_lowercase();
+    let matches = find_match_chars(text, &lower_query);
+    if matches.is_empty() {
+        return Line::from(Span::styled(text.to_string(), base));
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    for (start_char, len_chars) in matches {
+        if start_char > cursor {
+            spans.push(Span::styled(
+                chars[cursor..start_char].iter().collect::<String>(),
+                base,
+            ));
+        }
+        let end_char = start_char + len_chars;
+        spans.push(Span::styled(
+            chars[start_char..end_char].iter().collect::<String>(),
+            base.bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+        cursor = end_char;
+    }
+    if cursor < chars.len() {
+        spans.push(Span::styled(
+            chars[cursor..].iter().collect::<String>(),
+            base,
+        ));
+    }
+    Line::from(spans)
+}
+
+fn find_match_chars(text: &str, lower_query: &str) -> Vec<(usize, usize)> {
+    let query_len = lower_query.chars().count();
+    if query_len == 0 {
+        return Vec::new();
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut matches = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let candidate = chars
+            .iter()
+            .skip(start)
+            .take(query_len)
+            .collect::<String>()
+            .to_lowercase();
+        if candidate == lower_query {
+            matches.push((start, query_len));
+            start += query_len;
+        } else {
+            start += 1;
+        }
+    }
+    matches
 }
 
 fn preview_cursor_position(app: &App, area: Rect, cursor: PreviewCursor) -> Option<Position> {
@@ -1144,7 +1292,11 @@ fn render_search_popup(frame: &mut Frame, app: &App) {
     // Results list
     let items = if app.search_results.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            s.search_no_results,
+            if app.search_query.is_empty() {
+                "Type to search files..."
+            } else {
+                s.search_no_results
+            },
             Style::default().fg(Color::DarkGray),
         )))]
     } else {
@@ -1342,10 +1494,10 @@ fn render_command_palette(frame: &mut Frame, app: &App) {
         })
         .collect();
 
-    let title = if app.palette_showing_recent() {
-        " recientes "
-    } else {
+    let title = if app.palette_show_all {
         " comandos "
+    } else {
+        " sugerencia "
     };
 
     let list = List::new(items)
@@ -1368,6 +1520,49 @@ fn render_command_palette(frame: &mut Frame, app: &App) {
         state.select(Some(app.palette_cursor));
     }
     frame.render_stateful_widget(list, list_area, &mut state);
+}
+
+fn render_recent_files_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(68, 55, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let items = app
+        .config
+        .recent_files
+        .iter()
+        .map(|path| {
+            let path_buf = std::path::PathBuf::from(path);
+            let label = path_buf
+                .strip_prefix(&app.root)
+                .map(|relative| relative.display().to_string())
+                .unwrap_or_else(|_| path.clone());
+            ListItem::new(Line::from(vec![
+                Span::styled("M ", Style::default().fg(Color::Yellow)),
+                Span::raw(label),
+            ]))
+        })
+        .collect::<Vec<_>>();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(" recent files  Enter=open | Esc=close ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default();
+    if !app.config.recent_files.is_empty() {
+        state.select(Some(app.recent_file_cursor));
+    }
+    frame.render_stateful_widget(list, popup_area, &mut state);
 }
 
 fn render_alert_popup(frame: &mut Frame, app: &App) {

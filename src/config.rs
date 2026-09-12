@@ -58,10 +58,13 @@ pub struct AppConfig {
     pub show_git_status: bool,
     /// Names of the last palette commands the user ran, most recent first.
     pub recent_commands: Vec<String>,
+    /// Recently opened files, most recent first.
+    pub recent_files: Vec<String>,
 }
 
 /// How many recent commands the palette keeps and shows by default.
 pub const RECENT_COMMANDS_LIMIT: usize = 5;
+pub const RECENT_FILES_LIMIT: usize = 12;
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -75,6 +78,7 @@ impl Default for AppConfig {
             tree_sort: TreeSortMode::Name,
             show_git_status: true,
             recent_commands: Vec::new(),
+            recent_files: Vec::new(),
         }
     }
 }
@@ -139,6 +143,15 @@ impl AppConfig {
         }
         unique_commands.truncate(RECENT_COMMANDS_LIMIT);
         self.recent_commands = unique_commands;
+
+        let mut unique_files = Vec::with_capacity(self.recent_files.len());
+        for file in self.recent_files.drain(..) {
+            if !file.trim().is_empty() && !unique_files.contains(&file) {
+                unique_files.push(file);
+            }
+        }
+        unique_files.truncate(RECENT_FILES_LIMIT);
+        self.recent_files = unique_files;
     }
 
     /// Records `name` as the most recently used palette command, keeping the
@@ -147,6 +160,12 @@ impl AppConfig {
         self.recent_commands.retain(|command| command != name);
         self.recent_commands.insert(0, name.to_string());
         self.recent_commands.truncate(RECENT_COMMANDS_LIMIT);
+    }
+
+    pub fn record_recent_file(&mut self, path: &str) {
+        self.recent_files.retain(|file| file != path);
+        self.recent_files.insert(0, path.to_string());
+        self.recent_files.truncate(RECENT_FILES_LIMIT);
     }
 }
 
@@ -268,6 +287,26 @@ mod tests {
                 .recent_commands
                 .iter()
                 .filter(|c| *c == "git")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn recent_files_are_deduplicated_and_capped() {
+        let mut config = AppConfig::default();
+        for i in 0..20 {
+            config.record_recent_file(&format!("docs/{i}.md"));
+        }
+        config.record_recent_file("docs/3.md");
+
+        assert_eq!(config.recent_files.len(), RECENT_FILES_LIMIT);
+        assert_eq!(config.recent_files[0], "docs/3.md");
+        assert_eq!(
+            config
+                .recent_files
+                .iter()
+                .filter(|f| *f == "docs/3.md")
                 .count(),
             1
         );

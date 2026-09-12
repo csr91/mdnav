@@ -54,6 +54,7 @@ pub enum Overlay {
     Search,
     Toc,
     CommandPalette,
+    RecentFiles,
     Find,
     Create,
     Git,
@@ -216,6 +217,8 @@ pub struct App {
     pub find_query: String,
     pub find_results: Vec<usize>, // line indices in preview
     pub find_cursor: usize,
+    pub active_find_query: String,
+    pub recent_file_cursor: usize,
     // Create
     pub create_kind: CreateKind,
     pub create_name: String,
@@ -314,6 +317,8 @@ impl App {
             find_query: String::new(),
             find_results: Vec::new(),
             find_cursor: 0,
+            active_find_query: String::new(),
+            recent_file_cursor: 0,
             create_kind: CreateKind::File,
             create_name: String::new(),
             create_step: CreateStep::ChooseKind,
@@ -363,7 +368,7 @@ impl App {
                 }
                 KeyCode::Esc | KeyCode::Char('X') => {
                     self.pending_delete = None;
-                    self.status = String::from("Eliminacion cancelada");
+                    self.status = String::from("Delete cancelled");
                     return Ok(());
                 }
                 _ => {
@@ -375,8 +380,14 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.running = false,
             KeyCode::Char('?') => self.toggle_help(),
-            KeyCode::Up => self.move_selection(-1),
-            KeyCode::Down => self.move_selection(1),
+            KeyCode::Up => match self.focus {
+                Focus::Tree => self.move_selection(-1),
+                Focus::Preview => self.scroll_preview(-1),
+            },
+            KeyCode::Down => match self.focus {
+                Focus::Tree => self.move_selection(1),
+                Focus::Preview => self.scroll_preview(1),
+            },
             KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
             KeyCode::Char(')') => self.toggle_fullscreen(),
             KeyCode::Char('M') => self.open_mermaid_flow()?,
@@ -623,8 +634,8 @@ impl App {
                     self.palette_query.pop();
                     self.update_palette_cursor();
                 }
-                KeyCode::Down => self.move_palette_cursor(1),
-                KeyCode::Up => self.move_palette_cursor(-1),
+                KeyCode::Down if self.palette_show_all => self.move_palette_cursor(1),
+                KeyCode::Up if self.palette_show_all => self.move_palette_cursor(-1),
                 KeyCode::Char(c) => {
                     self.palette_query.push(c);
                     self.update_palette_cursor();
@@ -644,6 +655,13 @@ impl App {
                     self.find_query.push(c);
                     self.update_find_results();
                 }
+                _ => {}
+            },
+            Overlay::RecentFiles => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("Recent files cerrado"),
+                KeyCode::Up | KeyCode::Char('k') => self.move_recent_file_cursor(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.move_recent_file_cursor(1),
+                KeyCode::Enter => self.open_recent_file()?,
                 _ => {}
             },
             Overlay::Create => match key.code {
@@ -862,7 +880,10 @@ impl App {
             };
         }
 
-        self.status = format!("Foco: {:?}", self.focus);
+        self.status = match self.focus {
+            Focus::Tree => String::from("Focus: tree"),
+            Focus::Preview => String::from("Focus: preview"),
+        };
     }
 
     fn toggle_fullscreen(&mut self) {
@@ -934,7 +955,7 @@ impl App {
             anchored: false,
         });
         self.fullscreen = FullscreenPanel::Preview;
-        self.status = String::from("Modo seleccion activo");
+        self.status = String::from("Selection mode active");
     }
 
     fn edit_target_in_nano(&mut self) -> Result<()> {
@@ -1116,7 +1137,7 @@ impl App {
 
     fn copy_selected_text(&mut self) -> Result<()> {
         let Some(selection) = self.selection else {
-            self.status = String::from("Nada seleccionado");
+            self.status = String::from("No text selected");
             return Ok(());
         };
 
@@ -1129,7 +1150,7 @@ impl App {
         };
 
         if start == end {
-            self.status = String::from("Nada seleccionado");
+            self.status = String::from("No text selected");
             return Ok(());
         }
 
@@ -1162,11 +1183,11 @@ impl App {
         }
         self.status = if copied {
             format!(
-                "Copiado! ({} caracteres)  y=nueva seleccion  Esc=salir",
+                "Text copied! ({} chars)  y=new selection  Esc=exit",
                 text.chars().count()
             )
         } else {
-            String::from("Error al copiar al portapapeles")
+            String::from("Clipboard copy failed")
         };
         Ok(())
     }
@@ -1179,9 +1200,9 @@ impl App {
         let path_str = target.display().to_string();
         let copied = copy_to_clipboard(&path_str).unwrap_or(false);
         self.status = if copied {
-            format!("Ruta copiada: {path_str}")
+            format!("Path copied: {path_str}")
         } else {
-            String::from("Error al copiar la ruta")
+            String::from("Path copy failed")
         };
         Ok(())
     }
@@ -1189,7 +1210,7 @@ impl App {
     fn exit_selection_mode(&mut self) {
         if let Some(selection) = self.selection.take() {
             self.fullscreen = selection.previous_fullscreen;
-            self.status = String::from("Modo seleccion cerrado");
+            self.status = String::from("Selection closed");
         }
     }
 
@@ -1219,9 +1240,9 @@ impl App {
         self.selection = Some(selection);
         self.ensure_selection_visible();
         self.status = if self.has_selected_text() {
-            String::from("Seleccion extendida")
+            String::from("Selection extended")
         } else {
-            String::from("Cursor de seleccion")
+            String::from("Selection cursor")
         };
     }
 
@@ -1407,6 +1428,37 @@ impl App {
             .max_by_key(|status| status.priority())
     }
 
+    pub fn current_file_breadcrumb(&self) -> Option<String> {
+        let path = self.current_file.as_ref()?;
+        let relative = path.strip_prefix(&self.root).unwrap_or(path);
+        Some(relative.display().to_string().replace('\\', " / "))
+    }
+
+    pub fn current_file_metadata(&self) -> Option<String> {
+        let path = self.current_file.as_ref()?;
+        let metadata = std::fs::metadata(path).ok();
+        let size = metadata
+            .as_ref()
+            .map(|metadata| format_file_size(metadata.len()));
+        let lines = self.preview.lines.len();
+        let git = self
+            .items
+            .iter()
+            .find(|item| &item.path == path)
+            .and_then(|item| self.git_status_for_item(item))
+            .map(git_status_label);
+
+        let mut parts = Vec::new();
+        parts.push(format!("{lines} lines"));
+        if let Some(size) = size {
+            parts.push(size);
+        }
+        if let Some(git) = git {
+            parts.push(git.to_string());
+        }
+        Some(parts.join(" · "))
+    }
+
     fn refresh_git_status_cache(&mut self) {
         self.git_status_cache.clear();
         if !self.git_available || !self.config.show_git_status {
@@ -1536,10 +1588,12 @@ impl App {
     }
 
     fn open_file(&mut self, path: PathBuf) -> Result<()> {
+        self.status = format!("Opening {}...", self.relative_label(&path));
         self.preview = load_preview(&path)?;
         self.preview_scroll = 0;
         self.file_mtime = get_file_mtime(&path);
         self.current_file = Some(path.clone());
+        self.active_find_query.clear();
         self.overlay = Overlay::None;
         self.mermaid_selected_index = 0;
         self.mermaid_output_selected_index = 0;
@@ -1550,6 +1604,8 @@ impl App {
         self.mermaid_selected_node = None;
         self.web_link_popup = None;
         self.preview_link_cursor = None;
+        self.config.record_recent_file(&path.display().to_string());
+        let _ = self.config.save();
         let link_hint = self
             .preview
             .links
@@ -1762,7 +1818,7 @@ impl App {
         let mut commands: Vec<(&'static str, &'static str)> = vec![
             ("bookmark", "marcar/desmarcar bookmark  (Shift+B)"),
             ("bookmarks", "mostrar/ocultar bookmarks"),
-            ("commands", "ver la lista completa de comandos"),
+            ("@commands", "ver la lista completa de comandos"),
             ("copy", "copiar archivo a otro directorio"),
             (
                 "copypath",
@@ -1780,6 +1836,7 @@ impl App {
             ("mermaid", "acciones Mermaid  (Shift+M)"),
             ("move", "mover archivo o carpeta a otro directorio"),
             ("q", "salir de mdnav"),
+            ("recent", "abrir archivos recientes"),
             ("rename", "renombrar archivo o carpeta  (Shift+R)"),
             ("select", "activar cursor de seleccion  (Shift+Y)"),
             ("sort", "ordenar arbol: nombre / fecha / tamaño"),
@@ -1796,53 +1853,40 @@ impl App {
         commands
     }
 
-    /// The most recently used commands, newest first, followed by the entry
-    /// that opens the full list. Empty until the user runs a command.
-    fn palette_recent(&self) -> Vec<(&'static str, &'static str)> {
-        let all = self.palette_commands();
-        let mut recent: Vec<(&'static str, &'static str)> = self
-            .config
-            .recent_commands
-            .iter()
-            .filter_map(|name| all.iter().find(|(cmd, _)| cmd == name).copied())
-            .collect();
-
-        if recent.is_empty() {
-            return recent;
-        }
-
-        if let Some(entry) = all.iter().find(|(cmd, _)| *cmd == "commands") {
-            if !recent.iter().any(|(cmd, _)| *cmd == "commands") {
-                recent.push(*entry);
-            }
-        }
-        recent
-    }
-
-    /// True when the palette is showing the recent-commands shortlist rather
-    /// than the full catalogue.
-    pub fn palette_showing_recent(&self) -> bool {
-        self.palette_query.is_empty() && !self.palette_show_all && !self.palette_recent().is_empty()
-    }
-
     pub fn palette_filtered(&self) -> Vec<(&'static str, &'static str)> {
-        if self.palette_showing_recent() {
-            return self.palette_recent();
+        if self.palette_show_all {
+            return self.palette_commands();
         }
 
         let q = self.palette_query.to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+
+        if "@commands".starts_with(q.as_str()) {
+            return vec![("@commands", "ver la lista completa de comandos")];
+        }
+
         self.palette_commands()
             .into_iter()
             .filter(|(name, desc)| {
-                q.is_empty() || name.contains(q.as_str()) || desc.contains(q.as_str())
+                name.contains(q.as_str())
+                    || desc.contains(q.as_str())
+                    || palette_aliases(name)
+                        .iter()
+                        .any(|alias| alias.contains(q.as_str()))
             })
+            .take(1)
             .collect()
     }
 
     fn update_palette_cursor(&mut self) {
+        self.palette_show_all = self.palette_query == "@commands";
         let n = self.palette_filtered().len();
         if self.palette_cursor >= n && n > 0 {
             self.palette_cursor = n - 1;
+        } else if n <= 1 {
+            self.palette_cursor = 0;
         }
     }
 
@@ -1856,16 +1900,16 @@ impl App {
     }
 
     /// Runs the selected command. Returns true when the palette should stay
-    /// open (only `commands`, which switches to the full catalogue).
+    /// open (only `@commands`, which switches to the full catalogue).
     fn confirm_palette_command(&mut self) -> Result<bool> {
         let filtered = self.palette_filtered();
         let Some(&(name, _)) = filtered.get(self.palette_cursor) else {
             return Ok(false);
         };
 
-        if name == "commands" {
+        if name == "@commands" {
             self.palette_show_all = true;
-            self.palette_query.clear();
+            self.palette_query = String::from("@commands");
             self.palette_cursor = 0;
             self.status = String::from("Palette: lista completa");
             return Ok(true);
@@ -1879,6 +1923,7 @@ impl App {
                 self.overlay = Overlay::None;
                 self.running = false;
             }
+            "recent" => self.open_recent_files(),
             "files" => self.open_search(),
             "find" => self.open_find(),
             "create" => self.open_create(),
@@ -1913,17 +1958,19 @@ impl App {
     // ── Find in file ──────────────────────────────────────────────────────────
 
     fn open_find(&mut self) {
-        self.find_query.clear();
+        self.find_query = self.active_find_query.clone();
         self.find_results.clear();
         self.find_cursor = 0;
         self.overlay = Overlay::Find;
         self.status = String::from("Find: escribe para buscar en el archivo");
+        self.update_find_results();
     }
 
     fn update_find_results(&mut self) {
         let q = self.find_query.to_lowercase();
         if q.is_empty() {
             self.find_results.clear();
+            self.active_find_query.clear();
         } else {
             self.find_results = self
                 .preview
@@ -1954,8 +2001,55 @@ impl App {
         if let Some(&line_index) = self.find_results.get(self.find_cursor) {
             self.preview_scroll = line_index;
             self.focus = Focus::Preview;
+            self.active_find_query = self.find_query.clone();
         }
         self.close_overlay("Find: saltando a resultado");
+    }
+
+    fn open_recent_files(&mut self) {
+        self.config
+            .recent_files
+            .retain(|path| PathBuf::from(path).exists());
+        self.recent_file_cursor = 0;
+        if self.config.recent_files.is_empty() {
+            self.status = String::from("No recent files yet");
+            return;
+        }
+        self.overlay = Overlay::RecentFiles;
+        self.status = String::from("Recent files: Enter=open  Esc=close");
+    }
+
+    fn move_recent_file_cursor(&mut self, delta: isize) {
+        let n = self.config.recent_files.len();
+        if n == 0 {
+            return;
+        }
+        self.recent_file_cursor =
+            ((self.recent_file_cursor as isize + delta).rem_euclid(n as isize)) as usize;
+    }
+
+    fn open_recent_file(&mut self) -> Result<()> {
+        let Some(path) = self
+            .config
+            .recent_files
+            .get(self.recent_file_cursor)
+            .map(PathBuf::from)
+        else {
+            self.close_overlay("No recent file selected");
+            return Ok(());
+        };
+
+        if !path.exists() {
+            self.config.recent_files.remove(self.recent_file_cursor);
+            let _ = self.config.save();
+            self.status = String::from("Recent file no longer exists");
+            return Ok(());
+        }
+
+        if let Some(index) = self.items.iter().position(|item| item.path == path) {
+            self.selected_index = index;
+        }
+        self.open_file(path)
     }
 
     // ── Create folder/file ────────────────────────────────────────────────────
@@ -1969,7 +2063,7 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| target.display().to_string());
-        self.status = format!("Eliminar '{name}'?  Enter=confirmar  Esc=cancelar");
+        self.status = format!("Delete '{name}'?  Enter=confirm  Esc=cancel");
         self.pending_delete = Some(target);
         Ok(())
     }
@@ -1993,7 +2087,7 @@ impl App {
                     original: target,
                 });
                 self.reload_items()?;
-                self.status = format!("Eliminado: {name}  (u para deshacer)");
+                self.status = format!("Moved to trash: {name}  (u=undo)");
             }
             Err(e) => {
                 self.status = format!("Error al eliminar: {e:#}");
@@ -2237,7 +2331,9 @@ impl App {
                 } else {
                     format!("{stdout}\n{stderr}")
                 };
-                self.git_output = combined.lines().map(|l| l.to_string()).collect();
+                self.git_output = vec![format!("Completed: git {name} ({})", output.status)];
+                self.git_output
+                    .extend(combined.lines().map(|l| l.to_string()));
                 if self.git_output.is_empty() {
                     self.git_output = vec![String::from("(sin salida)")];
                 }
@@ -2273,7 +2369,9 @@ impl App {
                 } else {
                     format!("{stdout}\n{stderr}")
                 };
-                self.git_output = combined.lines().map(|l| l.to_string()).collect();
+                self.git_output = vec![format!("Completed: git commit ({})", output.status)];
+                self.git_output
+                    .extend(combined.lines().map(|l| l.to_string()));
                 if self.git_output.is_empty() {
                     self.git_output = vec![String::from("(sin salida)")];
                 }
@@ -2569,6 +2667,34 @@ impl App {
         self.file_op_source = None;
         self.overlay = Overlay::None;
         self.status = String::from(status);
+    }
+}
+
+fn git_status_label(status: GitStatusKind) -> &'static str {
+    match status {
+        GitStatusKind::Ignored => "ignored",
+        GitStatusKind::Untracked => "untracked",
+        GitStatusKind::Modified => "modified",
+        GitStatusKind::Staged => "staged",
+        GitStatusKind::Renamed => "renamed",
+        GitStatusKind::Deleted => "deleted",
+        GitStatusKind::Conflicted => "conflict",
+    }
+}
+
+fn palette_aliases(name: &str) -> &'static [&'static str] {
+    match name {
+        "files" => &["buscar", "archivo", "search", "file"],
+        "find" => &["buscar texto", "texto", "grep", "search text"],
+        "copy" => &["copiar", "duplicar"],
+        "copypath" => &["copiar ruta", "path", "ruta"],
+        "delete" => &["borrar", "eliminar", "remove"],
+        "edit" => &["editar", "abrir editor"],
+        "git" => &["repo", "version"],
+        "toc" => &["indice", "índice", "headings", "tabla"],
+        "recent" => &["recientes", "historial", "ultimos", "últimos"],
+        "@commands" => &["ayuda", "comandos", "help"],
+        _ => &[],
     }
 }
 

@@ -60,11 +60,13 @@ mdnav --version    # versión instalada
 
 | Tecla | Acción |
 |-------|--------|
-| `j` / `k` o `,` / `.` | scroll línea a línea |
+| `j` / `k`, `↑` / `↓` o `,` / `.` | scroll línea a línea |
 | `PgUp` / `PgDn` | scroll rápido |
 | `h` / `l` o `[` / `]` | navegar links |
 | `Shift+T` | tabla de contenidos |
 | `Shift+M` | acciones Mermaid |
+
+El preview muestra la ruta del archivo actual en el titulo y metadata breve en la barra inferior.
 
 ### Selección y copia
 
@@ -78,9 +80,11 @@ mdnav --version    # versión instalada
 
 ### Command palette (estilo vim)
 
-Presioná `:` para abrir. Comandos disponibles:
+Presioná `:` para abrir y escribí el comando. La paleta muestra una sola sugerencia mientras tipeás; tambien entiende algunas intenciones (`buscar`, `copiar`, `indice`, `recientes`). Usá `:@commands` para abrir el popup con todos los comandos y su descripción.
 
-`:q` `:files` `:find` `:create` `:git` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo`
+`:q` `:files` `:find` `:recent` `:create` `:git` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
+
+`:recent` abre los ultimos archivos visitados. `:find` mantiene resaltada la ultima busqueda en el preview hasta abrir otro archivo o limpiar la busqueda.
 
 `:move` y `:copy` abren un selector navegable de carpetas. Las operaciones no sobrescriben destinos existentes y la copia de carpetas se revierte si ocurre un error.
 
