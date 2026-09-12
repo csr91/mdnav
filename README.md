@@ -54,7 +54,7 @@ mdnav --version    # versión instalada
 | `Shift+0` | pantalla completa del panel enfocado |
 | `Shift+1..5` | ajustar proporción entre paneles |
 | `Ctrl+Shift+C` | copiar ruta del archivo seleccionado |
-| `q` | salir |
+| `:q` | salir |
 
 ### Preview
 
@@ -80,13 +80,15 @@ El preview muestra la ruta del archivo actual en el titulo y metadata breve en l
 
 ### Command palette (estilo vim)
 
-Presioná `:` para abrir y escribí el comando. La paleta muestra una sola sugerencia mientras tipeás; tambien entiende algunas intenciones (`buscar`, `copiar`, `indice`, `recientes`). Usá `:@commands` para abrir el popup con todos los comandos y su descripción.
+Presioná `:` para abrir y escribí el comando. La paleta chica prioriza tus comandos recientes y muestra sugerencias por prefijo mientras tipeás; tambien entiende algunas intenciones (`buscar`, `copiar`, `indice`, `recientes`). Usá `:@commands` para abrir el catálogo grande agrupado por secciones, con todos los comandos y su descripción.
 
-`:q` `:files` `:find` `:recent` `:create` `:git` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
+`:q` `:files` `:find` `:grep` `:recent` `:create` `:git` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
 
-`:recent` abre los ultimos archivos visitados. `:find` mantiene resaltada la ultima busqueda en el preview hasta abrir otro archivo o limpiar la busqueda.
+`:recent` abre los ultimos archivos visitados. `:find` mantiene resaltada la ultima busqueda en el preview hasta abrir otro archivo o limpiar la busqueda. `:grep` busca texto en los archivos visibles del arbol y salta al resultado elegido.
 
 `:move` y `:copy` abren un selector navegable de carpetas. Las operaciones no sobrescriben destinos existentes y la copia de carpetas se revierte si ocurre un error.
+
+La barra inferior muestra siempre el modo activo (`TREE`, `PREVIEW`, `COMMAND`, `VISUAL`, `GREP`, etc.) para que sea mas claro donde estas parado.
 
 `:treeinfo` alterna la informacion mostrada a la derecha de cada archivo en el arbol: tamanio, lineas u oculto.
 

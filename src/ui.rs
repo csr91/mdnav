@@ -135,6 +135,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     };
 
     frame.render_widget(footer, areas[1]);
+    render_mode_pill(frame, areas[1], app);
 
     match app.overlay {
         Overlay::Help => render_help_popup(frame, app),
@@ -143,6 +144,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::MermaidTerminalView => render_mermaid_terminal_view(frame, app),
         Overlay::WebLink => render_web_link_popup(frame, app),
         Overlay::Search => render_search_popup(frame, app),
+        Overlay::Grep => render_grep_popup(frame, app),
         Overlay::DestPicker => render_dest_picker_popup(frame, app),
         Overlay::Toc => render_toc_popup(frame, app),
         Overlay::CommandPalette => render_command_palette(frame, app),
@@ -153,6 +155,67 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Alert => render_alert_popup(frame, app),
         Overlay::Rename => {}
         Overlay::None => {}
+    }
+}
+
+fn render_mode_pill(frame: &mut Frame, area: Rect, app: &App) {
+    let (label, color) = mode_label(app);
+    let width = (label.len() as u16 + 4).min(area.width);
+    let pill_area = Rect {
+        x: area.x + area.width.saturating_sub(width),
+        y: area.y,
+        width,
+        height: 1,
+    };
+    frame.render_widget(Clear, pill_area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {label} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(color)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center),
+        pill_area,
+    );
+}
+
+fn mode_label(app: &App) -> (&'static str, Color) {
+    match app.overlay {
+        Overlay::CommandPalette => ("COMMAND", Color::Yellow),
+        Overlay::Grep => ("GREP", Color::Green),
+        Overlay::Find => ("FIND", Color::Magenta),
+        Overlay::Search => ("FILES", Color::Cyan),
+        Overlay::Git => ("GIT", Color::Yellow),
+        Overlay::Help => ("HELP", Color::Yellow),
+        Overlay::RecentFiles => ("RECENT", Color::Cyan),
+        Overlay::Toc => ("TOC", Color::Magenta),
+        Overlay::Create | Overlay::Rename | Overlay::DestPicker | Overlay::Alert => {
+            ("ACTION", Color::Yellow)
+        }
+        Overlay::MermaidSelect | Overlay::MermaidOutput | Overlay::MermaidTerminalView => {
+            ("MERMAID", Color::Cyan)
+        }
+        Overlay::WebLink => ("LINK", Color::Cyan),
+        Overlay::None => {
+            if let Some(selection) = app.selection.as_ref() {
+                return if selection.anchored {
+                    ("VISUAL", Color::Green)
+                } else {
+                    ("SELECT", Color::Cyan)
+                };
+            }
+
+            match app.fullscreen {
+                FullscreenPanel::Tree => ("TREE", Color::Cyan),
+                FullscreenPanel::Preview => ("PREVIEW", Color::Cyan),
+                FullscreenPanel::None => match app.focus {
+                    Focus::Tree => ("TREE", Color::Cyan),
+                    Focus::Preview => ("PREVIEW", Color::Cyan),
+                },
+            }
+        }
     }
 }
 
@@ -672,43 +735,49 @@ fn render_mermaid_terminal_view(frame: &mut Frame, app: &App) {
 
 fn render_help_popup(frame: &mut Frame, app: &App) {
     let s = app.config.strings();
-    let popup_area = centered_rect(68, 56, frame.area());
+    let area = frame.area();
+    let popup_area = Rect {
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(4).max(1),
+        height: area.height.saturating_sub(3).max(1),
+    };
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
-        .title(format!("Help  v{}", env!("CARGO_PKG_VERSION")))
+        .title(format!(" Help  v{} ", env!("CARGO_PKG_VERSION")))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
-    let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
+
+    let inner = Rect {
+        x: popup_area.x.saturating_add(2),
+        y: popup_area.y.saturating_add(1),
+        width: popup_area.width.saturating_sub(4),
+        height: popup_area.height.saturating_sub(2),
+    };
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Min(6),
-            Constraint::Length(2),
+            Constraint::Min(4),
+            Constraint::Length(1),
         ])
         .split(inner);
 
     render_help_tabs(frame, sections[0], app.help_section, s);
 
-    let lines = match app.help_section {
-        HelpSection::Shortcuts => shortcut_lines(s),
-        HelpSection::Settings => settings_lines(app, s),
-    };
+    match app.help_section {
+        HelpSection::Shortcuts => render_shortcuts_help(frame, sections[1], s),
+        HelpSection::Settings => {
+            frame.render_widget(
+                Paragraph::new(settings_lines(app, s)).wrap(Wrap { trim: false }),
+                sections[1],
+            );
+        }
+    }
 
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(paragraph, sections[1]);
-
-    let s = app.config.strings();
     let footer = match app.help_section {
         HelpSection::Shortcuts => s.help_footer_shortcuts,
         HelpSection::Settings => s.help_footer_settings,
@@ -719,6 +788,38 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
             .alignment(Alignment::Center),
         sections[2],
     );
+}
+
+fn render_shortcuts_help(frame: &mut Frame, area: Rect, s: &'static Strings) {
+    let groups = shortcut_groups(s);
+    let columns = if area.width >= 110 {
+        3
+    } else if area.width >= 72 {
+        2
+    } else {
+        1
+    };
+    let constraints = vec![Constraint::Ratio(1, columns as u32); columns];
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(area);
+
+    let mut column_lines = vec![Vec::new(); columns];
+    for (index, group) in groups.iter().enumerate() {
+        let target = index % columns;
+        if !column_lines[target].is_empty() {
+            column_lines[target].push(Line::from(""));
+        }
+        column_lines[target].extend(shortcut_group_lines(group));
+    }
+
+    for (index, pane) in panes.iter().enumerate() {
+        frame.render_widget(
+            Paragraph::new(column_lines[index].clone()).wrap(Wrap { trim: false }),
+            *pane,
+        );
+    }
 }
 
 fn render_web_link_popup(frame: &mut Frame, app: &App) {
@@ -798,45 +899,79 @@ fn help_tab(title: &str, active: bool) -> Paragraph<'static> {
         .block(Block::default().borders(Borders::ALL))
 }
 
-fn shortcut_lines(s: &'static Strings) -> Vec<Line<'static>> {
+struct ShortcutGroup {
+    title: &'static str,
+    items: Vec<(&'static str, &'static str)>,
+}
+
+fn shortcut_groups(s: &'static Strings) -> Vec<ShortcutGroup> {
     vec![
-        Line::from(vec![Span::styled(
-            s.nav_section,
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(""),
-        shortcut_line("Enter", s.sc_enter),
-        shortcut_line("Tab / Shift+Tab", s.sc_tab),
-        shortcut_line("Shift+Y", s.sc_shift_y),
-        shortcut_line("Shift+E", s.sc_shift_e),
-        shortcut_line("Shift+R", s.sc_shift_r),
-        shortcut_line("Shift+B", s.sc_shift_b),
-        shortcut_line("u", s.sc_u),
-        shortcut_line("Ctrl+Shift+C", s.sc_ctrl_shift_c),
-        shortcut_line("Shift+G", s.sc_shift_g),
-        shortcut_line("Shift+0", s.sc_shift_0),
-        shortcut_line("Shift+1..5", s.sc_shift_1_5),
-        shortcut_line("q", s.sc_q),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            s.preview_section,
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(""),
-        shortcut_line(", / .", s.sc_comma_dot),
-        shortcut_line("PgUp / PgDn", s.sc_pgupdn),
-        shortcut_line("Arrows / hjkl", s.sc_arrows),
-        shortcut_line("Shift+Arrows", s.sc_shift_arrows),
-        shortcut_line(":", s.sc_colon),
-        shortcut_line("Shift+T", s.sc_shift_t),
-        shortcut_line("[ / ]", s.sc_brackets),
-        shortcut_line("Shift+M", s.sc_shift_m),
-        shortcut_line("?", s.sc_question),
+        ShortcutGroup {
+            title: s.nav_section,
+            items: vec![
+                ("Enter", s.sc_enter),
+                ("Tab / Shift+Tab", s.sc_tab),
+                ("Shift+E", s.sc_shift_e),
+                ("Shift+R", s.sc_shift_r),
+                ("Shift+B", s.sc_shift_b),
+                ("u", s.sc_u),
+                ("Ctrl+Shift+C", s.sc_ctrl_shift_c),
+                ("Shift+G", s.sc_shift_g),
+                ("Shift+0", s.sc_shift_0),
+                ("Shift+1..5", s.sc_shift_1_5),
+            ],
+        },
+        ShortcutGroup {
+            title: s.preview_section,
+            items: vec![
+                (", / .", s.sc_comma_dot),
+                ("PgUp / PgDn", s.sc_pgupdn),
+                ("[ / ]", s.sc_brackets),
+                ("Shift+T", s.sc_shift_t),
+                ("Shift+M", s.sc_shift_m),
+            ],
+        },
+        ShortcutGroup {
+            title: "Selection",
+            items: vec![
+                ("Shift+Y", s.sc_shift_y),
+                ("Arrows / hjkl", s.sc_arrows),
+                ("Shift+Arrows", s.sc_shift_arrows),
+            ],
+        },
+        ShortcutGroup {
+            title: "Command palette",
+            items: vec![
+                (":", s.sc_colon),
+                (":grep", "search text in visible files"),
+                (":q", s.sc_q),
+                (":@commands", "show all commands"),
+            ],
+        },
+        ShortcutGroup {
+            title: "Help",
+            items: vec![("?", s.sc_question)],
+        },
     ]
+}
+
+fn shortcut_group_lines(group: &ShortcutGroup) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(vec![Span::styled(
+            group.title,
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+    ];
+    lines.extend(
+        group
+            .items
+            .iter()
+            .map(|(keys, description)| shortcut_line(keys, description)),
+    );
+    lines
 }
 
 fn shortcut_line(keys: &str, description: &str) -> Line<'static> {
@@ -1333,6 +1468,77 @@ fn render_search_popup(frame: &mut Frame, app: &App) {
     frame.render_stateful_widget(list, sections[1], &mut state);
 }
 
+fn render_grep_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(76, 68, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(popup_area);
+
+    let input = Paragraph::new(format!("grep {}", app.grep_query))
+        .block(
+            Block::default()
+                .title("Grep visible files  (Esc close | Enter jump)")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(input, sections[0]);
+
+    let items: Vec<ListItem> = if app.grep_results.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            if app.grep_query.is_empty() {
+                "Type to search all visible files..."
+            } else {
+                "No results"
+            },
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        app.grep_results
+            .iter()
+            .map(|result| {
+                let label = result
+                    .path
+                    .strip_prefix(&app.root)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| result.path.display().to_string());
+                ListItem::new(Line::from(vec![
+                    Span::styled(label, Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!(":{}  ", result.line_index + 1),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::raw(result.line_text.chars().take(90).collect::<String>()),
+                ]))
+            })
+            .collect()
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(format!("{} result(s)", app.grep_results.len()))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Green)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default();
+    if !app.grep_results.is_empty() {
+        state.select(Some(app.grep_cursor));
+    }
+    frame.render_stateful_widget(list, sections[1], &mut state);
+}
+
 fn render_dest_picker_popup(frame: &mut Frame, app: &App) {
     let s = app.config.strings();
     let popup_area = centered_rect(78, 62, frame.area());
@@ -1462,6 +1668,11 @@ fn render_dest_picker_preview(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_command_palette(frame: &mut Frame, app: &App) {
+    if app.palette_show_all {
+        render_command_catalog(frame, app);
+        return;
+    }
+
     let filtered = app.palette_filtered();
     if filtered.is_empty() {
         return;
@@ -1494,16 +1705,14 @@ fn render_command_palette(frame: &mut Frame, app: &App) {
         })
         .collect();
 
-    let title = if app.palette_show_all {
-        " comandos "
-    } else {
-        " sugerencia "
-    };
-
     let list = List::new(items)
         .block(
             Block::default()
-                .title(title)
+                .title(if app.palette_query.is_empty() {
+                    " recientes "
+                } else {
+                    " sugerencias "
+                })
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
         )
@@ -1520,6 +1729,162 @@ fn render_command_palette(frame: &mut Frame, app: &App) {
         state.select(Some(app.palette_cursor));
     }
     frame.render_stateful_widget(list, list_area, &mut state);
+}
+
+struct CommandCatalogRow {
+    command_index: Option<usize>,
+    title: &'static str,
+    description: &'static str,
+}
+
+fn render_command_catalog(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    let popup_area = Rect {
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(4).max(1),
+        height: area.height.saturating_sub(3).max(1),
+    };
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Command palette ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    frame.render_widget(block, popup_area);
+
+    let inner = Rect {
+        x: popup_area.x.saturating_add(2),
+        y: popup_area.y.saturating_add(1),
+        width: popup_area.width.saturating_sub(4),
+        height: popup_area.height.saturating_sub(2),
+    };
+
+    let header = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 2,
+    };
+    let header_line = Line::from(vec![
+        Span::styled(
+            "Todos los comandos",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "   Up/Down choose | Enter run | Esc close",
+            Style::default().fg(Color::Gray),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(header_line), header);
+
+    let content = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(2),
+        width: inner.width,
+        height: inner.height.saturating_sub(2),
+    };
+
+    let panes = if content.width >= 96 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(content)
+            .to_vec()
+    } else {
+        vec![content]
+    };
+
+    let mut columns = (0..panes.len()).map(|_| Vec::new()).collect::<Vec<_>>();
+    let mut command_index = 0;
+    for (group_index, (group, commands)) in app.palette_command_groups().into_iter().enumerate() {
+        let column_index = if panes.len() > 1 { group_index % 2 } else { 0 };
+        if !columns[column_index].is_empty() {
+            columns[column_index].push(CommandCatalogRow {
+                command_index: None,
+                title: "",
+                description: "",
+            });
+        }
+        columns[column_index].push(CommandCatalogRow {
+            command_index: None,
+            title: group,
+            description: "",
+        });
+        for (name, description) in commands {
+            columns[column_index].push(CommandCatalogRow {
+                command_index: Some(command_index),
+                title: name,
+                description,
+            });
+            command_index += 1;
+        }
+    }
+
+    for (index, pane) in panes.iter().enumerate() {
+        render_command_catalog_column(frame, *pane, app, &columns[index]);
+    }
+}
+
+fn render_command_catalog_column(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    rows: &[CommandCatalogRow],
+) {
+    let height = area.height as usize;
+    let selected_row = rows
+        .iter()
+        .enumerate()
+        .find_map(|(index, row)| (row.command_index == Some(app.palette_cursor)).then_some(index))
+        .unwrap_or(0);
+    let start = selected_row.saturating_sub(height.saturating_sub(1));
+
+    let lines = rows
+        .iter()
+        .skip(start)
+        .take(height)
+        .map(|row| {
+            let Some(command_index) = row.command_index else {
+                if row.title.is_empty() {
+                    return Line::from("");
+                }
+                return Line::from(Span::styled(
+                    row.title,
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            };
+
+            let selected = command_index == app.palette_cursor;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let name_style = if selected {
+                style
+            } else {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            };
+
+            Line::from(vec![
+                Span::styled(if selected { "> " } else { "  " }, style),
+                Span::styled(format!("{:<12}", row.title), name_style),
+                Span::styled(format!(" {}", row.description), style),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 fn render_recent_files_popup(frame: &mut Frame, app: &App) {

@@ -53,6 +53,7 @@ pub enum Overlay {
     WebLink,
     Search,
     Toc,
+    Grep,
     CommandPalette,
     RecentFiles,
     Find,
@@ -89,6 +90,15 @@ pub struct PickerPreviewEntry {
 
 /// Upper bound on preview rows: big folders must not slow the picker down.
 const PICKER_PREVIEW_LIMIT: usize = 200;
+const GREP_RESULT_LIMIT: usize = 300;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrepResult {
+    pub path: PathBuf,
+    pub line_index: usize,
+    pub line_text: String,
+    pub match_ordinal: usize,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileOpKind {
@@ -218,6 +228,9 @@ pub struct App {
     pub find_results: Vec<usize>, // line indices in preview
     pub find_cursor: usize,
     pub active_find_query: String,
+    pub grep_query: String,
+    pub grep_results: Vec<GrepResult>,
+    pub grep_cursor: usize,
     pub recent_file_cursor: usize,
     // Create
     pub create_kind: CreateKind,
@@ -318,6 +331,9 @@ impl App {
             find_results: Vec::new(),
             find_cursor: 0,
             active_find_query: String::new(),
+            grep_query: String::new(),
+            grep_results: Vec::new(),
+            grep_cursor: 0,
             recent_file_cursor: 0,
             create_kind: CreateKind::File,
             create_name: String::new(),
@@ -378,7 +394,6 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') => self.running = false,
             KeyCode::Char('?') => self.toggle_help(),
             KeyCode::Up => match self.focus {
                 Focus::Tree => self.move_selection(-1),
@@ -634,8 +649,8 @@ impl App {
                     self.palette_query.pop();
                     self.update_palette_cursor();
                 }
-                KeyCode::Down if self.palette_show_all => self.move_palette_cursor(1),
-                KeyCode::Up if self.palette_show_all => self.move_palette_cursor(-1),
+                KeyCode::Down => self.move_palette_cursor(1),
+                KeyCode::Up => self.move_palette_cursor(-1),
                 KeyCode::Char(c) => {
                     self.palette_query.push(c);
                     self.update_palette_cursor();
@@ -654,6 +669,21 @@ impl App {
                 KeyCode::Char(c) => {
                     self.find_query.push(c);
                     self.update_find_results();
+                }
+                _ => {}
+            },
+            Overlay::Grep => match key.code {
+                KeyCode::Esc => self.close_grep(),
+                KeyCode::Enter => self.confirm_grep()?,
+                KeyCode::Backspace => {
+                    self.grep_query.pop();
+                    self.update_grep_results();
+                }
+                KeyCode::Down | KeyCode::Char('j') => self.move_grep_cursor(1),
+                KeyCode::Up | KeyCode::Char('k') => self.move_grep_cursor(-1),
+                KeyCode::Char(c) => {
+                    self.grep_query.push(c);
+                    self.update_grep_results();
                 }
                 _ => {}
             },
@@ -1833,6 +1863,7 @@ impl App {
             ("git", "ejecutar comandos git"),
             ("gitinfo", "mostrar/ocultar info Git en el arbol"),
             ("goto", "cd pendiente al directorio  (Shift+G)"),
+            ("grep", "buscar texto en archivos visibles"),
             ("mermaid", "acciones Mermaid  (Shift+M)"),
             ("move", "mover archivo o carpeta a otro directorio"),
             ("q", "salir de mdnav"),
@@ -1853,31 +1884,141 @@ impl App {
         commands
     }
 
+    pub fn palette_command_groups(&self) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+        vec![
+            (
+                "Navegacion",
+                vec![
+                    ("files", "buscar archivo en el arbol"),
+                    ("goto", "cd pendiente al directorio  (Shift+G)"),
+                    ("recent", "abrir archivos recientes"),
+                    ("toc", "tabla de contenidos  (Shift+T)"),
+                    ("q", "salir de mdnav"),
+                ],
+            ),
+            (
+                "Busqueda",
+                vec![
+                    ("find", "buscar texto en el archivo actual"),
+                    ("grep", "buscar texto en archivos visibles"),
+                    ("@commands", "ver la lista completa de comandos"),
+                ],
+            ),
+            (
+                "Archivos",
+                vec![
+                    ("create", "crear carpeta o archivo"),
+                    ("edit", "abrir editor sobre el archivo  (Shift+E)"),
+                    ("rename", "renombrar archivo o carpeta  (Shift+R)"),
+                    ("move", "mover archivo o carpeta a otro directorio"),
+                    ("copy", "copiar archivo a otro directorio"),
+                    (
+                        "copypath",
+                        "copiar ruta del item seleccionado  (Ctrl+Shift+C)",
+                    ),
+                    ("delete", "eliminar archivo o carpeta  (Shift+X)"),
+                    ("undo", "deshacer la ultima operacion de archivo  (u)"),
+                ],
+            ),
+            (
+                "Preview",
+                vec![
+                    ("select", "activar cursor de seleccion  (Shift+Y)"),
+                    ("mermaid", "acciones Mermaid  (Shift+M)"),
+                    ("fullscreen", "pantalla completa del panel  (Shift+0)"),
+                    ("split1", "proporcion paneles 1  (Shift+1)"),
+                    ("split2", "proporcion paneles 2  (Shift+2)"),
+                    ("split3", "proporcion paneles 3  (Shift+3)"),
+                    ("split4", "proporcion paneles 4  (Shift+4)"),
+                    ("split5", "proporcion paneles 5  (Shift+5)"),
+                ],
+            ),
+            (
+                "Arbol",
+                vec![
+                    ("bookmark", "marcar/desmarcar bookmark  (Shift+B)"),
+                    ("bookmarks", "mostrar/ocultar bookmarks"),
+                    ("sort", "ordenar arbol: nombre / fecha / tamano"),
+                    ("treeinfo", "info en arbol: tamano / lineas / off"),
+                    ("gitinfo", "mostrar/ocultar info Git en el arbol"),
+                ],
+            ),
+            ("Git", vec![("git", "ejecutar comandos git")]),
+        ]
+    }
+
+    fn palette_catalog_commands(&self) -> Vec<(&'static str, &'static str)> {
+        self.palette_command_groups()
+            .into_iter()
+            .flat_map(|(_, commands)| commands)
+            .collect()
+    }
+
+    fn palette_recent_commands(&self) -> Vec<(&'static str, &'static str)> {
+        let commands = self.palette_commands();
+        self.config
+            .recent_commands
+            .iter()
+            .filter_map(|recent| {
+                commands
+                    .iter()
+                    .copied()
+                    .find(|(name, _)| *name == recent.as_str())
+            })
+            .collect()
+    }
+
     pub fn palette_filtered(&self) -> Vec<(&'static str, &'static str)> {
         if self.palette_show_all {
-            return self.palette_commands();
+            return self.palette_catalog_commands();
         }
 
         let q = self.palette_query.to_lowercase();
         if q.is_empty() {
-            return Vec::new();
+            return self.palette_recent_commands();
         }
 
         if "@commands".starts_with(q.as_str()) {
             return vec![("@commands", "ver la lista completa de comandos")];
         }
 
-        self.palette_commands()
+        let commands = self.palette_commands();
+        let recent_matches = self
+            .palette_recent_commands()
             .into_iter()
             .filter(|(name, desc)| {
-                name.contains(q.as_str())
+                name.starts_with(q.as_str())
                     || desc.contains(q.as_str())
                     || palette_aliases(name)
                         .iter()
                         .any(|alias| alias.contains(q.as_str()))
-            })
-            .take(1)
-            .collect()
+            });
+        let other_matches = commands.into_iter().filter(|(name, desc)| {
+            name.starts_with(q.as_str())
+                || desc.contains(q.as_str())
+                || palette_aliases(name)
+                    .iter()
+                    .any(|alias| alias.contains(q.as_str()))
+        });
+        let mut matches = Vec::new();
+        for command in recent_matches.chain(other_matches) {
+            if !matches.iter().any(|(name, _)| name == &command.0) {
+                matches.push(command);
+            }
+        }
+
+        let prefix_matches = matches
+            .iter()
+            .copied()
+            .filter(|(name, _)| name.starts_with(q.as_str()))
+            .take(7)
+            .collect::<Vec<_>>();
+
+        if !prefix_matches.is_empty() {
+            return prefix_matches;
+        }
+
+        matches.into_iter().take(1).collect()
     }
 
     fn update_palette_cursor(&mut self) {
@@ -1926,6 +2067,7 @@ impl App {
             "recent" => self.open_recent_files(),
             "files" => self.open_search(),
             "find" => self.open_find(),
+            "grep" => self.open_grep(),
             "create" => self.open_create(),
             "git" => self.open_git(),
             "select" => self.toggle_selection_mode(),
@@ -2004,6 +2146,114 @@ impl App {
             self.active_find_query = self.find_query.clone();
         }
         self.close_overlay("Find: saltando a resultado");
+    }
+
+    fn open_grep(&mut self) {
+        self.grep_query.clear();
+        self.grep_results.clear();
+        self.grep_cursor = 0;
+        self.overlay = Overlay::Grep;
+        self.status = String::from("Grep: escribe para buscar en archivos visibles");
+    }
+
+    fn update_grep_results(&mut self) {
+        self.grep_results.clear();
+        self.grep_cursor = 0;
+
+        let query = self.grep_query.to_lowercase();
+        if query.trim().is_empty() {
+            self.status = String::from("Grep: escribe para buscar en archivos visibles");
+            return;
+        }
+
+        for item in self
+            .items
+            .iter()
+            .filter(|item| !item.is_dir && !item.is_bookmark)
+        {
+            if self.grep_results.len() >= GREP_RESULT_LIMIT {
+                break;
+            }
+
+            let Ok(content) = fs::read_to_string(&item.path) else {
+                continue;
+            };
+
+            let mut match_ordinal = 0;
+            for (line_index, line) in content.lines().enumerate() {
+                if !line.to_lowercase().contains(&query) {
+                    continue;
+                }
+
+                self.grep_results.push(GrepResult {
+                    path: item.path.clone(),
+                    line_index,
+                    line_text: line.trim().to_string(),
+                    match_ordinal,
+                });
+                match_ordinal += 1;
+
+                if self.grep_results.len() >= GREP_RESULT_LIMIT {
+                    break;
+                }
+            }
+        }
+
+        let suffix = if self.grep_results.len() >= GREP_RESULT_LIMIT {
+            "+"
+        } else {
+            ""
+        };
+        self.status = format!(
+            "Grep: \"{}\" - {}{} resultado(s)",
+            self.grep_query,
+            self.grep_results.len(),
+            suffix
+        );
+    }
+
+    fn move_grep_cursor(&mut self, delta: isize) {
+        let n = self.grep_results.len();
+        if n == 0 {
+            return;
+        }
+        self.grep_cursor = ((self.grep_cursor as isize + delta).rem_euclid(n as isize)) as usize;
+    }
+
+    fn confirm_grep(&mut self) -> Result<()> {
+        let Some(result) = self.grep_results.get(self.grep_cursor).cloned() else {
+            return Ok(());
+        };
+
+        if let Some(index) = self.items.iter().position(|item| item.path == result.path) {
+            self.selected_index = index;
+        }
+
+        self.open_file(result.path)?;
+        let query = self.grep_query.to_lowercase();
+        let matching_preview_line = self
+            .preview
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.text.to_lowercase().contains(&query))
+            .nth(result.match_ordinal)
+            .map(|(index, _)| index)
+            .unwrap_or(result.line_index);
+        self.preview_scroll = matching_preview_line.min(self.preview.lines.len().saturating_sub(1));
+        self.focus = Focus::Preview;
+        self.active_find_query = self.grep_query.clone();
+        self.overlay = Overlay::None;
+        self.status = format!("Grep: jumped to line {}", result.line_index + 1);
+        Ok(())
+    }
+
+    fn close_grep(&mut self) {
+        self.grep_query.clear();
+        self.grep_results.clear();
+        self.grep_cursor = 0;
+        self.overlay = Overlay::None;
+        self.status = String::from("Grep closed");
     }
 
     fn open_recent_files(&mut self) {
@@ -2686,6 +2936,7 @@ fn palette_aliases(name: &str) -> &'static [&'static str] {
     match name {
         "files" => &["buscar", "archivo", "search", "file"],
         "find" => &["buscar texto", "texto", "grep", "search text"],
+        "grep" => &["buscar global", "buscar todos", "search all", "full text"],
         "copy" => &["copiar", "duplicar"],
         "copypath" => &["copiar ruta", "path", "ruta"],
         "delete" => &["borrar", "eliminar", "remove"],
