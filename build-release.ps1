@@ -12,4 +12,12 @@ if (-not (Test-Path $vsDevCmd)) {
 
 $cargoCmd = "cargo build --release"
 
-cmd /c "call `"$vsDevCmd`" -arch=x64 -host_arch=x64 && set PATH=C:\Program Files\Rust stable MSVC 1.95\bin;%USERPROFILE%\.cargo\bin;%PATH% && $cargoCmd"
+$binaryPath = Join-Path $repoRoot "target\release\mdnav.exe"
+if (Test-Path $binaryPath) {
+    Remove-Item -LiteralPath $binaryPath -Force
+}
+
+cmd /v:on /c "call `"$vsDevCmd`" -arch=x64 -host_arch=x64 && set `"PATH=C:\Program Files\Rust stable MSVC 1.95\bin;%USERPROFILE%\.cargo\bin;!PATH!`" && $cargoCmd"
+if ($LASTEXITCODE -ne 0) {
+    throw "cargo build --release fallo con codigo $LASTEXITCODE"
+}

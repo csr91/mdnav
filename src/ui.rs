@@ -406,7 +406,7 @@ fn git_status_style(status: Option<GitStatusKind>) -> (&'static str, Style) {
     }
 }
 
-fn item_marker<'a>(app: &App, item: &'a crate::docs::DocItem) -> &'static str {
+fn item_marker(app: &App, item: &crate::docs::DocItem) -> &'static str {
     if item.is_dir {
         if app.expanded_dirs.contains(&item.path) {
             "▾"

@@ -12,6 +12,14 @@ if (-not (Test-Path $binaryPath)) {
     throw "No se encontro el binario release en $binaryPath"
 }
 
+$cargoToml = Get-Content -LiteralPath (Join-Path $repoRoot "Cargo.toml")
+$versionLine = $cargoToml | Where-Object { $_ -match '^version\s*=' } | Select-Object -First 1
+$version = ($versionLine -replace '^version\s*=\s*"', '') -replace '"\s*$', ''
+$actualVersion = & $binaryPath --version
+if ($actualVersion -ne "mdnav $version") {
+    throw "El binario release dice '$actualVersion', se esperaba 'mdnav $version'"
+}
+
 if (Test-Path $packageRoot) {
     Remove-Item -LiteralPath $packageRoot -Recurse -Force
 }
