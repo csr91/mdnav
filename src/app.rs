@@ -56,6 +56,7 @@ pub enum Overlay {
     Grep,
     CommandPalette,
     RecentFiles,
+    Marks,
     Find,
     Create,
     Git,
@@ -98,6 +99,12 @@ pub struct GrepResult {
     pub line_index: usize,
     pub line_text: String,
     pub match_ordinal: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BookmarkResult {
+    pub path: PathBuf,
+    pub label: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,6 +239,9 @@ pub struct App {
     pub grep_results: Vec<GrepResult>,
     pub grep_cursor: usize,
     pub recent_file_cursor: usize,
+    pub marks_query: String,
+    pub marks_results: Vec<BookmarkResult>,
+    pub marks_cursor: usize,
     // Create
     pub create_kind: CreateKind,
     pub create_name: String,
@@ -335,6 +345,9 @@ impl App {
             grep_results: Vec::new(),
             grep_cursor: 0,
             recent_file_cursor: 0,
+            marks_query: String::new(),
+            marks_results: Vec::new(),
+            marks_cursor: 0,
             create_kind: CreateKind::File,
             create_name: String::new(),
             create_step: CreateStep::ChooseKind,
@@ -692,6 +705,21 @@ impl App {
                 KeyCode::Up | KeyCode::Char('k') => self.move_recent_file_cursor(-1),
                 KeyCode::Down | KeyCode::Char('j') => self.move_recent_file_cursor(1),
                 KeyCode::Enter => self.open_recent_file()?,
+                _ => {}
+            },
+            Overlay::Marks => match key.code {
+                KeyCode::Esc => self.close_marks(),
+                KeyCode::Enter => self.open_mark()?,
+                KeyCode::Backspace => {
+                    self.marks_query.pop();
+                    self.update_marks_results();
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.move_marks_cursor(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.move_marks_cursor(1),
+                KeyCode::Char(c) => {
+                    self.marks_query.push(c);
+                    self.update_marks_results();
+                }
                 _ => {}
             },
             Overlay::Create => match key.code {
@@ -1378,6 +1406,89 @@ impl App {
         Ok(())
     }
 
+    fn open_marks(&mut self) {
+        self.marks_query.clear();
+        self.marks_cursor = 0;
+        self.overlay = Overlay::Marks;
+        self.update_marks_results();
+        self.status = if self.marks_results.is_empty() {
+            String::from("Marks: no hay bookmarks guardados")
+        } else {
+            String::from("Marks: escribe para filtrar bookmarks")
+        };
+    }
+
+    fn update_marks_results(&mut self) {
+        let query = self.marks_query.to_lowercase();
+        self.marks_results = self
+            .config
+            .bookmarks
+            .iter()
+            .filter_map(|bookmark| {
+                let path = PathBuf::from(bookmark);
+                let label = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| bookmark.clone());
+                let haystack = format!("{label} {bookmark}").to_lowercase();
+                (query.is_empty() || haystack.contains(&query))
+                    .then_some(BookmarkResult { path, label })
+            })
+            .collect();
+        if self.marks_cursor >= self.marks_results.len() {
+            self.marks_cursor = self.marks_results.len().saturating_sub(1);
+        }
+        self.status = format!(
+            "Marks: \"{}\" - {} bookmark(s)",
+            self.marks_query,
+            self.marks_results.len()
+        );
+    }
+
+    fn move_marks_cursor(&mut self, delta: isize) {
+        let n = self.marks_results.len();
+        if n == 0 {
+            return;
+        }
+        self.marks_cursor = ((self.marks_cursor as isize + delta).rem_euclid(n as isize)) as usize;
+    }
+
+    fn open_mark(&mut self) -> Result<()> {
+        let Some(mark) = self.marks_results.get(self.marks_cursor).cloned() else {
+            return Ok(());
+        };
+
+        if !mark.path.is_dir() {
+            self.status = format!("Mark no existe: {}", mark.path.display());
+            return Ok(());
+        }
+
+        self.root = mark.path.clone();
+        self.expanded_dirs.clear();
+        self.expanded_dirs.insert(self.root.clone());
+        self.selected_index = 0;
+        self.current_file = None;
+        self.preview = PreviewDocument::default();
+        self.preview_scroll = 0;
+        self.reload_items()?;
+        if let Some(index) = self.items.iter().position(|item| !item.is_dir) {
+            self.selected_index = index;
+            let path = self.items[index].path.clone();
+            self.open_file(path)?;
+        }
+        self.overlay = Overlay::None;
+        self.status = format!("Mark abierto: {}", mark.label);
+        Ok(())
+    }
+
+    fn close_marks(&mut self) {
+        self.marks_query.clear();
+        self.marks_results.clear();
+        self.marks_cursor = 0;
+        self.overlay = Overlay::None;
+        self.status = String::from("Marks cerrado");
+    }
+
     fn toggle_tree_info(&mut self) -> Result<()> {
         self.config.tree_info = self.config.tree_info.next();
         self.config.save()?;
@@ -1480,6 +1591,12 @@ impl App {
 
         let mut parts = Vec::new();
         parts.push(format!("{lines} lines"));
+        if lines > 0 {
+            let current_line = self.preview_scroll.min(lines.saturating_sub(1)) + 1;
+            let percent = ((current_line * 100) / lines).clamp(1, 100);
+            parts.push(format!("line {current_line}/{lines}"));
+            parts.push(format!("{percent}%"));
+        }
         if let Some(size) = size {
             parts.push(size);
         }
@@ -1864,6 +1981,7 @@ impl App {
             ("gitinfo", "mostrar/ocultar info Git en el arbol"),
             ("goto", "cd pendiente al directorio  (Shift+G)"),
             ("grep", "buscar texto en archivos visibles"),
+            ("marks", "abrir bookmarks guardados"),
             ("mermaid", "acciones Mermaid  (Shift+M)"),
             ("move", "mover archivo o carpeta a otro directorio"),
             ("q", "salir de mdnav"),
@@ -1892,6 +2010,7 @@ impl App {
                     ("files", "buscar archivo en el arbol"),
                     ("goto", "cd pendiente al directorio  (Shift+G)"),
                     ("recent", "abrir archivos recientes"),
+                    ("marks", "abrir bookmarks guardados"),
                     ("toc", "tabla de contenidos  (Shift+T)"),
                     ("q", "salir de mdnav"),
                 ],
@@ -2068,6 +2187,7 @@ impl App {
             "files" => self.open_search(),
             "find" => self.open_find(),
             "grep" => self.open_grep(),
+            "marks" => self.open_marks(),
             "create" => self.open_create(),
             "git" => self.open_git(),
             "select" => self.toggle_selection_mode(),
@@ -2937,6 +3057,7 @@ fn palette_aliases(name: &str) -> &'static [&'static str] {
         "files" => &["buscar", "archivo", "search", "file"],
         "find" => &["buscar texto", "texto", "grep", "search text"],
         "grep" => &["buscar global", "buscar todos", "search all", "full text"],
+        "marks" => &["bookmarks", "favoritos", "marcadores", "marks"],
         "copy" => &["copiar", "duplicar"],
         "copypath" => &["copiar ruta", "path", "ruta"],
         "delete" => &["borrar", "eliminar", "remove"],

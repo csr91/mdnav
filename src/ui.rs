@@ -149,6 +149,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Toc => render_toc_popup(frame, app),
         Overlay::CommandPalette => render_command_palette(frame, app),
         Overlay::RecentFiles => render_recent_files_popup(frame, app),
+        Overlay::Marks => render_marks_popup(frame, app),
         Overlay::Find => render_find_popup(frame, app),
         Overlay::Create => render_create_popup(frame, app),
         Overlay::Git => render_git_popup(frame, app),
@@ -184,6 +185,7 @@ fn render_mode_pill(frame: &mut Frame, area: Rect, app: &App) {
 fn mode_label(app: &App) -> (&'static str, Color) {
     match app.overlay {
         Overlay::CommandPalette => ("COMMAND", Color::Yellow),
+        Overlay::Marks => ("MARKS", Color::Cyan),
         Overlay::Grep => ("GREP", Color::Green),
         Overlay::Find => ("FIND", Color::Magenta),
         Overlay::Search => ("FILES", Color::Cyan),
@@ -944,6 +946,7 @@ fn shortcut_groups(s: &'static Strings) -> Vec<ShortcutGroup> {
             items: vec![
                 (":", s.sc_colon),
                 (":grep", "search text in visible files"),
+                (":marks", "open saved bookmarks"),
                 (":q", s.sc_q),
                 (":@commands", "show all commands"),
             ],
@@ -1928,6 +1931,76 @@ fn render_recent_files_popup(frame: &mut Frame, app: &App) {
         state.select(Some(app.recent_file_cursor));
     }
     frame.render_stateful_widget(list, popup_area, &mut state);
+}
+
+fn render_marks_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(72, 62, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(4)])
+        .split(popup_area);
+
+    let input = Paragraph::new(format!("marks {}", app.marks_query))
+        .block(
+            Block::default()
+                .title(" bookmarks  Enter=open | Esc=close ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(input, sections[0]);
+
+    let items = if app.marks_results.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            if app.marks_query.is_empty() {
+                "No bookmarks yet"
+            } else {
+                "No matching bookmarks"
+            },
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        app.marks_results
+            .iter()
+            .map(|mark| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{:<18}", mark.label),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        mark.path.display().to_string(),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(format!(" {} mark(s) ", app.marks_results.len()))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default();
+    if !app.marks_results.is_empty() {
+        state.select(Some(app.marks_cursor));
+    }
+    frame.render_stateful_widget(list, sections[1], &mut state);
 }
 
 fn render_alert_popup(frame: &mut Frame, app: &App) {

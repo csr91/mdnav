@@ -82,13 +82,13 @@ El preview muestra la ruta del archivo actual en el titulo y metadata breve en l
 
 Presioná `:` para abrir y escribí el comando. La paleta chica prioriza tus comandos recientes y muestra sugerencias por prefijo mientras tipeás; tambien entiende algunas intenciones (`buscar`, `copiar`, `indice`, `recientes`). Usá `:@commands` para abrir el catálogo grande agrupado por secciones, con todos los comandos y su descripción.
 
-`:q` `:files` `:find` `:grep` `:recent` `:create` `:git` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
+`:q` `:files` `:find` `:grep` `:marks` `:recent` `:create` `:git` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
 
-`:recent` abre los ultimos archivos visitados. `:find` mantiene resaltada la ultima busqueda en el preview hasta abrir otro archivo o limpiar la busqueda. `:grep` busca texto en los archivos visibles del arbol y salta al resultado elegido.
+`:recent` abre los ultimos archivos visitados. `:marks` abre un popup filtrable con los bookmarks guardados. `:find` mantiene resaltada la ultima busqueda en el preview hasta abrir otro archivo o limpiar la busqueda. `:grep` busca texto en los archivos visibles del arbol y salta al resultado elegido.
 
 `:move` y `:copy` abren un selector navegable de carpetas. Las operaciones no sobrescriben destinos existentes y la copia de carpetas se revierte si ocurre un error.
 
-La barra inferior muestra siempre el modo activo (`TREE`, `PREVIEW`, `COMMAND`, `VISUAL`, `GREP`, etc.) para que sea mas claro donde estas parado.
+La barra inferior muestra siempre el modo activo (`TREE`, `PREVIEW`, `COMMAND`, `VISUAL`, `GREP`, etc.) para que sea mas claro donde estas parado. Cuando hay un archivo abierto tambien muestra posicion del preview (`line X/Y`, porcentaje), cantidad de lineas, tamanio y estado Git si corresponde.
 
 `:treeinfo` alterna la informacion mostrada a la derecha de cada archivo en el arbol: tamanio, lineas u oculto.
 
@@ -130,7 +130,7 @@ echo 'source <(mdnav --shell-hook zsh)' >> ~/.zshrc
 
 ## Bookmarks
 
-Marcá carpetas favoritas con `Shift+B` — aparecen con `★` al tope del árbol. Activar un bookmark cambia el root a esa carpeta. Toglear visibilidad con `:bookmarks` o desde Settings.
+Marcá carpetas favoritas con `Shift+B` — aparecen con `★` al tope del árbol. Activar un bookmark cambia el root a esa carpeta. `:marks` abre todos los bookmarks en un popup filtrable; `:bookmarks` o Settings alternan si se ven en el arbol.
 
 ## Git visual
 
