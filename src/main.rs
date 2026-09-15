@@ -2,11 +2,13 @@ mod app;
 mod config;
 mod docs;
 mod markdown;
+mod share;
 mod strings;
 mod ui;
 
 use std::{
-    env, io,
+    env,
+    io::{self, Read as _},
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -30,6 +32,12 @@ fn main() -> Result<()> {
             print!("{}", shell_hook_script(&shell)?);
             Ok(())
         }
+        CliCommand::Share {
+            source,
+            title,
+            ttl_seconds,
+            open,
+        } => run_share(source, title, ttl_seconds, open),
     }
 }
 
@@ -62,9 +70,28 @@ fn run_cli(docs_root: PathBuf) -> Result<()> {
 }
 
 enum CliCommand {
-    Run { docs_root: PathBuf },
-    ShellHook { shell: String },
+    Run {
+        docs_root: PathBuf,
+    },
+    ShellHook {
+        shell: String,
+    },
+    Share {
+        source: ShareSource,
+        title: Option<String>,
+        ttl_seconds: Option<u64>,
+        open: bool,
+    },
 }
+
+enum ShareSource {
+    File(PathBuf),
+    Stdin,
+    Clipboard,
+}
+
+const SHARE_USAGE: &str =
+    "Uso: mdnav share --file <ruta> | --stdin | --clipboard [--title <texto>] [--ttl <segundos>] [--open]";
 
 fn resolve_command() -> Result<CliCommand> {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -80,6 +107,7 @@ fn resolve_command() -> Result<CliCommand> {
         [flag, shell] if flag == "--shell-hook" => Ok(CliCommand::ShellHook {
             shell: shell.to_string(),
         }),
+        [flag, rest @ ..] if flag == "share" => parse_share_args(rest),
         [path] => {
             let docs_root = PathBuf::from(path);
             if docs_root.exists() {
@@ -97,9 +125,106 @@ fn resolve_command() -> Result<CliCommand> {
             }
         }
         _ => Err(anyhow::anyhow!(
-            "Uso: mdnav [ruta] | mdnav --shell-hook <bash|zsh>"
+            "Uso: mdnav [ruta] | mdnav --shell-hook <bash|zsh> | {SHARE_USAGE}"
         )),
     }
+}
+
+fn parse_share_args(args: &[String]) -> Result<CliCommand> {
+    let mut source: Option<ShareSource> = None;
+    let mut title: Option<String> = None;
+    let mut ttl_seconds: Option<u64> = None;
+    let mut open = false;
+
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--file" => {
+                let path = iter.next().context(SHARE_USAGE)?;
+                source = Some(ShareSource::File(PathBuf::from(path)));
+            }
+            "--stdin" => source = Some(ShareSource::Stdin),
+            "--clipboard" => source = Some(ShareSource::Clipboard),
+            "--title" => {
+                title = Some(iter.next().context(SHARE_USAGE)?.to_string());
+            }
+            "--ttl" => {
+                let raw = iter.next().context(SHARE_USAGE)?;
+                ttl_seconds = Some(
+                    raw.parse::<u64>()
+                        .with_context(|| format!("--ttl invalido: {raw}"))?,
+                );
+            }
+            "--open" => open = true,
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Argumento desconocido: {other}\n{SHARE_USAGE}"
+                ))
+            }
+        }
+    }
+
+    let source = source.context(SHARE_USAGE)?;
+    Ok(CliCommand::Share {
+        source,
+        title,
+        ttl_seconds,
+        open,
+    })
+}
+
+fn run_share(
+    source: ShareSource,
+    title: Option<String>,
+    ttl_seconds: Option<u64>,
+    open: bool,
+) -> Result<()> {
+    let (content, kind, filename) = match source {
+        ShareSource::File(path) => {
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("No se pudo leer {}", path.display()))?;
+            let kind = share::infer_kind_from_extension(&path);
+            let filename = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string());
+            (content, kind, filename)
+        }
+        ShareSource::Stdin => {
+            let mut content = String::new();
+            io::stdin()
+                .read_to_string(&mut content)
+                .context("No se pudo leer stdin")?;
+            (content, "text", None)
+        }
+        ShareSource::Clipboard => {
+            let mut clipboard =
+                arboard::Clipboard::new().context("No se pudo acceder al portapapeles")?;
+            let content = clipboard
+                .get_text()
+                .context("El portapapeles no tiene texto")?;
+            (content, "text", None)
+        }
+    };
+
+    let url = share::publish_share(
+        kind,
+        &content,
+        title.as_deref(),
+        filename.as_deref(),
+        ttl_seconds,
+    )?;
+
+    let copied = app::copy_to_clipboard(&url).unwrap_or(false);
+    if open {
+        app::open_url_in_browser(&url)?;
+    }
+
+    println!("{url}");
+    if copied {
+        eprintln!("Link copiado al portapapeles");
+    }
+
+    Ok(())
 }
 
 /// Restores the terminal before a panic prints, so an unexpected crash never

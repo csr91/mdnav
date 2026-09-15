@@ -35,6 +35,18 @@ mdnav ruta/docs    # abre una carpeta específica
 mdnav --version    # versión instalada
 ```
 
+## Compartir contenido (`mdnav share`)
+
+Genera un link web efímero (un solo acceso) para cualquier contenido, sin abrir el explorador:
+
+```bash
+mdnav share --file error.log        # comparte un archivo, detecta el tipo por extension (.log, .csv, .json, .diff/.patch, o texto)
+mdnav share --stdin < salida.txt    # comparte lo que llega por stdin
+mdnav share --clipboard             # comparte el texto del portapapeles
+```
+
+Opciones: `--title <texto>`, `--ttl <segundos>` (por defecto 3600), `--open` (abre el link en el navegador). El comando copia el link al portapapeles e imprime la URL por stdout.
+
 ## Controles
 
 ### Navegación
