@@ -1,0 +1,29 @@
+info:
+  name: Query y path params
+  type: http
+  seq: 2
+http:
+  method: GET
+  # :id es un path param: se reemplaza por el valor que esta abajo.
+  # Los query params NO se escriben en la URL: mdnav los agrega solo
+  # (?q=...&page=...). Si la URL ya trae "?", los de abajo se ignoran.
+  url: "{{echo_api}}/anything/usuarios/:id"
+  params:
+    - name: id
+      value: "42"
+      type: path
+    - name: q
+      value: ana garcia # se envia encodeado: ana%20garcia
+      type: query
+    - name: page
+      value: "1" # los numeros van entre comillas
+      type: query
+    - name: debug
+      value: "true"
+      type: query
+      disabled: true # apagado: no se envia. Borra esta linea para prenderlo.
+settings:
+  encodeUrl: true
+docs: |-
+  En el panel Request, la linea "→" muestra la URL final resuelta.
+  En la response, "args" tiene los query params que llegaron.

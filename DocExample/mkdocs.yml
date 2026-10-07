@@ -6,5 +6,6 @@ nav:
   - Guia:
       - Primeros pasos: GUIDE/01-GETTING-STARTED.md
       - Navegacion: GUIDE/02-NAVIGATION.md
+      - Requests HTTP: GUIDE/03-HTTP-REQUESTS.md
   - Diagramas:
       - Arquitectura: DIAGRAMS/ARCHITECTURE.md

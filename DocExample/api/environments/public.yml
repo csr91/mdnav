@@ -1,0 +1,11 @@
+name: public
+variables:
+  - name: github_api
+    value: https://api.github.com
+  - name: echo_api
+    value: https://httpbin.org
+  - name: token
+    value: "{{process.env.DEMO_TOKEN}}"
+  # Secret: no value here. mdnav reads `demo_api_key` from api/.env.
+  - secret: true
+    name: demo_api_key

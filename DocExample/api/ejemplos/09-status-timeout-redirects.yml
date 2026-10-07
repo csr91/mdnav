@@ -1,0 +1,20 @@
+info:
+  name: Status, timeout y redirects
+  type: http
+  seq: 9
+http:
+  method: GET
+  # Cambia el numero para ver los colores del status en la response:
+  # 2xx verde, 3xx cyan, 4xx amarillo, 5xx rojo.
+  # Otras URLs para probar:
+  #   {{echo_api}}/delay/8     tarda 8 s: con timeout 5000 da "Timeout"
+  #   {{echo_api}}/redirect/2  con followRedirects: false muestra el 302
+  url: "{{echo_api}}/status/418"
+settings:
+  encodeUrl: true
+  timeout: 5000 # milisegundos; 0 = sin limite (Esc abandona el request)
+  followRedirects: true
+  maxRedirects: 5
+docs: |-
+  418 es "I'm a teapot": un 4xx, se ve en amarillo.
+  Proba /delay/8 para ver el spinner y el error de timeout.

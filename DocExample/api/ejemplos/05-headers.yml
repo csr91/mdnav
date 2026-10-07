@@ -1,0 +1,22 @@
+info:
+  name: Headers propios
+  type: http
+  seq: 5
+http:
+  method: GET
+  url: "{{echo_api}}/headers"
+  headers:
+    - name: X-Cliente
+      value: mdnav-demo
+    - name: Accept-Language
+      value: es-AR
+    - name: X-Debug
+      value: "true"
+      disabled: true # apagado: no se envia
+settings:
+  encodeUrl: true
+docs: |-
+  La response lista todos los headers que llegaron. Fijate que tambien
+  esta "Accept: application/json": viene de opencollection.yml, que lo
+  define para toda la collection. Si un request define un header con el
+  mismo nombre, gana el del request.

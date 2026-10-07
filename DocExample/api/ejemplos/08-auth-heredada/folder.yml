@@ -1,0 +1,16 @@
+# Lo que se define en "request" vale para todos los requests de esta
+# carpeta (y de sus subcarpetas): headers, auth y variables.
+info:
+  name: Auth heredada
+  type: folder
+  seq: 8
+request:
+  headers:
+    - name: X-Equipo
+      value: plataforma
+  auth:
+    type: bearer
+    token: "{{token}}"
+  variables:
+    - name: recurso
+      value: pedidos

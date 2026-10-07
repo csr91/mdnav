@@ -1,0 +1,47 @@
+# ¿Donde pongo el token? Tres opciones, de peor a mejor:
+#
+#   1. Pegado aca:  token: abc123
+#      Funciona, pero queda en git para siempre. Evitalo.
+#
+#   2. En el environment (environments/public.yml):
+#        - name: token
+#          value: abc123
+#      Sirve para valores que no son secretos (URLs, ids de prueba).
+#
+#   3. En el .env (lo que usa este ejemplo). environments/public.yml tiene:
+#        - name: token
+#          value: "{{process.env.DEMO_TOKEN}}"
+#      y el valor real vive en api/.env, que esta en el .gitignore:
+#        DEMO_TOKEN=lo-que-quieras
+#      El secreto nunca entra al repo.
+info:
+  name: Token bearer
+  type: http
+  seq: 6
+http:
+  method: GET
+  url: "{{echo_api}}/bearer" # httpbin devuelve el token que recibio
+  auth:
+    type: bearer # manda el header Authorization: Bearer <token>
+    token: "{{token}}"
+  # Otras auth: reemplaza el bloque "auth" de arriba por alguno de estos.
+  #
+  #   auth:
+  #     type: basic
+  #     username: "{{usuario}}"
+  #     password: "{{password}}"
+  #
+  #   auth:
+  #     type: apikey
+  #     key: X-Api-Key
+  #     value: "{{demo_api_key}}"
+  #     placement: header # o query
+  #
+  #   auth: inherit # usa la auth del folder.yml o de la collection
+settings:
+  encodeUrl: true
+docs: |-
+  Sin .env vas a ver el aviso "Variable sin resolver" y httpbin te
+  devuelve el texto literal {{process.env.DEMO_TOKEN}} como token.
+  Crea api/.env con DEMO_TOKEN=lo-que-quieras, envialo de nuevo y en
+  "token" aparece tu valor.

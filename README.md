@@ -82,7 +82,7 @@ El preview muestra la ruta del archivo actual en el titulo y metadata breve en l
 
 Presioná `:` para abrir y escribí el comando. La paleta chica prioriza tus comandos recientes y muestra sugerencias por prefijo mientras tipeás; tambien entiende algunas intenciones (`buscar`, `copiar`, `indice`, `recientes`). Usá `:@commands` para abrir el catálogo grande agrupado por secciones, con todos los comandos y su descripción.
 
-`:q` `:files` `:find` `:grep` `:marks` `:recent` `:create` `:git` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
+`:q` `:files` `:find` `:grep` `:marks` `:recent` `:create` `:git` `:http` `:httpenv` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
 
 `:recent` abre los ultimos archivos visitados. `:marks` abre un popup filtrable con los bookmarks guardados. `:find` mantiene resaltada la ultima busqueda en el preview hasta abrir otro archivo o limpiar la busqueda. `:grep` busca texto en los archivos visibles del arbol y salta al resultado elegido.
 
@@ -93,6 +93,49 @@ La barra inferior muestra siempre el modo activo (`TREE`, `PREVIEW`, `COMMAND`, 
 `:treeinfo` alterna la informacion mostrada a la derecha de cada archivo en el arbol: tamanio, lineas u oculto.
 
 `:sort` alterna el orden del arbol: nombre, fecha de modificacion o tamanio.
+
+## Requests HTTP
+
+mdnav envía requests HTTP guardados como archivos [OpenCollection](https://www.opencollection.com/) YAML, el formato abierto que Bruno usa de forma nativa. Una collection es una carpeta más del repo: se versiona con git y la misma carpeta se abre en Bruno.
+
+```
+api/
+├── opencollection.yml     # config de la collection (auth, headers y variables heredables)
+├── .env                   # secretos, ignorado por git
+├── .env.sample            # nombres de los secretos, sin valores
+├── environments/
+│   ├── local.yml
+│   └── prod.yml
+└── users/
+    ├── folder.yml         # defaults del folder
+    └── get-user.yml       # un request por archivo
+```
+
+Al abrir un request, el preview se parte en dos: el **request** arriba (URL resuelta, environment, auth, params, headers y body) y la **response** abajo, con los tabs Body, Headers e Info.
+
+| Tecla | Acción |
+|-------|--------|
+| `Shift+S` | enviar el request abierto |
+| `Tab` | árbol → request → response |
+| `[` / `]` o `h` / `l` | cambiar de tab en la response |
+| `j` / `k`, `PgUp` / `PgDn` | scroll de la response |
+| `y` | copiar el body de la response |
+| `Esc` | abandonar el request en curso |
+| `Shift+E` | editar el YAML del request |
+
+`:http` abre el menú con `send`, `env`, `new` (request nuevo en la carpeta seleccionada), `init` (convierte la carpeta seleccionada en una collection) e `import`. `:httpenv` elige el environment activo de la collection; queda guardado en la config.
+
+Los requests se envían en un thread aparte: la UI no se congela y la response se conserva al volver del editor.
+
+**Variables:** `{{nombre}}` se resuelve con esta precedencia: variables de la collection < environment < folders. `{{process.env.NOMBRE}}` lee el `.env` de la collection y después el entorno del proceso. Las variables `secret: true` de un environment no guardan valor en el archivo: mdnav las busca por nombre en `.env`.
+
+**Auth:** `bearer`, `basic` y `apikey` (header o query). `auth: inherit` toma la del folder más cercano o la de la collection.
+
+**Importar desde Postman:** seleccioná en el árbol un `*.postman_collection.json` (v2.1) y ejecutá `:http` → `import`. Se crea la carpeta de la collection al lado del JSON y nunca se sobrescribe nada. Los `*.postman_environment.json` se importan a `environments/`: sus secretos pasan al `.env` y el YAML solo guarda la referencia. Los scripts `pm.*` quedan como documentación del request, porque no se ejecutan.
+
+**Fuera de alcance por ahora:** scripts y assertions (se avisa cuántos tiene el request), bodies multipart, file y GraphQL nativo, y auth OAuth, AWS, digest y NTLM.
+
+Con **Solo Mds** activado, el árbol igual muestra los `.yml` de las collections y los exports de Postman.
 
 ## Settings
 

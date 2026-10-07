@@ -17,8 +17,8 @@ use crate::docs::LinkTarget;
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
-type HighlightedSegment = (String, [u8; 3]);
-type HighlightedLine = (String, Vec<HighlightedSegment>);
+pub(crate) type HighlightedSegment = (String, [u8; 3]);
+pub(crate) type HighlightedLine = (String, Vec<HighlightedSegment>);
 
 fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
@@ -417,7 +417,7 @@ fn flush_line(
     *current_kind = PreviewLineKind::Normal;
 }
 
-fn highlight_code_block(lines: &[String], language: &str) -> Vec<HighlightedLine> {
+pub(crate) fn highlight_code_block(lines: &[String], language: &str) -> Vec<HighlightedLine> {
     let ps = syntax_set();
     let ts = theme_set();
     let syntax = ps

@@ -1,0 +1,24 @@
+info:
+  name: POST con JSON
+  type: http
+  seq: 3
+http:
+  method: POST
+  url: "{{echo_api}}/anything/usuarios"
+  body:
+    # json → manda Content-Type: application/json (salvo que pongas otro).
+    # Otros tipos de texto: text, xml.
+    type: json
+    # "|-" permite escribir el JSON en varias lineas, tal cual.
+    # Las variables {{...}} tambien funcionan dentro del body.
+    data: |-
+      {
+        "nombre": "Ana",
+        "usuario": "{{github_user}}",
+        "activo": true
+      }
+settings:
+  encodeUrl: true
+docs: |-
+  En la response, "json" es el body que recibio el servidor.
+  {{github_user}} es una variable de la collection (opencollection.yml).
