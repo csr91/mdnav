@@ -60,6 +60,7 @@ pub enum Overlay {
     Find,
     Create,
     Git,
+    SqlConnections,
     Rename,
     DestPicker,
     Alert,
@@ -705,6 +706,10 @@ impl App {
                 KeyCode::Up | KeyCode::Char('k') => self.move_recent_file_cursor(-1),
                 KeyCode::Down | KeyCode::Char('j') => self.move_recent_file_cursor(1),
                 KeyCode::Enter => self.open_recent_file()?,
+                _ => {}
+            },
+            Overlay::SqlConnections => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("SQL cerrado"),
                 _ => {}
             },
             Overlay::Marks => match key.code {
@@ -1984,6 +1989,7 @@ impl App {
             ("marks", "abrir bookmarks guardados"),
             ("mermaid", "acciones Mermaid  (Shift+M)"),
             ("move", "mover archivo o carpeta a otro directorio"),
+            ("sql", "abrir selector de conexiones SQL"),
             ("q", "salir de mdnav"),
             ("recent", "abrir archivos recientes"),
             ("rename", "renombrar archivo o carpeta  (Shift+R)"),
@@ -2023,6 +2029,7 @@ impl App {
                     ("@commands", "ver la lista completa de comandos"),
                 ],
             ),
+            ("Datos", vec![("sql", "abrir selector de conexiones SQL")]),
             (
                 "Archivos",
                 vec![
@@ -2190,6 +2197,7 @@ impl App {
             "marks" => self.open_marks(),
             "create" => self.open_create(),
             "git" => self.open_git(),
+            "sql" => self.open_sql_connections(),
             "select" => self.toggle_selection_mode(),
             "edit" => self.edit_target_in_nano()?,
             "rename" => self.open_rename()?,
@@ -2215,6 +2223,11 @@ impl App {
             _ => {}
         }
         Ok(false)
+    }
+
+    fn open_sql_connections(&mut self) {
+        self.overlay = Overlay::SqlConnections;
+        self.status = String::from("SQL: conexiones guardadas");
     }
 
     // ── Find in file ──────────────────────────────────────────────────────────
@@ -3063,6 +3076,7 @@ fn palette_aliases(name: &str) -> &'static [&'static str] {
         "delete" => &["borrar", "eliminar", "remove"],
         "edit" => &["editar", "abrir editor"],
         "git" => &["repo", "version"],
+        "sql" => &["database", "db", "base de datos", "conexiones"],
         "toc" => &["indice", "índice", "headings", "tabla"],
         "recent" => &["recientes", "historial", "ultimos", "últimos"],
         "@commands" => &["ayuda", "comandos", "help"],

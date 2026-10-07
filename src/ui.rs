@@ -153,6 +153,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Find => render_find_popup(frame, app),
         Overlay::Create => render_create_popup(frame, app),
         Overlay::Git => render_git_popup(frame, app),
+        Overlay::SqlConnections => render_sql_connections_popup(frame),
         Overlay::Alert => render_alert_popup(frame, app),
         Overlay::Rename => {}
         Overlay::None => {}
@@ -190,6 +191,7 @@ fn mode_label(app: &App) -> (&'static str, Color) {
         Overlay::Find => ("FIND", Color::Magenta),
         Overlay::Search => ("FILES", Color::Cyan),
         Overlay::Git => ("GIT", Color::Yellow),
+        Overlay::SqlConnections => ("SQL", Color::Green),
         Overlay::Help => ("HELP", Color::Yellow),
         Overlay::RecentFiles => ("RECENT", Color::Cyan),
         Overlay::Toc => ("TOC", Color::Magenta),
@@ -2030,6 +2032,40 @@ fn render_alert_popup(frame: &mut Frame, app: &App) {
     );
 
     frame.render_widget(paragraph, popup_area);
+}
+
+fn render_sql_connections_popup(frame: &mut Frame) {
+    let area = frame.area();
+    let width = 54.min(area.width.saturating_sub(2));
+    let height = 7.min(area.height.saturating_sub(2));
+    let popup_area = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .title(" Conexiones SQL ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Todavia no hay conexiones guardadas.",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Esc: volver",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .alignment(Alignment::Center),
+        inner,
+    );
 }
 
 fn render_find_popup(frame: &mut Frame, app: &App) {
