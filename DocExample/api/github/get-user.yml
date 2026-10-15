@@ -1,0 +1,17 @@
+info:
+  name: Get user
+  type: http
+  seq: 1
+http:
+  method: GET
+  url: "{{github_api}}/users/:user"
+  params:
+    - name: user
+      value: "{{github_user}}"
+      type: path
+  auth: inherit
+settings:
+  encodeUrl: true
+docs: |-
+  Public GitHub profile. `:user` is a path param filled from the
+  `github_user` collection variable.

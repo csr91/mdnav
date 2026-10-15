@@ -1,0 +1,8 @@
+info:
+  name: Echo
+  type: folder
+  seq: 2
+request:
+  auth:
+    type: bearer
+    token: "{{token}}"

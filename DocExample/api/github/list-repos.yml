@@ -1,0 +1,23 @@
+info:
+  name: List repos
+  type: http
+  seq: 2
+http:
+  method: GET
+  url: "{{github_api}}/users/{{github_user}}/repos"
+  params:
+    - name: per_page
+      value: "5"
+      type: query
+    - name: sort
+      value: updated
+      type: query
+    - name: type
+      value: owner
+      type: query
+      disabled: true
+  auth: inherit
+settings:
+  encodeUrl: true
+docs: |-
+  Query params are appended to the URL; disabled ones are skipped.

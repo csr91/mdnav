@@ -1,0 +1,22 @@
+info:
+  name: POST con formulario
+  type: http
+  seq: 4
+http:
+  method: POST
+  url: "{{echo_api}}/anything/login"
+  body:
+    # Como un <form> HTML: Content-Type application/x-www-form-urlencoded.
+    type: form-urlencoded
+    data:
+      - name: usuario
+        value: ana
+      - name: recordarme
+        value: "si"
+      - name: captcha
+        value: "1234"
+        disabled: true # los campos apagados no se envian
+settings:
+  encodeUrl: true
+docs: |-
+  En la response, los campos llegan en "form".

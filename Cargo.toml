@@ -1,6 +1,6 @@
 [package]
 name = "mdnav"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2021"
 description = "Terminal navigator for MkDocs and Markdown documentation trees"
 
@@ -12,7 +12,8 @@ ratatui = "0.29"
 dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 arboard = "3"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 toml = "1"
+serde-saphyr = "1"

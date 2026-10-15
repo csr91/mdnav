@@ -11,11 +11,14 @@ use crate::markdown::{PreviewLine, PreviewLineKind};
 use crate::{
     app::{
         App, CreateKind, CreateStep, FileOpKind, Focus, FullscreenPanel, GitState, GitStatusKind,
-        HelpSection, Overlay, PreviewCursor,
+        HelpSection, Overlay, PreviewCursor, ResponseTab, HTTP_MENU_ITEMS, RESPONSE_TABS,
     },
     config::{config_path, TreeInfoMode},
+    http::{self, HttpResponse},
     strings::Strings,
 };
+
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn render(frame: &mut Frame, app: &App) {
     let areas = Layout::default()
@@ -23,7 +26,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Min(3), Constraint::Length(2)])
         .split(frame.area());
 
-    if app.fullscreen == FullscreenPanel::Tree {
+    if app.json_viewer_active {
+        render_json_viewer(frame, areas[0], app);
+    } else if app.fullscreen == FullscreenPanel::Tree {
         render_tree(frame, areas[0], app);
     } else if app.fullscreen == FullscreenPanel::Preview {
         render_preview(frame, areas[0], app);
@@ -39,7 +44,13 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     let s = app.config.strings();
-    let footer = if app.overlay == Overlay::Rename {
+    let footer = if app.json_viewer_active {
+        Paragraph::new(Line::from(Span::styled(
+            "JSON VIEWER  F5 procesar  Tab cambiar panel  y copiar  Shift+0 vista limpia  Esc cerrar",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )))
+        .block(Block::default().borders(Borders::TOP))
+    } else if app.overlay == Overlay::Rename {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 "Rename: ",
@@ -154,6 +165,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Create => render_create_popup(frame, app),
         Overlay::Git => render_git_popup(frame, app),
         Overlay::Alert => render_alert_popup(frame, app),
+        Overlay::HttpMenu => render_http_menu_popup(frame, app),
+        Overlay::HttpEnv => render_http_env_popup(frame, app),
+        Overlay::HttpInput => render_http_input_popup(frame, app),
         Overlay::Rename => {}
         Overlay::None => {}
     }
@@ -200,12 +214,24 @@ fn mode_label(app: &App) -> (&'static str, Color) {
             ("MERMAID", Color::Cyan)
         }
         Overlay::WebLink => ("LINK", Color::Cyan),
+        Overlay::HttpMenu | Overlay::HttpEnv | Overlay::HttpInput => ("HTTP", Color::Green),
         Overlay::None => {
+            if app.json_viewer_active {
+                return ("JSON", Color::Green);
+            }
             if let Some(selection) = app.selection.as_ref() {
                 return if selection.anchored {
                     ("VISUAL", Color::Green)
                 } else {
                     ("SELECT", Color::Cyan)
+                };
+            }
+
+            if app.focus == Focus::Preview && app.http.view.is_some() {
+                return if app.http.response_focus {
+                    ("RESPONSE", Color::Green)
+                } else {
+                    ("HTTP", Color::Green)
                 };
             }
 
@@ -225,6 +251,8 @@ fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let focus = match app.focus {
         Focus::Tree => "TREE",
+        Focus::Preview if app.http_response_focused() => "RESPONSE",
+        Focus::Preview if app.http.view.is_some() => "HTTP",
         Focus::Preview => "PREVIEW",
     };
     spans.push(Span::styled(
@@ -236,11 +264,33 @@ fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
 
     let hint = match app.focus {
         Focus::Tree => "↑↓/jk move · Enter/l open · h parent · Tab preview · : command · ? help  ",
+        Focus::Preview if app.http_response_focused() => {
+            "↑↓/jk scroll · []/hl tabs · y copy body · S send · Tab tree  "
+        }
+        Focus::Preview if app.http.view.is_some() => {
+            "S send · Tab response · ↑↓ scroll · E edit · :httpenv env  "
+        }
         Focus::Preview => "↑↓/jk scroll · [] links · T toc · Y select · Tab tree · : command  ",
     };
     spans.push(Span::styled(hint, Style::default().fg(Color::Gray)));
 
-    if let Some(metadata) = app.current_file_metadata() {
+    // A request keeps running while the user browses other files.
+    if app.http_busy() && app.current_request_in_flight().is_none() {
+        spans.push(Span::styled(
+            "⟳ HTTP en curso  ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    if app.http.view.is_some() {
+        // Request results and HTTP feedback matter more than file metadata.
+        spans.push(Span::styled(
+            app.status.clone(),
+            Style::default().fg(Color::Yellow),
+        ));
+    } else if let Some(metadata) = app.current_file_metadata() {
         spans.push(Span::styled(metadata, Style::default().fg(Color::DarkGray)));
     } else {
         spans.push(Span::styled(
@@ -474,9 +524,9 @@ fn git_status_style(status: Option<GitStatusKind>) -> (&'static str, Style) {
 fn item_marker(app: &App, item: &crate::docs::DocItem) -> &'static str {
     if item.is_dir {
         if app.expanded_dirs.contains(&item.path) {
-            "▾"
+            "v"
         } else {
-            "▸"
+            ">"
         }
     } else {
         match item
@@ -490,20 +540,156 @@ fn item_marker(app: &App, item: &crate::docs::DocItem) -> &'static str {
             Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") => "I",
             Some("rs" | "js" | "ts" | "tsx" | "jsx" | "py" | "sh" | "ps1") => "C",
             Some("json" | "toml" | "yaml" | "yml") => "D",
-            _ => "•",
+            _ => ".",
         }
     }
 }
 
 fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
+    // Selection mode keeps the single pane: its cursor math assumes it.
+    if app.http.view.is_some() && app.selection.is_none() {
+        // The request takes what it needs (up to half), the response the rest.
+        let request_height = (app.preview.lines.len() as u16)
+            .saturating_add(2)
+            .clamp(5, (area.height / 2).max(5));
+        let panes = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(request_height), Constraint::Min(0)])
+            .split(area);
+        let request_focused = app.focus == Focus::Preview && !app.http.response_focus;
+        render_document(frame, panes[0], app, request_focused, true);
+        render_response(frame, panes[1], app);
+        return;
+    }
+
+    render_document(
+        frame,
+        area,
+        app,
+        app.focus == Focus::Preview,
+        app.fullscreen != FullscreenPanel::Preview,
+    );
+}
+
+fn render_json_viewer(frame: &mut Frame, area: Rect, app: &App) {
+    if app.fullscreen == FullscreenPanel::Preview {
+        let lines = if let Some(error) = &app.json_viewer_error {
+            vec![Line::from(Span::styled(
+                error,
+                Style::default().fg(Color::Red),
+            ))]
+        } else if !app.json_viewer_processed {
+            vec![Line::from(Span::styled(
+                "Pulsa F5 para procesar el JSON",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            app.json_viewer_pretty
+                .lines()
+                .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
+                .collect::<Vec<_>>()
+        };
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((app.preview_scroll as u16, 0)),
+            area,
+        );
+        return;
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(area);
+    let button = Paragraph::new("[ Procesar JSON ]   F5  (Enter con foco en la salida)")
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_widget(button, sections[0]);
+
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(sections[1]);
+
+    let raw_lines = app
+        .json_viewer_raw
+        .lines()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::Gray))))
+        .collect::<Vec<_>>();
+    let pretty_lines = if !app.json_viewer_processed {
+        vec![Line::from(Span::styled(
+            "Pulsa F5 o Enter para procesar el JSON",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else if let Some(error) = &app.json_viewer_error {
+        vec![
+            Line::from(Span::styled(
+                "JSON incompleto o invalido:",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(error, Style::default().fg(Color::Red))),
+        ]
+    } else {
+        app.json_viewer_pretty
+            .lines()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
+            .collect::<Vec<_>>()
+    };
+
+    let raw = Paragraph::new(raw_lines)
+        .block(
+            Block::default()
+                .title(" Texto de entrada ")
+                .borders(Borders::ALL)
+                .border_style(if app.focus == Focus::Tree {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.preview_scroll as u16, 0));
+    let pretty = Paragraph::new(pretty_lines)
+        .block(
+            Block::default()
+                .title(" JSON formateado ")
+                .borders(Borders::ALL)
+                .border_style(if app.focus == Focus::Preview {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.preview_scroll as u16, 0));
+
+    frame.render_widget(raw, panes[0]);
+    frame.render_widget(pretty, panes[1]);
+}
+
+fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bordered: bool) {
     let s = app.config.strings();
-    let base_title = if app.fullscreen == FullscreenPanel::Preview {
+    let base_title = if app.current_file.is_none() && app.http.view.is_none() {
+        "Bienvenido a mdnav"
+    } else if app.http.view.is_some() && app.selection.is_none() {
+        "Request"
+    } else if app.fullscreen == FullscreenPanel::Preview {
         if app.selection.is_some() {
             s.preview_select
         } else {
             s.preview_fullscreen
         }
-    } else if app.focus == Focus::Preview {
+    } else if focused {
         s.preview_focus
     } else {
         s.preview_title
@@ -513,7 +699,74 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
         .map(|breadcrumb| format!("{base_title} · {breadcrumb}"))
         .unwrap_or_else(|| base_title.to_string());
 
-    let lines = if app.preview.lines.is_empty() {
+    let lines = if app.current_file.is_none() && app.http.view.is_none() {
+        vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Explora tus documentos desde el arbol",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    "  Up/Down  ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Moverse por el arbol", Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  Enter  ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Abrir archivo o expandir carpeta",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  Tab    ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Cambiar entre arbol y vista previa",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  ?      ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Ver todos los atajos", Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  @      ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Abrir JSON Viewer", Style::default().fg(Color::White)),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Selecciona un archivo para comenzar.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    } else if app.preview.lines.is_empty() {
         vec![Line::from(Span::styled(
             s.preview_empty,
             Style::default().fg(Color::DarkGray),
@@ -542,17 +795,17 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
             .collect::<Vec<_>>()
     };
 
-    let paragraph = if app.fullscreen == FullscreenPanel::Preview {
-        Paragraph::new(lines).wrap(Wrap { trim: false })
-    } else {
+    let paragraph = if bordered {
         Paragraph::new(lines)
             .block(
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_style(border_style(app.focus == Focus::Preview)),
+                    .border_style(border_style(focused)),
             )
             .wrap(Wrap { trim: false })
+    } else {
+        Paragraph::new(lines).wrap(Wrap { trim: false })
     };
 
     frame.render_widget(paragraph, area);
@@ -562,6 +815,365 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
             frame.set_cursor_position(position);
         }
     }
+}
+
+fn render_response(frame: &mut Frame, area: Rect, app: &App) {
+    let focused = app.focus == Focus::Preview && app.http.response_focus;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style(focused));
+
+    if let Some(in_flight) = app.current_request_in_flight() {
+        let elapsed = in_flight.started.elapsed();
+        let spinner = SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()];
+        let lines = vec![
+            Line::from(Span::styled(
+                format!("{spinner} Enviando… {}", http::format_elapsed(elapsed)),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                in_flight.label.clone(),
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Esc abandona el request",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(block.title(" Response "))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    let Some(response) = app.current_http_response() else {
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "Todavia no se envio",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(""),
+            shortcut_line("Shift+S", "enviar el request"),
+            shortcut_line("Tab", "pasar de request a response"),
+            shortcut_line(":httpenv", "elegir environment"),
+            shortcut_line("Shift+E", "editar el YAML"),
+        ];
+        if app.http_busy() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Hay otro request en curso",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(block.title(" Response "))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    };
+
+    let block = block.title(response_title(response));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(response_tabs_line(app, response)),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new(
+            response_tab_lines(app, response)
+                .into_iter()
+                .skip(app.http.response_scroll)
+                .collect::<Vec<_>>(),
+        )
+        .wrap(Wrap { trim: false }),
+        sections[1],
+    );
+}
+
+fn status_color(status: u16) -> Color {
+    match status {
+        200..=299 => Color::Green,
+        300..=399 => Color::Cyan,
+        400..=499 => Color::Yellow,
+        _ => Color::Red,
+    }
+}
+
+fn response_title(response: &HttpResponse) -> Line<'static> {
+    let elapsed = http::format_elapsed(response.elapsed);
+    let (status, color) = match (&response.error, response.status) {
+        (None, Some(code)) => (
+            format!("{code} {}", response.reason).trim().to_string(),
+            status_color(code),
+        ),
+        _ => (String::from("error"), Color::Red),
+    };
+    let mut details = format!(" · {elapsed}");
+    if response.error.is_none() {
+        details.push_str(&format!(" · {}", http::format_size(response.size)));
+    }
+    Line::from(vec![
+        Span::raw(" Response · "),
+        Span::styled(
+            status,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("{details} "), Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn response_tabs_line(app: &App, response: &HttpResponse) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, tab) in RESPONSE_TABS.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+        }
+        let label = match tab {
+            ResponseTab::Body => String::from("Body"),
+            ResponseTab::Headers => format!("Headers ({})", response.headers.len()),
+            ResponseTab::Info => String::from("Info"),
+        };
+        let style = if *tab == app.http.response_tab {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(format!(" {label} "), style));
+    }
+    Line::from(spans)
+}
+
+fn response_tab_lines(app: &App, response: &HttpResponse) -> Vec<Line<'static>> {
+    let gray = Style::default().fg(Color::Gray);
+    match app.http.response_tab {
+        ResponseTab::Body => {
+            if let Some(error) = &response.error {
+                return vec![
+                    Line::from(Span::styled(
+                        error.clone(),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Revisa la URL, el environment activo y que el servidor este levantado.",
+                        gray,
+                    )),
+                ];
+            }
+            if response.body_lines.is_empty() {
+                return vec![Line::from(Span::styled("(sin body)", gray))];
+            }
+            let mut lines: Vec<Line<'static>> = response
+                .body_lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| styled_preview_line(line, None, index, None, ""))
+                .collect();
+            if response.truncated {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "… body truncado: se muestran los primeros {}",
+                        http::format_size(response.body_text.len())
+                    ),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            lines
+        }
+        ResponseTab::Headers => {
+            if response.headers.is_empty() {
+                return vec![Line::from(Span::styled("(sin headers)", gray))];
+            }
+            response
+                .headers
+                .iter()
+                .map(|(name, value)| {
+                    Line::from(vec![
+                        Span::styled(format!("{name}: "), Style::default().fg(Color::Cyan)),
+                        Span::styled(value.clone(), Style::default().fg(Color::White)),
+                    ])
+                })
+                .collect()
+        }
+        ResponseTab::Info => {
+            let status = match response.status {
+                Some(code) => format!("{code} {}", response.reason),
+                None => String::from("sin respuesta"),
+            };
+            [
+                ("Status", status),
+                ("Tiempo", http::format_elapsed(response.elapsed)),
+                ("Tamaño", http::format_size(response.size)),
+                ("Metodo", response.method.clone()),
+                ("URL", response.url.clone()),
+                (
+                    "Content-Type",
+                    response
+                        .content_type
+                        .clone()
+                        .unwrap_or_else(|| String::from("-")),
+                ),
+                (
+                    "Truncado",
+                    if response.truncated { "si" } else { "no" }.to_string(),
+                ),
+            ]
+            .into_iter()
+            .map(|(label, value)| {
+                Line::from(vec![
+                    Span::styled(format!("{label:<14}"), gray),
+                    Span::styled(value, Style::default().fg(Color::White)),
+                ])
+            })
+            .collect()
+        }
+    }
+}
+
+fn render_http_menu_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(60, 45, frame.area());
+    frame.render_widget(Clear, popup_area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(2)])
+        .split(popup_area);
+
+    let items: Vec<ListItem> = HTTP_MENU_ITEMS
+        .iter()
+        .map(|(name, description)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{name:<8}"),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {description}"), Style::default().fg(Color::Gray)),
+            ]))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(" HTTP  (↑↓ navigate | Enter run | Esc close) ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Green)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+    let mut state = ListState::default();
+    state.select(Some(app.http.menu_cursor));
+    frame.render_stateful_widget(list, sections[0], &mut state);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  new/init: carpeta seleccionada · import: JSON seleccionado",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        sections[1],
+    );
+}
+
+fn render_http_env_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(50, 45, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let active = app.http.env_root.as_ref().and_then(|root| {
+        app.config
+            .http_environments
+            .get(&root.display().to_string())
+    });
+    let mut items = vec![ListItem::new(Line::from(Span::styled(
+        format!(
+            "{} (sin environment)",
+            if active.is_none() { "●" } else { " " }
+        ),
+        Style::default().fg(Color::Gray),
+    )))];
+    items.extend(app.http.env_options.iter().map(|name| {
+        let marker = if active == Some(name) { "●" } else { " " };
+        ListItem::new(Line::from(Span::styled(
+            format!("{marker} {name}"),
+            Style::default().fg(Color::White),
+        )))
+    }));
+
+    let title = if app.http.env_options.is_empty() {
+        " Environment · no hay environments/*.yml "
+    } else {
+        " Environment  (Enter activar | Esc cerrar) "
+    };
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Green)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+    let mut state = ListState::default();
+    state.select(Some(app.http.env_cursor));
+    frame.render_stateful_widget(list, popup_area, &mut state);
+}
+
+fn render_http_input_popup(frame: &mut Frame, app: &App) {
+    let popup_area = centered_rect(60, 20, frame.area());
+    frame.render_widget(Clear, popup_area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(2)])
+        .split(popup_area);
+
+    frame.render_widget(
+        Paragraph::new(format!("{}_", app.http.input))
+            .block(
+                Block::default()
+                    .title(" Request nuevo  (Enter crear | Esc cancelar) ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Green)),
+            )
+            .style(Style::default().fg(Color::White)),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  Se crea <nombre>.yml en la carpeta seleccionada",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        sections[1],
+    );
 }
 
 fn render_mermaid_select_popup(frame: &mut Frame, app: &App) {
@@ -949,6 +1561,18 @@ fn shortcut_groups(s: &'static Strings) -> Vec<ShortcutGroup> {
                 (":marks", "open saved bookmarks"),
                 (":q", s.sc_q),
                 (":@commands", "show all commands"),
+            ],
+        },
+        ShortcutGroup {
+            title: "HTTP",
+            items: vec![
+                ("Shift+S", "send the open request"),
+                ("Tab", "tree → request → response"),
+                ("[ / ]  h / l", "response tabs"),
+                ("y", "copy the response body"),
+                ("Esc", "abandon the request in flight"),
+                (":http", "send, env, new, init, import"),
+                (":httpenv", "choose the environment"),
             ],
         },
         ShortcutGroup {

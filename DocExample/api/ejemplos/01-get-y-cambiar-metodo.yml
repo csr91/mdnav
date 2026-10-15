@@ -1,0 +1,19 @@
+# El request mas simple. Todo lo que mdnav necesita esta en este archivo.
+# Shift+E lo abre en tu editor; al volver, el preview ya muestra los cambios.
+info:
+  name: GET y cambiar de metodo
+  type: http # siempre http (GraphQL y gRPC todavia no estan soportados)
+  seq: 1 # orden dentro del folder
+http:
+  # Para cambiar de metodo edita esta linea:
+  #   GET, POST, PUT, PATCH, DELETE, HEAD u OPTIONS.
+  # httpbin /anything acepta cualquiera y te devuelve cual llego en "method".
+  method: GET
+  # {{echo_api}} sale del environment activo (:httpenv → public).
+  url: "{{echo_api}}/anything/hola"
+settings:
+  encodeUrl: true
+docs: |-
+  Envialo con Shift+S y mira "method" en la response.
+  Despues cambia `method: GET` por `method: DELETE` (Shift+E, guardar,
+  salir) y envialo de nuevo: httpbin responde con el metodo nuevo.

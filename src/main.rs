@@ -1,7 +1,9 @@
 mod app;
 mod config;
 mod docs;
+mod http;
 mod markdown;
+mod postman;
 mod share;
 mod strings;
 mod ui;
@@ -22,7 +24,10 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use crate::{app::App, config::AppConfig};
+use crate::{
+    app::{App, HttpSession},
+    config::AppConfig,
+};
 
 fn main() -> Result<()> {
     install_panic_hook();
@@ -42,9 +47,10 @@ fn main() -> Result<()> {
 }
 
 fn run_cli(docs_root: PathBuf) -> Result<()> {
-    let config = AppConfig::load()?;
+    let mut config = AppConfig::load()?;
     let mut resume_path: Option<PathBuf> = None;
     let mut current_root = docs_root;
+    let mut http_session = HttpSession::default();
 
     loop {
         let mut terminal = setup_terminal()?;
@@ -53,12 +59,18 @@ fn run_cli(docs_root: PathBuf) -> Result<()> {
             current_root.clone(),
             config.clone(),
             resume_path.take(),
+            std::mem::take(&mut http_session),
         );
         restore_terminal(&mut terminal)?;
-        let app = result?;
+        let mut app = result?;
 
         if let Some(path) = app.pending_external_edit.clone() {
             current_root = app.root.clone();
+            // The editor round-trip relaunches the app: carry over what changed
+            // in this session (settings, recents, active environments) and the
+            // HTTP responses, including a request still on the wire.
+            config = app.config.clone();
+            http_session = std::mem::take(&mut app.http.session);
             open_in_editor(&path, &app.config.editor)?;
             resume_path = Some(path);
             continue;
@@ -261,19 +273,30 @@ fn run(
     docs_root: PathBuf,
     config: AppConfig,
     resume_path: Option<PathBuf>,
+    http_session: HttpSession,
 ) -> Result<App> {
     let mut app = App::new(docs_root, config)?;
+    app.http.session = http_session;
 
     if let Some(path) = resume_path {
         app.restore_path_focus(&path)?;
     }
 
     while app.running {
+        app.poll_http();
         terminal.draw(|frame| ui::render(frame, &app))?;
+
+        // Tick faster while a request is on the wire so the spinner moves and
+        // the response shows up as soon as it lands.
+        let tick = if app.http_busy() {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(500)
+        };
 
         // A failing action (permission denied, file vanished, ...) must never
         // tear down the TUI: surface it as an on-screen alert and keep going.
-        if poll(Duration::from_millis(500))? {
+        if poll(tick)? {
             if let Event::Key(key_event) = event::read()? {
                 if let Err(err) = app.handle_key(key_event) {
                     app.show_alert(format!("{err:#}"));

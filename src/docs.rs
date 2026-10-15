@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use crate::config::TreeSortMode;
+use crate::{
+    config::TreeSortMode,
+    http::{find_collection_root, is_collection_dir, is_postman_export, is_yaml_file},
+};
 
 #[derive(Clone, Debug)]
 pub struct DocItem {
@@ -35,16 +38,36 @@ pub fn collect_markdown_tree(
     sort_mode: &TreeSortMode,
 ) -> Result<Vec<DocItem>> {
     let mut items = Vec::new();
-    visit_dir(
-        root,
-        root,
-        expanded_dirs,
-        0,
+    let filter = FileFilter {
         only_mds,
-        sort_mode,
-        &mut items,
-    )?;
+        in_collection: only_mds && find_collection_root(root).is_some(),
+    };
+    visit_dir(root, root, expanded_dirs, 0, filter, sort_mode, &mut items)?;
     Ok(items)
+}
+
+/// Which files the tree shows. With "only Mds" on, HTTP collections stay
+/// usable: their `.yml` files and Postman exports are shown anyway.
+#[derive(Clone, Copy)]
+struct FileFilter {
+    only_mds: bool,
+    in_collection: bool,
+}
+
+impl FileFilter {
+    fn for_subdir(self, dir: &Path) -> Self {
+        Self {
+            in_collection: self.in_collection || (self.only_mds && is_collection_dir(dir)),
+            ..self
+        }
+    }
+
+    fn shows(self, path: &Path) -> bool {
+        !self.only_mds
+            || is_markdown_file(path)
+            || is_postman_export(path)
+            || (self.in_collection && is_yaml_file(path))
+    }
 }
 
 /// Copies a file or directory without overwriting an existing destination.
@@ -244,7 +267,7 @@ fn visit_dir(
     current: &Path,
     expanded_dirs: &BTreeSet<PathBuf>,
     depth: usize,
-    only_mds: bool,
+    filter: FileFilter,
     sort_mode: &TreeSortMode,
     items: &mut Vec<DocItem>,
 ) -> Result<()> {
@@ -278,12 +301,12 @@ fn visit_dir(
                     &path,
                     expanded_dirs,
                     depth + 1,
-                    only_mds,
+                    filter.for_subdir(&path),
                     sort_mode,
                     items,
                 )?;
             }
-        } else if !only_mds || is_markdown_file(&path) {
+        } else if filter.shows(&path) {
             items.push(make_item(root, path, depth, false)?);
         }
     }
@@ -422,6 +445,46 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["guide", "intro.MD", "README.md"]
         );
+    }
+
+    #[test]
+    fn only_mds_still_shows_http_collections_and_postman_exports() {
+        let temp = TestDir::new("collections");
+        let api = temp.path().join("api");
+        let users = api.join("users");
+        fs::create_dir_all(&users).unwrap();
+        fs::write(temp.path().join("compose.yml"), "services: {}").unwrap();
+        fs::write(temp.path().join("shop.postman_collection.json"), "{}").unwrap();
+        fs::write(temp.path().join("data.json"), "{}").unwrap();
+        fs::write(api.join("opencollection.yml"), "opencollection: 1.0.0").unwrap();
+        fs::write(api.join(".env"), "TOKEN=x").unwrap();
+        fs::write(users.join("get.yml"), "http: {}").unwrap();
+
+        let names = |expanded: BTreeSet<PathBuf>| {
+            collect_markdown_tree(temp.path(), &expanded, true, &TreeSortMode::Name)
+                .unwrap()
+                .into_iter()
+                .map(|item| item.name)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            names(BTreeSet::from([api.clone(), users.clone()])),
+            vec![
+                "api",
+                "users",
+                "get.yml",
+                "opencollection.yml",
+                "shop.postman_collection.json"
+            ],
+            "YAML outside a collection, .env and other JSON stay hidden"
+        );
+
+        // Opening mdnav inside the collection behaves the same.
+        let inside =
+            collect_markdown_tree(&users, &BTreeSet::new(), true, &TreeSortMode::Name).unwrap();
+        assert_eq!(inside.len(), 1);
+        assert_eq!(inside[0].name, "get.yml");
     }
 
     #[test]

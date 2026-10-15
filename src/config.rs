@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,8 @@ pub struct AppConfig {
     pub recent_commands: Vec<String>,
     /// Recently opened files, most recent first.
     pub recent_files: Vec<String>,
+    /// Active HTTP environment per collection, keyed by the collection root.
+    pub http_environments: BTreeMap<String, String>,
 }
 
 /// How many recent commands the palette keeps and shows by default.
@@ -79,6 +81,7 @@ impl Default for AppConfig {
             show_git_status: true,
             recent_commands: Vec::new(),
             recent_files: Vec::new(),
+            http_environments: BTreeMap::new(),
         }
     }
 }

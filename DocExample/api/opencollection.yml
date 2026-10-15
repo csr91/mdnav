@@ -1,0 +1,10 @@
+opencollection: 1.0.0
+info:
+  name: mdnav demo
+request:
+  headers:
+    - name: Accept
+      value: application/json
+  variables:
+    - name: github_user
+      value: usebruno

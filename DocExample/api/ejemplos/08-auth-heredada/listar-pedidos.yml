@@ -1,0 +1,18 @@
+info:
+  name: Listar pedidos (hereda auth)
+  type: http
+  seq: 1
+http:
+  method: GET
+  # {{recurso}} es una variable de folder.yml: los folders ganan sobre el
+  # environment y sobre la collection.
+  url: "{{echo_api}}/anything/{{recurso}}"
+  # inherit: toma la auth del folder.yml mas cercano que tenga una (aca,
+  # el bearer de esta carpeta). Sin "auth", el request va sin auth.
+  auth: inherit
+settings:
+  encodeUrl: true
+docs: |-
+  En el panel Request, "Auth" dice de donde viene ("heredada de folder ...").
+  En la response vas a ver Authorization y X-Equipo, que vienen de
+  folder.yml: este archivo no los menciona.

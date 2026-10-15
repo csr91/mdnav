@@ -16,9 +16,11 @@ use crate::{
         collect_dir_tree, collect_markdown_tree, copy_path, has_subdirs, move_path,
         parent_dir_if_within, DocItem,
     },
+    http::{self, HttpResponse},
     markdown::{
         load_preview, mermaid_terminal_canvas, MermaidBlock, MermaidCanvas, PreviewDocument,
     },
+    postman,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,6 +63,9 @@ pub enum Overlay {
     Rename,
     DestPicker,
     Alert,
+    HttpMenu,
+    HttpEnv,
+    HttpInput,
 }
 
 /// The single reversible file operation kept around for `undo`. Nothing is ever
@@ -176,6 +181,76 @@ pub struct SelectionState {
     pub anchored: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseTab {
+    Body,
+    Headers,
+    Info,
+}
+
+pub const RESPONSE_TABS: [ResponseTab; 3] =
+    [ResponseTab::Body, ResponseTab::Headers, ResponseTab::Info];
+
+/// Actions of the `:http` menu.
+pub const HTTP_MENU_ITEMS: &[(&str, &str)] = &[
+    ("send", "enviar el request abierto  (Shift+S)"),
+    ("env", "elegir environment  (:httpenv)"),
+    ("new", "crear un request en la carpeta actual"),
+    ("init", "convertir la carpeta actual en una collection"),
+    ("import", "importar el JSON de Postman seleccionado"),
+    ("copy", "copiar el body de la response  (y)"),
+];
+
+/// HTTP state that outlives a single `App`: Shift+E relaunches the app after
+/// the editor closes, and responses or a request on the wire must survive it.
+#[derive(Default)]
+pub struct HttpSession {
+    pub responses: HashMap<PathBuf, HttpResponse>,
+    pub in_flight: Option<http::InFlight>,
+}
+
+/// The open file when it is a request of an OpenCollection.
+pub struct HttpView {
+    pub collection_root: PathBuf,
+    pub request_path: PathBuf,
+    /// `None` when the YAML could not be read as a request.
+    pub spec: Option<http::HttpRequestSpec>,
+    pub environment: Option<String>,
+    pub environments: Vec<http::Environment>,
+}
+
+pub struct HttpState {
+    pub session: HttpSession,
+    pub view: Option<HttpView>,
+    /// Inside the preview focus, true when the response pane has it.
+    pub response_focus: bool,
+    pub response_tab: ResponseTab,
+    pub response_scroll: usize,
+    pub menu_cursor: usize,
+    pub env_root: Option<PathBuf>,
+    pub env_options: Vec<String>,
+    /// 0 is "no environment", then `env_options` in order.
+    pub env_cursor: usize,
+    pub input: String,
+}
+
+impl Default for HttpState {
+    fn default() -> Self {
+        Self {
+            session: HttpSession::default(),
+            view: None,
+            response_focus: false,
+            response_tab: ResponseTab::Body,
+            response_scroll: 0,
+            menu_cursor: 0,
+            env_root: None,
+            env_options: Vec::new(),
+            env_cursor: 0,
+            input: String::new(),
+        }
+    }
+}
+
 pub struct App {
     pub root: PathBuf,
     pub items: Vec<DocItem>,
@@ -183,6 +258,11 @@ pub struct App {
     pub current_file: Option<PathBuf>,
     pub preview: PreviewDocument,
     pub preview_scroll: usize,
+    pub json_viewer_active: bool,
+    pub json_viewer_raw: String,
+    pub json_viewer_pretty: String,
+    pub json_viewer_error: Option<String>,
+    pub json_viewer_processed: bool,
     pub expanded_dirs: BTreeSet<PathBuf>,
     pub focus: Focus,
     pub fullscreen: FullscreenPanel,
@@ -261,6 +341,7 @@ pub struct App {
     pub tree_info_cache: HashMap<PathBuf, String>,
     pub line_count_cache: HashMap<PathBuf, (SystemTime, usize)>,
     pub git_status_cache: HashMap<PathBuf, GitStatusKind>,
+    pub http: HttpState,
 }
 
 impl App {
@@ -275,15 +356,10 @@ impl App {
             .iter()
             .position(|item| !item.is_dir && !item.is_bookmark)
             .unwrap_or(0);
-        let current_file = items
-            .get(selected_index)
-            .filter(|item| !item.is_dir)
-            .map(|item| item.path.clone());
-        let preview = if let Some(path) = &current_file {
-            load_preview(path)?
-        } else {
-            PreviewDocument::default()
-        };
+        // Start on the welcome screen. Opening the first document automatically
+        // makes the initial view feel arbitrary, especially in large folders.
+        let current_file: Option<PathBuf> = None;
+        let preview = PreviewDocument::default();
 
         let file_mtime = current_file.as_ref().and_then(|p| get_file_mtime(p));
         let tree_sig = compute_tree_sig(&root, &expanded_dirs);
@@ -295,6 +371,11 @@ impl App {
             current_file,
             preview,
             preview_scroll: 0,
+            json_viewer_active: false,
+            json_viewer_raw: String::new(),
+            json_viewer_pretty: String::new(),
+            json_viewer_error: None,
+            json_viewer_processed: false,
             expanded_dirs,
             focus: Focus::Tree,
             fullscreen: FullscreenPanel::None,
@@ -364,9 +445,11 @@ impl App {
             tree_info_cache: HashMap::new(),
             line_count_cache: HashMap::new(),
             git_status_cache: HashMap::new(),
+            http: HttpState::default(),
         };
         app.rebuild_tree_info_cache();
         app.refresh_git_status_cache();
+        app.refresh_http_view();
         prune_trash();
         Ok(app)
     }
@@ -382,6 +465,95 @@ impl App {
 
         if self.selection.is_some() {
             return self.handle_selection_key(key);
+        }
+
+        if self.json_viewer_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.json_viewer_active = false;
+                    self.status = String::from("JSON Viewer cerrado");
+                    return Ok(());
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.toggle_focus();
+                    return Ok(());
+                }
+                KeyCode::Up => {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(1);
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    self.preview_scroll = self.preview_scroll.saturating_add(1);
+                    return Ok(());
+                }
+                KeyCode::PageUp => {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(20);
+                    return Ok(());
+                }
+                KeyCode::PageDown => {
+                    self.preview_scroll = self.preview_scroll.saturating_add(20);
+                    return Ok(());
+                }
+                KeyCode::Char(')') => {
+                    if self.fullscreen == FullscreenPanel::Preview {
+                        self.fullscreen = FullscreenPanel::None;
+                    } else {
+                        self.fullscreen = FullscreenPanel::Preview;
+                        self.focus = Focus::Preview;
+                    }
+                    self.preview_scroll = 0;
+                    return Ok(());
+                }
+                KeyCode::F(5) => {
+                    self.process_json_viewer();
+                    return Ok(());
+                }
+                KeyCode::Enter if self.focus == Focus::Preview => {
+                    self.process_json_viewer();
+                    return Ok(());
+                }
+                KeyCode::Char('y' | 'Y') if self.focus == Focus::Preview => {
+                    let copied = copy_to_clipboard(&self.json_viewer_pretty).unwrap_or(false);
+                    self.status =
+                        if self.json_viewer_processed && self.json_viewer_error.is_none() && copied
+                        {
+                            format!(
+                                "JSON formateado copiado ({} caracteres)",
+                                self.json_viewer_pretty.chars().count()
+                            )
+                        } else if !self.json_viewer_processed || self.json_viewer_error.is_some() {
+                            String::from("Procesa un JSON valido antes de copiarlo")
+                        } else {
+                            String::from("No se pudo copiar el JSON al portapapeles")
+                        };
+                    return Ok(());
+                }
+                KeyCode::Backspace if self.focus == Focus::Tree => {
+                    self.json_viewer_raw.pop();
+                    self.json_viewer_processed = false;
+                    self.json_viewer_error = None;
+                    return Ok(());
+                }
+                KeyCode::Enter if self.focus == Focus::Tree => {
+                    self.json_viewer_raw.push('\n');
+                    self.json_viewer_processed = false;
+                    self.json_viewer_error = None;
+                    return Ok(());
+                }
+                KeyCode::Char(ch)
+                    if self.focus == Focus::Tree
+                        && !key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+                {
+                    self.json_viewer_raw.push(ch);
+                    self.json_viewer_processed = false;
+                    self.json_viewer_error = None;
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
         }
 
         let was_pending_go_up = self.pending_go_up;
@@ -404,8 +576,17 @@ impl App {
             }
         }
 
+        if self.focus == Focus::Preview
+            && self.http_response_focused()
+            && self.handle_response_key(key)?
+        {
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Char('?') => self.toggle_help(),
+            KeyCode::Char('S') => self.send_http_request()?,
+            KeyCode::Esc if self.http_busy() => self.abandon_http_request(),
             KeyCode::Up => match self.focus {
                 Focus::Tree => self.move_selection(-1),
                 Focus::Preview => self.scroll_preview(-1),
@@ -468,7 +649,7 @@ impl App {
                 self.copy_path_to_clipboard()?;
             }
             KeyCode::Char('!') => self.set_split_level(1),
-            KeyCode::Char('@') => self.set_split_level(2),
+            KeyCode::Char('@') => self.toggle_json_viewer()?,
             KeyCode::Char('#') => self.set_split_level(3),
             KeyCode::Char('$') => self.set_split_level(4),
             KeyCode::Char('%') => self.set_split_level(5),
@@ -785,6 +966,42 @@ impl App {
                     _ => {}
                 },
             },
+            Overlay::HttpMenu => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("HTTP cerrado"),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.http.menu_cursor = self.http.menu_cursor.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.http.menu_cursor =
+                        (self.http.menu_cursor + 1).min(HTTP_MENU_ITEMS.len() - 1);
+                }
+                KeyCode::Enter => self.run_http_menu_item()?,
+                _ => {}
+            },
+            Overlay::HttpEnv => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.http.env_root = None;
+                    self.close_overlay("Environment sin cambios");
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.http.env_cursor = self.http.env_cursor.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.http.env_cursor =
+                        (self.http.env_cursor + 1).min(self.http.env_options.len());
+                }
+                KeyCode::Enter => self.confirm_http_env()?,
+                _ => {}
+            },
+            Overlay::HttpInput => match key.code {
+                KeyCode::Esc => self.close_overlay("Request nuevo cancelado"),
+                KeyCode::Enter => self.confirm_new_request()?,
+                KeyCode::Backspace => {
+                    self.http.input.pop();
+                }
+                KeyCode::Char(c) => self.http.input.push(c),
+                _ => {}
+            },
             Overlay::Rename => match key.code {
                 KeyCode::Esc => self.close_overlay("Renombrar cancelado"),
                 KeyCode::Enter => self.confirm_rename(),
@@ -924,6 +1141,13 @@ impl App {
     }
 
     fn toggle_focus(&mut self) {
+        if self.focus == Focus::Preview && self.http.view.is_some() && !self.http.response_focus {
+            self.http.response_focus = true;
+            self.status = String::from("Focus: response");
+            return;
+        }
+        self.http.response_focus = false;
+
         self.focus = match self.focus {
             Focus::Tree => Focus::Preview,
             Focus::Preview => Focus::Tree,
@@ -1472,6 +1696,7 @@ impl App {
         self.selected_index = 0;
         self.current_file = None;
         self.preview = PreviewDocument::default();
+        self.http.view = None;
         self.preview_scroll = 0;
         self.reload_items()?;
         if let Some(index) = self.items.iter().position(|item| !item.is_dir) {
@@ -1671,6 +1896,7 @@ impl App {
             if new_mtime != self.file_mtime {
                 self.file_mtime = new_mtime;
                 self.preview = load_preview(&path)?;
+                self.refresh_http_view();
             }
         }
 
@@ -1724,6 +1950,7 @@ impl App {
             if !self.items.iter().any(|item| &item.path == current) {
                 self.current_file = None;
                 self.preview = PreviewDocument::default();
+                self.http.view = None;
                 self.preview_scroll = 0;
             }
         }
@@ -1738,6 +1965,7 @@ impl App {
     }
 
     fn open_file(&mut self, path: PathBuf) -> Result<()> {
+        self.json_viewer_active = false;
         self.status = format!("Opening {}...", self.relative_label(&path));
         self.preview = load_preview(&path)?;
         self.preview_scroll = 0;
@@ -1754,8 +1982,15 @@ impl App {
         self.mermaid_selected_node = None;
         self.web_link_popup = None;
         self.preview_link_cursor = None;
+        self.http.response_focus = false;
+        self.http.response_scroll = 0;
+        self.refresh_http_view();
         self.config.record_recent_file(&path.display().to_string());
         let _ = self.config.save();
+        if let Some(status) = self.http_open_status(&path) {
+            self.status = status;
+            return Ok(());
+        }
         let link_hint = self
             .preview
             .links
@@ -1780,6 +2015,70 @@ impl App {
             link_hint
         );
         Ok(())
+    }
+
+    fn toggle_json_viewer(&mut self) -> Result<()> {
+        if self.json_viewer_active {
+            self.json_viewer_active = false;
+            self.status = String::from("JSON Viewer cerrado");
+            return Ok(());
+        }
+
+        let is_json = |path: &Path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        };
+        let path = self
+            .current_file
+            .as_ref()
+            .filter(|path| is_json(path))
+            .cloned()
+            .or_else(|| {
+                self.items
+                    .get(self.selected_index)
+                    .filter(|item| !item.is_dir && is_json(&item.path))
+                    .map(|item| item.path.clone())
+            });
+        if let Some(path) = path {
+            if self.current_file.as_ref() != Some(&path) {
+                self.open_file(path.clone())?;
+            }
+            self.json_viewer_raw = fs::read_to_string(&path)
+                .with_context(|| format!("No se pudo leer {}", path.display()))?;
+        } else {
+            self.json_viewer_raw.clear();
+        }
+        self.json_viewer_pretty.clear();
+        self.json_viewer_error = None;
+        self.json_viewer_processed = false;
+        self.preview_scroll = 0;
+        self.focus = Focus::Tree;
+        self.json_viewer_active = true;
+        self.status =
+            String::from("Pega JSON y pulsa Tab para procesar | Shift+0 vista limpia | Esc cierra");
+        Ok(())
+    }
+
+    fn process_json_viewer(&mut self) {
+        match serde_json::from_str::<serde_json::Value>(&self.json_viewer_raw) {
+            Ok(value) => match serde_json::to_string_pretty(&value) {
+                Ok(pretty) => {
+                    self.json_viewer_pretty = pretty;
+                    self.json_viewer_error = None;
+                    self.json_viewer_processed = true;
+                    self.status = String::from("JSON procesado");
+                }
+                Err(error) => {
+                    self.json_viewer_error = Some(error.to_string());
+                    self.json_viewer_processed = true;
+                }
+            },
+            Err(error) => {
+                self.json_viewer_error = Some(error.to_string());
+                self.json_viewer_processed = true;
+                self.status = String::from("JSON invalido; revisa el texto de entrada");
+            }
+        }
     }
 
     fn open_mermaid_flow(&mut self) -> Result<()> {
@@ -1975,6 +2274,7 @@ impl App {
             ("bookmark", "marcar/desmarcar bookmark  (Shift+B)"),
             ("bookmarks", "mostrar/ocultar bookmarks"),
             ("@commands", "ver la lista completa de comandos"),
+            ("@jsonviewer", "abrir JSON Viewer"),
             ("copy", "copiar archivo a otro directorio"),
             (
                 "copypath",
@@ -1990,6 +2290,12 @@ impl App {
             ("gitinfo", "mostrar/ocultar info Git en el arbol"),
             ("goto", "cd pendiente al directorio  (Shift+G)"),
             ("grep", "buscar texto en archivos visibles"),
+            (
+                "http",
+                "requests HTTP: enviar, environment, nuevo, init, import",
+            ),
+            ("httpenv", "elegir environment de la collection"),
+            ("json", "abrir JSON Viewer  (@)"),
             ("marks", "abrir bookmarks guardados"),
             ("mermaid", "acciones Mermaid  (Shift+M)"),
             ("move", "mover archivo o carpeta a otro directorio"),
@@ -2053,6 +2359,8 @@ impl App {
                 vec![
                     ("select", "activar cursor de seleccion  (Shift+Y)"),
                     ("mermaid", "acciones Mermaid  (Shift+M)"),
+                    ("@jsonviewer", "abrir JSON Viewer"),
+                    ("json", "abrir JSON Viewer  (@)"),
                     ("fullscreen", "pantalla completa del panel  (Shift+0)"),
                     ("split1", "proporcion paneles 1  (Shift+1)"),
                     ("split2", "proporcion paneles 2  (Shift+2)"),
@@ -2072,6 +2380,16 @@ impl App {
                 ],
             ),
             ("Git", vec![("git", "ejecutar comandos git")]),
+            (
+                "HTTP",
+                vec![
+                    (
+                        "http",
+                        "requests HTTP: enviar, environment, nuevo, init, import",
+                    ),
+                    ("httpenv", "elegir environment de la collection"),
+                ],
+            ),
         ]
     }
 
@@ -2199,6 +2517,10 @@ impl App {
             "marks" => self.open_marks(),
             "create" => self.open_create(),
             "git" => self.open_git(),
+            "http" => self.open_http_menu(),
+            "httpenv" => self.open_http_env_picker(),
+            "json" => self.toggle_json_viewer()?,
+            "@jsonviewer" => self.toggle_json_viewer()?,
             "select" => self.toggle_selection_mode(),
             "edit" => self.edit_target_in_nano()?,
             "rename" => self.open_rename()?,
@@ -2460,6 +2782,7 @@ impl App {
                 if self.current_file.as_ref() == Some(&target) {
                     self.current_file = None;
                     self.preview = crate::markdown::PreviewDocument::default();
+                    self.http.view = None;
                 }
                 self.last_operation = Some(LastOperation::Delete {
                     trashed,
@@ -2523,6 +2846,7 @@ impl App {
         if missing {
             self.current_file = None;
             self.preview = crate::markdown::PreviewDocument::default();
+            self.http.view = None;
             self.file_mtime = None;
         }
     }
@@ -2645,6 +2969,458 @@ impl App {
                 self.overlay = Overlay::None;
             }
         }
+    }
+
+    // ── HTTP ──────────────────────────────────────────────────────────────────
+
+    pub fn http_response_focused(&self) -> bool {
+        self.http.view.is_some() && self.http.response_focus
+    }
+
+    pub fn http_busy(&self) -> bool {
+        self.http.session.in_flight.is_some()
+    }
+
+    /// The last response of the open request, if it was ever sent.
+    pub fn current_http_response(&self) -> Option<&HttpResponse> {
+        let view = self.http.view.as_ref()?;
+        self.http.session.responses.get(&view.request_path)
+    }
+
+    /// The request on the wire, when it is the open one.
+    pub fn current_request_in_flight(&self) -> Option<&http::InFlight> {
+        let view = self.http.view.as_ref()?;
+        self.http
+            .session
+            .in_flight
+            .as_ref()
+            .filter(|in_flight| in_flight.request_path == view.request_path)
+    }
+
+    fn active_environment_name(&self, root: &Path) -> Option<String> {
+        self.config
+            .http_environments
+            .get(&root.display().to_string())
+            .cloned()
+    }
+
+    /// Rebuilds the request pane when the open file is a request of an
+    /// OpenCollection, and clears the HTTP view for any other file.
+    fn refresh_http_view(&mut self) {
+        let Some(path) = self.current_file.clone() else {
+            self.http.view = None;
+            return;
+        };
+        let Some(root) = http::request_collection_root(&path) else {
+            self.http.view = None;
+            return;
+        };
+
+        let (environments, mut warnings) = http::load_environments(&root);
+        let active = self.active_environment_name(&root);
+        let environment = active
+            .as_deref()
+            .and_then(|name| environments.iter().find(|env| env.name == name));
+        if let (Some(name), None) = (active.as_deref(), environment) {
+            warnings.push(format!("El environment '{name}' ya no existe"));
+        }
+        let environment_name = environment.map(|env| env.name.clone());
+
+        let spec = fs::read_to_string(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|content| http::parse_request(&content));
+        let spec = match spec {
+            Ok(spec) => {
+                let resolved = http::resolve_request(&root, &path, &spec, environment);
+                self.preview =
+                    http::request_preview(&spec, &resolved, environment_name.as_deref(), &warnings);
+                Some(spec)
+            }
+            Err(err) => {
+                self.preview = http::error_preview(&format!("{err:#}"));
+                None
+            }
+        };
+        self.preview_scroll = self
+            .preview_scroll
+            .min(self.preview.lines.len().saturating_sub(1));
+        self.preview_link_cursor = None;
+
+        self.http.view = Some(HttpView {
+            collection_root: root,
+            request_path: path,
+            spec,
+            environment: environment_name,
+            environments,
+        });
+    }
+
+    /// Status shown when opening a request or a Postman export.
+    fn http_open_status(&self, path: &Path) -> Option<String> {
+        if let Some(view) = &self.http.view {
+            let environment = view.environment.as_deref().unwrap_or("sin environment");
+            return Some(format!(
+                "Request HTTP · env: {environment} · Shift+S envia · Tab va a la response"
+            ));
+        }
+        http::is_postman_export(path)
+            .then(|| String::from("Export de Postman · :http → import lo convierte en collection"))
+    }
+
+    fn send_http_request(&mut self) -> Result<()> {
+        if self.http.view.is_none() {
+            self.show_alert(
+                "Shift+S envia el request abierto.
+
+Abri un .yml de una collection (una carpeta con opencollection.yml) o crea una con :http → init.",
+            );
+            return Ok(());
+        }
+        if let Some(in_flight) = &self.http.session.in_flight {
+            self.status = format!(
+                "Ya hay un request en curso: {} (Esc lo abandona)",
+                in_flight.label
+            );
+            return Ok(());
+        }
+
+        // Re-read the request, its folders and environments: any of them may
+        // have changed since the file was opened.
+        self.refresh_http_view();
+        let Some(view) = self.http.view.as_ref() else {
+            return Ok(());
+        };
+        let Some(spec) = view.spec.as_ref() else {
+            self.status = String::from("El request tiene errores: revisalo con Shift+E");
+            return Ok(());
+        };
+        let environment = view
+            .environment
+            .as_deref()
+            .and_then(|name| view.environments.iter().find(|env| env.name == name));
+        let resolved =
+            http::resolve_request(&view.collection_root, &view.request_path, spec, environment);
+        // A URL with unresolved variables cannot reach any server.
+        if resolved.url.contains("{{") {
+            let in_url: Vec<&str> = resolved
+                .unresolved
+                .iter()
+                .map(String::as_str)
+                .filter(|name| resolved.url.contains(name))
+                .collect();
+            self.show_alert(format!(
+                "La URL tiene variables sin resolver: {}
+
+Elegi un environment con :httpenv o definilas en la collection.",
+                in_url.join(", ")
+            ));
+            return Ok(());
+        }
+        let unresolved = resolved.unresolved.len();
+        let in_flight = http::spawn_request(view.request_path.clone(), resolved);
+
+        self.status = if unresolved > 0 {
+            format!(
+                "Enviando {} · {unresolved} variable(s) sin resolver",
+                in_flight.label
+            )
+        } else {
+            format!("Enviando {}", in_flight.label)
+        };
+        self.http.session.in_flight = Some(in_flight);
+        self.http.response_scroll = 0;
+        Ok(())
+    }
+
+    /// Stops waiting for the request on the wire. The worker thread cannot be
+    /// interrupted, so its eventual result is simply discarded.
+    fn abandon_http_request(&mut self) {
+        if let Some(in_flight) = self.http.session.in_flight.take() {
+            self.status = format!("Request abandonado: {}", in_flight.label);
+        }
+    }
+
+    /// Collects the response of the request on the wire once it is done.
+    /// Called on every tick of the UI loop.
+    pub fn poll_http(&mut self) {
+        let Some(in_flight) = self.http.session.in_flight.as_ref() else {
+            return;
+        };
+        let Some(response) = in_flight.try_finish() else {
+            return;
+        };
+        let path = in_flight.request_path.clone();
+        self.http.session.in_flight = None;
+        self.status = response_summary(&response);
+
+        let is_open = self
+            .http
+            .view
+            .as_ref()
+            .map(|view| view.request_path == path)
+            .unwrap_or(false);
+        if is_open {
+            self.http.response_scroll = 0;
+            // Errors are explained in the body tab: never leave them hidden.
+            if response.error.is_some() {
+                self.http.response_tab = ResponseTab::Body;
+            }
+            if self.focus == Focus::Preview {
+                self.http.response_focus = true;
+            }
+        }
+        self.http.session.responses.insert(path, response);
+    }
+
+    /// Keys of the focused response pane. Returns false so everything else
+    /// (Tab, Shift+S, `:`, Esc, ...) falls through to the regular bindings.
+    fn handle_response_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char(',') => self.scroll_response(-1),
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('.') => self.scroll_response(1),
+            KeyCode::PageUp => self.scroll_response(-20),
+            KeyCode::PageDown => self.scroll_response(20),
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('[') => self.move_response_tab(-1),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(']') => self.move_response_tab(1),
+            KeyCode::Char('y') => self.copy_response_body()?,
+            KeyCode::Char('Y') => {
+                self.status = String::from("En la response, y copia el body completo");
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Lines of the active response tab, used to clamp scrolling.
+    pub fn response_line_count(&self) -> usize {
+        let Some(response) = self.current_http_response() else {
+            return 0;
+        };
+        match self.http.response_tab {
+            ResponseTab::Body => response.body_lines.len().max(1),
+            ResponseTab::Headers => response.headers.len().max(1),
+            ResponseTab::Info => 8,
+        }
+    }
+
+    fn scroll_response(&mut self, delta: isize) {
+        let max_scroll = self.response_line_count().saturating_sub(1) as isize;
+        self.http.response_scroll =
+            (self.http.response_scroll as isize + delta).clamp(0, max_scroll) as usize;
+    }
+
+    fn move_response_tab(&mut self, delta: isize) {
+        let index = RESPONSE_TABS
+            .iter()
+            .position(|tab| *tab == self.http.response_tab)
+            .unwrap_or(0) as isize;
+        let next = (index + delta).rem_euclid(RESPONSE_TABS.len() as isize) as usize;
+        self.http.response_tab = RESPONSE_TABS[next];
+        self.http.response_scroll = 0;
+    }
+
+    fn copy_response_body(&mut self) -> Result<()> {
+        let Some(body) = self
+            .current_http_response()
+            .map(|response| response.body_text.clone())
+        else {
+            self.status = String::from("Todavia no hay response: Shift+S para enviar");
+            return Ok(());
+        };
+        if body.is_empty() {
+            self.status = String::from("La response no tiene body de texto");
+            return Ok(());
+        }
+        self.status = if copy_to_clipboard(&body)? {
+            format!("Body copiado ({})", http::format_size(body.len()))
+        } else {
+            String::from("No se pudo acceder al portapapeles")
+        };
+        Ok(())
+    }
+
+    fn open_http_menu(&mut self) {
+        self.http.menu_cursor = 0;
+        self.overlay = Overlay::HttpMenu;
+        self.status = String::from("HTTP: elegi una accion");
+    }
+
+    fn run_http_menu_item(&mut self) -> Result<()> {
+        let Some(&(name, _)) = HTTP_MENU_ITEMS.get(self.http.menu_cursor) else {
+            return Ok(());
+        };
+        self.overlay = Overlay::None;
+        match name {
+            "send" => self.send_http_request()?,
+            "env" => self.open_http_env_picker(),
+            "new" => self.start_new_request_input(),
+            "init" => self.init_http_collection()?,
+            "import" => self.import_postman_selected()?,
+            "copy" => self.copy_response_body()?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The collection the HTTP actions apply to: the open request's, or the
+    /// one containing the selected tree item.
+    fn current_collection_root(&self) -> Option<PathBuf> {
+        if let Some(view) = &self.http.view {
+            return Some(view.collection_root.clone());
+        }
+        self.selected_item_path()
+            .and_then(|path| http::find_collection_root(&path))
+    }
+
+    fn open_http_env_picker(&mut self) {
+        let Some(root) = self.current_collection_root() else {
+            self.show_alert("No hay collection: abri un request o usa :http → init");
+            return;
+        };
+        let (environments, errors) = http::load_environments(&root);
+        let active = self.active_environment_name(&root);
+        self.http.env_options = environments.into_iter().map(|env| env.name).collect();
+        self.http.env_cursor = active
+            .and_then(|name| {
+                self.http
+                    .env_options
+                    .iter()
+                    .position(|option| *option == name)
+            })
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.http.env_root = Some(root);
+        self.overlay = Overlay::HttpEnv;
+        self.status = if errors.is_empty() {
+            String::from("Environment: Enter para activarlo")
+        } else {
+            format!("Environment: {}", errors.join(" | "))
+        };
+    }
+
+    fn confirm_http_env(&mut self) -> Result<()> {
+        self.overlay = Overlay::None;
+        let Some(root) = self.http.env_root.take() else {
+            return Ok(());
+        };
+        let key = root.display().to_string();
+        let choice = self
+            .http
+            .env_cursor
+            .checked_sub(1)
+            .and_then(|index| self.http.env_options.get(index))
+            .cloned();
+        match &choice {
+            Some(name) => {
+                self.config.http_environments.insert(key, name.clone());
+            }
+            None => {
+                self.config.http_environments.remove(&key);
+            }
+        }
+        self.config.save()?;
+        self.refresh_http_view();
+        self.status = match choice {
+            Some(name) => format!("Environment activo: {name}"),
+            None => String::from("Sin environment"),
+        };
+        Ok(())
+    }
+
+    fn start_new_request_input(&mut self) {
+        let Some(dir) = self.current_tree_dir() else {
+            self.status = String::from("No se pudo determinar la carpeta");
+            return;
+        };
+        if http::find_collection_root(&dir).is_none() {
+            self.show_alert("La carpeta no esta dentro de una collection: usa :http → init");
+            return;
+        }
+        self.http.input.clear();
+        self.overlay = Overlay::HttpInput;
+        self.status = String::from("Nombre del request nuevo:");
+    }
+
+    fn confirm_new_request(&mut self) -> Result<()> {
+        self.overlay = Overlay::None;
+        let Some(dir) = self.current_tree_dir() else {
+            return Ok(());
+        };
+        let path = http::create_request(&dir, &self.http.input)?;
+        self.restore_path_focus(&path)?;
+        self.status = format!(
+            "Request creado: {} · Shift+E para editarlo",
+            display_name(&path)
+        );
+        Ok(())
+    }
+
+    fn init_http_collection(&mut self) -> Result<()> {
+        let Some(dir) = self.current_tree_dir() else {
+            self.status = String::from("No se pudo determinar la carpeta");
+            return Ok(());
+        };
+        let created = http::init_collection(&dir)?;
+        if let Some(example) = created
+            .iter()
+            .find(|path| path.file_name().is_some_and(|name| name == "health.yml"))
+        {
+            self.restore_path_focus(example)?;
+        }
+        self.status = format!(
+            "Collection creada en {} ({} archivos) · copia .env.sample a .env",
+            display_name(&dir),
+            created.len()
+        );
+        Ok(())
+    }
+
+    fn import_postman_selected(&mut self) -> Result<()> {
+        let Some(source) = self.action_target_path().filter(|path| path.is_file()) else {
+            self.show_alert("Selecciona en el arbol el JSON exportado de Postman");
+            return Ok(());
+        };
+        let is_json = source
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+        if !is_json {
+            self.show_alert("import espera el .json exportado de Postman");
+            return Ok(());
+        }
+
+        let summary = postman::import(&source)?;
+        if summary.dest.is_dir() {
+            self.expanded_dirs.insert(summary.dest.clone());
+        }
+        self.restore_path_focus(&summary.dest)?;
+
+        let mut message = if summary.environments > 0 {
+            format!(
+                "Environment importado: {}",
+                self.relative_label(&summary.dest)
+            )
+        } else {
+            format!(
+                "Collection importada en {}\n\n{} request(s), {} folder(s)",
+                self.relative_label(&summary.dest),
+                summary.requests,
+                summary.folders
+            )
+        };
+        if !summary.warnings.is_empty() {
+            message.push_str("\n\n");
+            message.push_str(
+                &summary
+                    .warnings
+                    .iter()
+                    .map(|warning| format!("⚠ {warning}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        self.show_alert(message);
+        Ok(())
     }
 
     // ── Git ───────────────────────────────────────────────────────────────────
@@ -3072,6 +3848,9 @@ fn palette_aliases(name: &str) -> &'static [&'static str] {
         "delete" => &["borrar", "eliminar", "remove"],
         "edit" => &["editar", "abrir editor"],
         "git" => &["repo", "version"],
+        "http" => &["postman", "bruno", "api", "request", "rest", "curl"],
+        "httpenv" => &["environment", "entorno", "env"],
+        "json" => &["@j", "@json", "json viewer", "formatear json"],
         "toc" => &["indice", "índice", "headings", "tabla"],
         "recent" => &["recientes", "historial", "ultimos", "últimos"],
         "@commands" => &["ayuda", "comandos", "help"],
@@ -3182,6 +3961,19 @@ pub(crate) fn copy_to_clipboard(value: &str) -> Result<bool> {
 
     clipboard.set_text(value.to_string())?;
     Ok(true)
+}
+
+fn response_summary(response: &HttpResponse) -> String {
+    match (&response.error, response.status) {
+        (Some(error), _) => format!("Request fallido: {error}"),
+        (None, Some(status)) => format!(
+            "{status} {} · {} · {}",
+            response.reason,
+            http::format_elapsed(response.elapsed),
+            http::format_size(response.size)
+        ),
+        (None, None) => String::from("Request sin respuesta"),
+    }
 }
 
 /// Short, human readable name of a path, for status messages.

@@ -1,0 +1,24 @@
+info:
+  name: Post JSON
+  type: http
+  seq: 1
+http:
+  method: POST
+  url: "{{echo_api}}/post"
+  headers:
+    - name: X-Demo
+      value: mdnav
+  body:
+    type: json
+    data: |-
+      {
+        "user": "{{github_user}}",
+        "source": "mdnav"
+      }
+  auth: inherit
+settings:
+  encodeUrl: true
+docs: |-
+  httpbin echoes the request back: check the response for the
+  `Authorization` header inherited from `echo/folder.yml`, whose token
+  comes from `DEMO_TOKEN` in `.env`.
