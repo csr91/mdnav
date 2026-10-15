@@ -4,21 +4,9 @@ Ideas de producto — sin compromiso de fecha ni prioridad.
 
 ---
 
-## 1. Share efímero generalizado
+## 1. Share efímero generalizado — hecho
 
-Hoy `mdnav share` solo funciona con bloques Mermaid. La idea es generalizarlo para cualquier contenido:
-
-```
-mdnav share --file error.log
-mdnav share --file report.csv
-mdnav share --stdin          # pipe desde otro comando
-mdnav share --clipboard      # comparte lo que está en el portapapeles
-```
-
-- mdnav-web ya tiene la infraestructura (TTL, one-time view, API)
-- Solo hay que generalizar el endpoint para aceptar `text`, `log`, `csv`, `json`, `diff`
-- El receptor abre el link y ve el contenido renderizado según el tipo (tabla para CSV, resaltado para logs, etc.)
-- Los datos no persisten → argumento de compliance para empresas con datos sensibles
+`mdnav share --file/--stdin/--clipboard` ya comparte cualquier contenido (texto, log, csv, json, diff, ademas de mermaid), reusando la infraestructura existente de mdnav-web (TTL, one-time view, colección `shares` en Mongo). El endpoint `/api/diagrams/{hash}` acepta `{kind, content, title, filename, ttlSeconds}` y el receptor renderiza segun `kind` (tabla para CSV, colores para diff, resaltado de error/warn en logs, etc.).
 
 ---
 

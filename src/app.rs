@@ -9,8 +9,6 @@ use std::{
 use anyhow::{Context, Result};
 use arboard::Clipboard;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
-use reqwest::blocking::Client;
-use serde_json::json;
 
 use crate::{
     config::{config_path, trash_dir, AppConfig, TreeInfoMode, TreeSortMode},
@@ -1298,9 +1296,14 @@ impl App {
             return;
         };
 
+        if self.pending_cd.as_ref() == Some(&dir) {
+            self.running = false;
+            return;
+        }
+
         let label = self.relative_label(&dir);
         self.pending_cd = Some(dir);
-        self.status = format!("Directorio pendiente para salir: {label}");
+        self.status = format!("Shift+G de nuevo para salir en {label}");
     }
 
     fn relative_label(&self, path: &std::path::Path) -> String {
@@ -2124,7 +2127,13 @@ impl App {
                 };
             }
             MermaidOutputMode::Web => {
-                let share_url = share_mermaid_via_web(&diagram)?;
+                let share_url = crate::share::publish_share(
+                    "mermaid",
+                    &diagram.source,
+                    Some(&diagram.title),
+                    None,
+                    None,
+                )?;
                 let opened = open_url_in_browser(&share_url)?;
                 let copied = copy_to_clipboard(&share_url).unwrap_or(false);
                 self.web_link_popup = Some(share_url.clone());
@@ -3849,54 +3858,6 @@ fn palette_aliases(name: &str) -> &'static [&'static str] {
     }
 }
 
-fn share_mermaid_via_web(diagram: &MermaidBlock) -> Result<String> {
-    let base_url = env::var("MDNAV_WEB_BASE_URL")
-        .unwrap_or_else(|_| String::from("https://mdnav-web.vercel.app"));
-    let trimmed_base = base_url.trim_end_matches('/');
-    let hash = generate_share_hash();
-    let api_url = format!("{trimmed_base}/api/diagrams/{hash}");
-
-    let client = Client::new();
-    let payload = json!({
-        "mermaid": diagram.source,
-        "title": diagram.title,
-        "ttlSeconds": 3600
-    });
-
-    let mut request = client.post(&api_url).json(&payload);
-    if let Ok(token) = env::var("MDNAV_WEB_WRITE_TOKEN") {
-        if !token.trim().is_empty() {
-            request = request.header("x-mdnav-token", token);
-        }
-    }
-
-    let response = request.send()?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .unwrap_or_else(|_| String::from("sin detalle"));
-        return Err(anyhow::anyhow!("Error web Mermaid {status}: {body}"));
-    }
-
-    let body: serde_json::Value = response.json()?;
-    let url = body
-        .get("url")
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{trimmed_base}/{hash}"));
-
-    Ok(url)
-}
-
-fn generate_share_hash() -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    format!("mdnav-{timestamp:x}")
-}
-
 fn write_mermaid_temp_file(diagram: &MermaidBlock) -> Result<PathBuf> {
     let mut path = env::temp_dir();
     let timestamp = SystemTime::now()
@@ -3966,7 +3927,7 @@ fn open_in_browser(path: &Path) -> Result<bool> {
     Ok(false)
 }
 
-fn open_url_in_browser(url: &str) -> Result<bool> {
+pub(crate) fn open_url_in_browser(url: &str) -> Result<bool> {
     #[cfg(target_os = "windows")]
     {
         Command::new("cmd").args(["/C", "start", "", url]).spawn()?;
@@ -3992,7 +3953,7 @@ fn open_url_in_browser(url: &str) -> Result<bool> {
     Ok(false)
 }
 
-fn copy_to_clipboard(value: &str) -> Result<bool> {
+pub(crate) fn copy_to_clipboard(value: &str) -> Result<bool> {
     let mut clipboard = match Clipboard::new() {
         Ok(clipboard) => clipboard,
         Err(_) => return Ok(false),
