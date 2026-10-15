@@ -26,7 +26,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Min(3), Constraint::Length(2)])
         .split(frame.area());
 
-    if app.fullscreen == FullscreenPanel::Tree {
+    if app.json_viewer_active {
+        render_json_viewer(frame, areas[0], app);
+    } else if app.fullscreen == FullscreenPanel::Tree {
         render_tree(frame, areas[0], app);
     } else if app.fullscreen == FullscreenPanel::Preview {
         render_preview(frame, areas[0], app);
@@ -42,7 +44,13 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     let s = app.config.strings();
-    let footer = if app.overlay == Overlay::Rename {
+    let footer = if app.json_viewer_active {
+        Paragraph::new(Line::from(Span::styled(
+            "JSON VIEWER  F5 procesar  Tab cambiar panel  y copiar  Shift+0 vista limpia  Esc cerrar",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )))
+        .block(Block::default().borders(Borders::TOP))
+    } else if app.overlay == Overlay::Rename {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 "Rename: ",
@@ -208,6 +216,9 @@ fn mode_label(app: &App) -> (&'static str, Color) {
         Overlay::WebLink => ("LINK", Color::Cyan),
         Overlay::HttpMenu | Overlay::HttpEnv | Overlay::HttpInput => ("HTTP", Color::Green),
         Overlay::None => {
+            if app.json_viewer_active {
+                return ("JSON", Color::Green);
+            }
             if let Some(selection) = app.selection.as_ref() {
                 return if selection.anchored {
                     ("VISUAL", Color::Green)
@@ -513,9 +524,9 @@ fn git_status_style(status: Option<GitStatusKind>) -> (&'static str, Style) {
 fn item_marker(app: &App, item: &crate::docs::DocItem) -> &'static str {
     if item.is_dir {
         if app.expanded_dirs.contains(&item.path) {
-            "▾"
+            "v"
         } else {
-            "▸"
+            ">"
         }
     } else {
         match item
@@ -529,7 +540,7 @@ fn item_marker(app: &App, item: &crate::docs::DocItem) -> &'static str {
             Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") => "I",
             Some("rs" | "js" | "ts" | "tsx" | "jsx" | "py" | "sh" | "ps1") => "C",
             Some("json" | "toml" | "yaml" | "yml") => "D",
-            _ => "•",
+            _ => ".",
         }
     }
 }
@@ -560,9 +571,117 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+fn render_json_viewer(frame: &mut Frame, area: Rect, app: &App) {
+    if app.fullscreen == FullscreenPanel::Preview {
+        let lines = if let Some(error) = &app.json_viewer_error {
+            vec![Line::from(Span::styled(
+                error,
+                Style::default().fg(Color::Red),
+            ))]
+        } else if !app.json_viewer_processed {
+            vec![Line::from(Span::styled(
+                "Pulsa F5 para procesar el JSON",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            app.json_viewer_pretty
+                .lines()
+                .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
+                .collect::<Vec<_>>()
+        };
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((app.preview_scroll as u16, 0)),
+            area,
+        );
+        return;
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(area);
+    let button = Paragraph::new("[ Procesar JSON ]   F5  (Enter con foco en la salida)")
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_widget(button, sections[0]);
+
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(sections[1]);
+
+    let raw_lines = app
+        .json_viewer_raw
+        .lines()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::Gray))))
+        .collect::<Vec<_>>();
+    let pretty_lines = if !app.json_viewer_processed {
+        vec![Line::from(Span::styled(
+            "Pulsa F5 o Enter para procesar el JSON",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else if let Some(error) = &app.json_viewer_error {
+        vec![
+            Line::from(Span::styled(
+                "JSON incompleto o invalido:",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(error, Style::default().fg(Color::Red))),
+        ]
+    } else {
+        app.json_viewer_pretty
+            .lines()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
+            .collect::<Vec<_>>()
+    };
+
+    let raw = Paragraph::new(raw_lines)
+        .block(
+            Block::default()
+                .title(" Texto de entrada ")
+                .borders(Borders::ALL)
+                .border_style(if app.focus == Focus::Tree {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.preview_scroll as u16, 0));
+    let pretty = Paragraph::new(pretty_lines)
+        .block(
+            Block::default()
+                .title(" JSON formateado ")
+                .borders(Borders::ALL)
+                .border_style(if app.focus == Focus::Preview {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.preview_scroll as u16, 0));
+
+    frame.render_widget(raw, panes[0]);
+    frame.render_widget(pretty, panes[1]);
+}
+
 fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bordered: bool) {
     let s = app.config.strings();
-    let base_title = if app.http.view.is_some() && app.selection.is_none() {
+    let base_title = if app.current_file.is_none() && app.http.view.is_none() {
+        "Bienvenido a mdnav"
+    } else if app.http.view.is_some() && app.selection.is_none() {
         "Request"
     } else if app.fullscreen == FullscreenPanel::Preview {
         if app.selection.is_some() {
@@ -580,7 +699,74 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bord
         .map(|breadcrumb| format!("{base_title} · {breadcrumb}"))
         .unwrap_or_else(|| base_title.to_string());
 
-    let lines = if app.preview.lines.is_empty() {
+    let lines = if app.current_file.is_none() && app.http.view.is_none() {
+        vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Explora tus documentos desde el arbol",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    "  Up/Down  ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Moverse por el arbol", Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  Enter  ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Abrir archivo o expandir carpeta",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  Tab    ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Cambiar entre arbol y vista previa",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  ?      ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Ver todos los atajos", Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  @      ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Abrir JSON Viewer", Style::default().fg(Color::White)),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Selecciona un archivo para comenzar.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    } else if app.preview.lines.is_empty() {
         vec![Line::from(Span::styled(
             s.preview_empty,
             Style::default().fg(Color::DarkGray),

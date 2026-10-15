@@ -260,6 +260,11 @@ pub struct App {
     pub current_file: Option<PathBuf>,
     pub preview: PreviewDocument,
     pub preview_scroll: usize,
+    pub json_viewer_active: bool,
+    pub json_viewer_raw: String,
+    pub json_viewer_pretty: String,
+    pub json_viewer_error: Option<String>,
+    pub json_viewer_processed: bool,
     pub expanded_dirs: BTreeSet<PathBuf>,
     pub focus: Focus,
     pub fullscreen: FullscreenPanel,
@@ -353,15 +358,10 @@ impl App {
             .iter()
             .position(|item| !item.is_dir && !item.is_bookmark)
             .unwrap_or(0);
-        let current_file = items
-            .get(selected_index)
-            .filter(|item| !item.is_dir)
-            .map(|item| item.path.clone());
-        let preview = if let Some(path) = &current_file {
-            load_preview(path)?
-        } else {
-            PreviewDocument::default()
-        };
+        // Start on the welcome screen. Opening the first document automatically
+        // makes the initial view feel arbitrary, especially in large folders.
+        let current_file: Option<PathBuf> = None;
+        let preview = PreviewDocument::default();
 
         let file_mtime = current_file.as_ref().and_then(|p| get_file_mtime(p));
         let tree_sig = compute_tree_sig(&root, &expanded_dirs);
@@ -373,6 +373,11 @@ impl App {
             current_file,
             preview,
             preview_scroll: 0,
+            json_viewer_active: false,
+            json_viewer_raw: String::new(),
+            json_viewer_pretty: String::new(),
+            json_viewer_error: None,
+            json_viewer_processed: false,
             expanded_dirs,
             focus: Focus::Tree,
             fullscreen: FullscreenPanel::None,
@@ -462,6 +467,95 @@ impl App {
 
         if self.selection.is_some() {
             return self.handle_selection_key(key);
+        }
+
+        if self.json_viewer_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.json_viewer_active = false;
+                    self.status = String::from("JSON Viewer cerrado");
+                    return Ok(());
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.toggle_focus();
+                    return Ok(());
+                }
+                KeyCode::Up => {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(1);
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    self.preview_scroll = self.preview_scroll.saturating_add(1);
+                    return Ok(());
+                }
+                KeyCode::PageUp => {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(20);
+                    return Ok(());
+                }
+                KeyCode::PageDown => {
+                    self.preview_scroll = self.preview_scroll.saturating_add(20);
+                    return Ok(());
+                }
+                KeyCode::Char(')') => {
+                    if self.fullscreen == FullscreenPanel::Preview {
+                        self.fullscreen = FullscreenPanel::None;
+                    } else {
+                        self.fullscreen = FullscreenPanel::Preview;
+                        self.focus = Focus::Preview;
+                    }
+                    self.preview_scroll = 0;
+                    return Ok(());
+                }
+                KeyCode::F(5) => {
+                    self.process_json_viewer();
+                    return Ok(());
+                }
+                KeyCode::Enter if self.focus == Focus::Preview => {
+                    self.process_json_viewer();
+                    return Ok(());
+                }
+                KeyCode::Char('y' | 'Y') if self.focus == Focus::Preview => {
+                    let copied = copy_to_clipboard(&self.json_viewer_pretty).unwrap_or(false);
+                    self.status =
+                        if self.json_viewer_processed && self.json_viewer_error.is_none() && copied
+                        {
+                            format!(
+                                "JSON formateado copiado ({} caracteres)",
+                                self.json_viewer_pretty.chars().count()
+                            )
+                        } else if !self.json_viewer_processed || self.json_viewer_error.is_some() {
+                            String::from("Procesa un JSON valido antes de copiarlo")
+                        } else {
+                            String::from("No se pudo copiar el JSON al portapapeles")
+                        };
+                    return Ok(());
+                }
+                KeyCode::Backspace if self.focus == Focus::Tree => {
+                    self.json_viewer_raw.pop();
+                    self.json_viewer_processed = false;
+                    self.json_viewer_error = None;
+                    return Ok(());
+                }
+                KeyCode::Enter if self.focus == Focus::Tree => {
+                    self.json_viewer_raw.push('\n');
+                    self.json_viewer_processed = false;
+                    self.json_viewer_error = None;
+                    return Ok(());
+                }
+                KeyCode::Char(ch)
+                    if self.focus == Focus::Tree
+                        && !key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+                {
+                    self.json_viewer_raw.push(ch);
+                    self.json_viewer_processed = false;
+                    self.json_viewer_error = None;
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
         }
 
         let was_pending_go_up = self.pending_go_up;
@@ -557,7 +651,7 @@ impl App {
                 self.copy_path_to_clipboard()?;
             }
             KeyCode::Char('!') => self.set_split_level(1),
-            KeyCode::Char('@') => self.set_split_level(2),
+            KeyCode::Char('@') => self.toggle_json_viewer()?,
             KeyCode::Char('#') => self.set_split_level(3),
             KeyCode::Char('$') => self.set_split_level(4),
             KeyCode::Char('%') => self.set_split_level(5),
@@ -1868,6 +1962,7 @@ impl App {
     }
 
     fn open_file(&mut self, path: PathBuf) -> Result<()> {
+        self.json_viewer_active = false;
         self.status = format!("Opening {}...", self.relative_label(&path));
         self.preview = load_preview(&path)?;
         self.preview_scroll = 0;
@@ -1917,6 +2012,70 @@ impl App {
             link_hint
         );
         Ok(())
+    }
+
+    fn toggle_json_viewer(&mut self) -> Result<()> {
+        if self.json_viewer_active {
+            self.json_viewer_active = false;
+            self.status = String::from("JSON Viewer cerrado");
+            return Ok(());
+        }
+
+        let is_json = |path: &Path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        };
+        let path = self
+            .current_file
+            .as_ref()
+            .filter(|path| is_json(path))
+            .cloned()
+            .or_else(|| {
+                self.items
+                    .get(self.selected_index)
+                    .filter(|item| !item.is_dir && is_json(&item.path))
+                    .map(|item| item.path.clone())
+            });
+        if let Some(path) = path {
+            if self.current_file.as_ref() != Some(&path) {
+                self.open_file(path.clone())?;
+            }
+            self.json_viewer_raw = fs::read_to_string(&path)
+                .with_context(|| format!("No se pudo leer {}", path.display()))?;
+        } else {
+            self.json_viewer_raw.clear();
+        }
+        self.json_viewer_pretty.clear();
+        self.json_viewer_error = None;
+        self.json_viewer_processed = false;
+        self.preview_scroll = 0;
+        self.focus = Focus::Tree;
+        self.json_viewer_active = true;
+        self.status =
+            String::from("Pega JSON y pulsa Tab para procesar | Shift+0 vista limpia | Esc cierra");
+        Ok(())
+    }
+
+    fn process_json_viewer(&mut self) {
+        match serde_json::from_str::<serde_json::Value>(&self.json_viewer_raw) {
+            Ok(value) => match serde_json::to_string_pretty(&value) {
+                Ok(pretty) => {
+                    self.json_viewer_pretty = pretty;
+                    self.json_viewer_error = None;
+                    self.json_viewer_processed = true;
+                    self.status = String::from("JSON procesado");
+                }
+                Err(error) => {
+                    self.json_viewer_error = Some(error.to_string());
+                    self.json_viewer_processed = true;
+                }
+            },
+            Err(error) => {
+                self.json_viewer_error = Some(error.to_string());
+                self.json_viewer_processed = true;
+                self.status = String::from("JSON invalido; revisa el texto de entrada");
+            }
+        }
     }
 
     fn open_mermaid_flow(&mut self) -> Result<()> {
@@ -2106,6 +2265,7 @@ impl App {
             ("bookmark", "marcar/desmarcar bookmark  (Shift+B)"),
             ("bookmarks", "mostrar/ocultar bookmarks"),
             ("@commands", "ver la lista completa de comandos"),
+            ("@jsonviewer", "abrir JSON Viewer"),
             ("copy", "copiar archivo a otro directorio"),
             (
                 "copypath",
@@ -2126,6 +2286,7 @@ impl App {
                 "requests HTTP: enviar, environment, nuevo, init, import",
             ),
             ("httpenv", "elegir environment de la collection"),
+            ("json", "abrir JSON Viewer  (@)"),
             ("marks", "abrir bookmarks guardados"),
             ("mermaid", "acciones Mermaid  (Shift+M)"),
             ("move", "mover archivo o carpeta a otro directorio"),
@@ -2189,6 +2350,8 @@ impl App {
                 vec![
                     ("select", "activar cursor de seleccion  (Shift+Y)"),
                     ("mermaid", "acciones Mermaid  (Shift+M)"),
+                    ("@jsonviewer", "abrir JSON Viewer"),
+                    ("json", "abrir JSON Viewer  (@)"),
                     ("fullscreen", "pantalla completa del panel  (Shift+0)"),
                     ("split1", "proporcion paneles 1  (Shift+1)"),
                     ("split2", "proporcion paneles 2  (Shift+2)"),
@@ -2347,6 +2510,8 @@ impl App {
             "git" => self.open_git(),
             "http" => self.open_http_menu(),
             "httpenv" => self.open_http_env_picker(),
+            "json" => self.toggle_json_viewer()?,
+            "@jsonviewer" => self.toggle_json_viewer()?,
             "select" => self.toggle_selection_mode(),
             "edit" => self.edit_target_in_nano()?,
             "rename" => self.open_rename()?,
@@ -3676,6 +3841,7 @@ fn palette_aliases(name: &str) -> &'static [&'static str] {
         "git" => &["repo", "version"],
         "http" => &["postman", "bruno", "api", "request", "rest", "curl"],
         "httpenv" => &["environment", "entorno", "env"],
+        "json" => &["@j", "@json", "json viewer", "formatear json"],
         "toc" => &["indice", "índice", "headings", "tabla"],
         "recent" => &["recientes", "historial", "ultimos", "últimos"],
         "@commands" => &["ayuda", "comandos", "help"],
