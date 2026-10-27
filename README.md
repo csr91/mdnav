@@ -123,19 +123,9 @@ api/
     └── get-user.yml       # un request por archivo
 ```
 
-Al abrir un request, el preview se parte en dos: el **request** arriba (URL resuelta, environment, auth, params, headers y body) y la **response** abajo, con los tabs Body, Headers e Info.
+Los requests se envían desde el **HTTP Client**, que se abre con `:@http` (o desde `:@tools`) a pantalla completa, dividido en collections, requests y detalle/response. `Tab` cambia de panel; en Collections, `↑`/`↓` cambian de collection; en Requests, `↑`/`↓` seleccionan un request; en el panel derecho, `↑`/`↓` desplazan la response y `[` / `]` cambian de tab (Body, Headers, Info). `C` crea una collection en la ruta indicada (relativa al root actual o absoluta); `N` crea un request; `Enter` abre el request seleccionado y `S` lo envía. `e` elige el environment activo, `I` importa el JSON de Postman seleccionado en el árbol y `M` abre el menú de acciones HTTP. `Esc` vuelve al explorador.
 
-| Tecla | Acción |
-|-------|--------|
-| `Shift+S` | enviar el request abierto |
-| `Tab` | árbol → request → response |
-| `[` / `]` o `h` / `l` | cambiar de tab en la response |
-| `j` / `k`, `PgUp` / `PgDn` | scroll de la response |
-| `y` | copiar el body de la response |
-| `Esc` | abandonar el request en curso |
-| `Shift+E` | editar el YAML del request |
-
-`:@http` abre el cliente HTTP a pantalla completa, dividido en collections, requests y detalle/response. `Tab` cambia de panel; en Collections, `↑`/`↓` cambian de collection; en Requests, `↑`/`↓` seleccionan un request; en el panel derecho, `↑`/`↓` desplazan la response y `[` / `]` cambian de tab. `C` crea una collection en la ruta indicada (relativa al root actual o absoluta); `N` crea un request; `Enter` abre el request seleccionado y `S` lo envía. `E` elige el environment activo e `I` importa el JSON de Postman seleccionado en el árbol. `Esc` vuelve al explorador. `:httpenv` sigue disponible desde el explorador y `:@tools` incluye el acceso al HTTP Client.
+En el explorador, un request se previsualiza como cualquier YAML, con un aviso arriba. Con foco en el preview, `Enter` abre el HTTP Client con ese request seleccionado; `:@http` hace lo mismo cuando el archivo abierto es un request. `Shift+E` edita el YAML, `:httpenv` elige el environment y `Esc` abandona un request que siga en curso después de cerrar el cliente.
 
 Los requests se envían en un thread aparte: la UI no se congela y la response se conserva al volver del editor.
 
@@ -145,7 +135,7 @@ Los requests se envían en un thread aparte: la UI no se congela y la response s
 
 **Importar desde Postman:** seleccioná en el árbol un `*.postman_collection.json` (v2.1), abrí `:@http` y pulsá `I`. Se crea la carpeta de la collection al lado del JSON y nunca se sobrescribe nada. Los `*.postman_environment.json` se importan a `environments/`: sus secretos pasan al `.env` y el YAML solo guarda la referencia. Los scripts `pm.*` quedan como documentación del request, porque no se ejecutan.
 
-**Fuera de alcance por ahora:** scripts y assertions (se avisa cuántos tiene el request), bodies multipart, file y GraphQL nativo, y auth OAuth, AWS, digest y NTLM.
+**Fuera de alcance por ahora:** scripts y assertions (no se ejecutan), bodies multipart, file y GraphQL nativo, y auth OAuth, AWS, digest y NTLM.
 
 Con **Solo Mds** activado, el árbol igual muestra los `.yml` de las collections y los exports de Postman.
 

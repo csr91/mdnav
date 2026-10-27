@@ -239,14 +239,6 @@ fn mode_label(app: &App) -> (&'static str, Color) {
                 };
             }
 
-            if app.focus == Focus::Preview && app.http.view.is_some() {
-                return if app.http.response_focus {
-                    ("RESPONSE", Color::Green)
-                } else {
-                    ("HTTP", Color::Green)
-                };
-            }
-
             match app.fullscreen {
                 FullscreenPanel::Tree => ("TREE", Color::Cyan),
                 FullscreenPanel::Preview => ("PREVIEW", Color::Cyan),
@@ -263,26 +255,21 @@ fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let focus = match app.focus {
         Focus::Tree => "TREE",
-        Focus::Preview if app.http_response_focused() => "RESPONSE",
-        Focus::Preview if app.http.view.is_some() => "HTTP",
         Focus::Preview => "PREVIEW",
     };
     spans.push(footer_focus_span(focus));
 
     let hint = match app.focus {
         Focus::Tree => "↑↓/jk move · Enter/l open · h parent · Tab preview · : command · ? help  ",
-        Focus::Preview if app.http_response_focused() => {
-            "↑↓/jk scroll · []/hl tabs · y copy body · S send · Tab tree  "
-        }
         Focus::Preview if app.http.view.is_some() => {
-            "S send · Tab response · ↑↓ scroll · E edit · :httpenv env  "
+            "Enter HTTP Client · ↑↓/jk scroll · Y select · Tab tree · : command  "
         }
         Focus::Preview => "↑↓/jk scroll · [] links · T toc · Y select · Tab tree · : command  ",
     };
     spans.push(Span::styled(hint, Style::default().fg(Color::Gray)));
 
-    // A request keeps running while the user browses other files.
-    if app.http_busy() && app.current_request_in_flight().is_none() {
+    // A request sent from the client keeps running after it is closed.
+    if app.http_busy() {
         spans.push(Span::styled(
             "⟳ HTTP en curso  ",
             Style::default()
@@ -606,22 +593,6 @@ fn item_marker(app: &App, item: &crate::docs::DocItem) -> &'static str {
 }
 
 fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
-    // Selection mode keeps the single pane: its cursor math assumes it.
-    if app.http.view.is_some() && app.selection.is_none() {
-        // The request takes what it needs (up to half), the response the rest.
-        let request_height = (app.preview.lines.len() as u16)
-            .saturating_add(2)
-            .clamp(5, (area.height / 2).max(5));
-        let panes = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(request_height), Constraint::Min(0)])
-            .split(area);
-        let request_focused = app.focus == Focus::Preview && !app.http.response_focus;
-        render_document(frame, panes[0], app, request_focused, true);
-        render_response(frame, panes[1], app);
-        return;
-    }
-
     render_document(
         frame,
         area,
@@ -739,10 +710,8 @@ fn render_json_viewer(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bordered: bool) {
     let s = app.config.strings();
-    let base_title = if app.current_file.is_none() && app.http.view.is_none() {
+    let base_title = if app.current_file.is_none() {
         "Bienvenido a mdnav"
-    } else if app.http.view.is_some() && app.selection.is_none() {
-        "Request"
     } else if app.fullscreen == FullscreenPanel::Preview {
         if app.selection.is_some() {
             s.preview_select
@@ -759,7 +728,7 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bord
         .map(|breadcrumb| format!("{base_title} · {breadcrumb}"))
         .unwrap_or_else(|| base_title.to_string());
 
-    let lines = if app.current_file.is_none() && app.http.view.is_none() {
+    let mut lines = if app.current_file.is_none() {
         vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -854,6 +823,18 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bord
             })
             .collect::<Vec<_>>()
     };
+    // Pinned above the content, so it stays visible while scrolling.
+    if request_notice_rows(app) > 0 {
+        lines.insert(
+            0,
+            Line::from(Span::styled(
+                "Request HTTP · Enter abre en HTTP Client",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        );
+    }
 
     let paragraph = if bordered {
         Paragraph::new(lines)
@@ -877,9 +858,14 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bord
     }
 }
 
+/// Rows the request notice takes at the top of the preview: one when the open
+/// file is a request of a collection.
+fn request_notice_rows(app: &App) -> u16 {
+    u16::from(app.http.view.is_some())
+}
+
 fn render_response(frame: &mut Frame, area: Rect, app: &App) {
-    let focused = (app.screen == Screen::Http && app.http.client.focus == 2)
-        || (app.focus == Focus::Preview && app.http.response_focus);
+    let focused = app.screen == Screen::Http && app.http.client.focus == 2;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style(focused));
@@ -1823,10 +1809,7 @@ fn shortcut_groups(s: &'static Strings) -> Vec<ShortcutGroup> {
         ShortcutGroup {
             title: "HTTP",
             items: vec![
-                ("Shift+S", "send the open request"),
-                ("Tab", "tree → request → response"),
-                ("[ / ]  h / l", "response tabs"),
-                ("y", "copy the response body"),
+                ("Enter", "open the previewed request in HTTP Client"),
                 ("Esc", "abandon the request in flight"),
                 (":@http", "open HTTP Client"),
                 (":httpenv", "choose the environment"),
@@ -2205,7 +2188,8 @@ fn preview_cursor_position(app: &App, area: Rect, cursor: PreviewCursor) -> Opti
         return None;
     }
 
-    let offset_y = cursor.line.saturating_sub(app.preview_scroll) as u16;
+    let offset_y = (cursor.line.saturating_sub(app.preview_scroll) as u16)
+        .saturating_add(request_notice_rows(app));
     let inner = if app.fullscreen == FullscreenPanel::Preview {
         area
     } else {

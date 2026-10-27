@@ -21,7 +21,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::markdown::{highlight_code_block, PreviewDocument, PreviewLine, PreviewLineKind};
+use crate::markdown::{highlight_code_block, PreviewLine, PreviewLineKind};
 
 pub const COLLECTION_FILE: &str = "opencollection.yml";
 const FOLDER_FILE: &str = "folder.yml";
@@ -38,13 +38,6 @@ const HIGHLIGHT_LINE_LIMIT: usize = 3000;
 const MAX_INTERPOLATION_DEPTH: usize = 8;
 
 const GRAY: [u8; 3] = [150, 150, 150];
-const WHITE: [u8; 3] = [230, 230, 230];
-const YELLOW: [u8; 3] = [229, 192, 123];
-const RED: [u8; 3] = [224, 108, 117];
-const GREEN: [u8; 3] = [152, 195, 121];
-const CYAN: [u8; 3] = [86, 182, 194];
-const BLUE: [u8; 3] = [97, 175, 239];
-const MAGENTA: [u8; 3] = [198, 120, 221];
 
 // ── Collection discovery ─────────────────────────────────────────────────────
 
@@ -1185,6 +1178,14 @@ fn describe_reqwest_error(err: &reqwest::Error) -> String {
     format!("{kind}: {detail}")
 }
 
+fn plain_line(text: &str, color: [u8; 3]) -> PreviewLine {
+    PreviewLine {
+        text: text.to_string(),
+        kind: PreviewLineKind::Normal,
+        highlights: vec![(text.to_string(), color)],
+    }
+}
+
 fn render_body(bytes: &[u8], content_type: Option<&str>) -> (String, Vec<PreviewLine>) {
     if bytes.is_empty() {
         return (String::new(), Vec::new());
@@ -1275,204 +1276,6 @@ pub fn spawn_request(request_path: PathBuf, request: ResolvedRequest) -> InFligh
         label,
         started: Instant::now(),
         receiver,
-    }
-}
-
-// ── Request preview ──────────────────────────────────────────────────────────
-
-fn segment(text: impl Into<String>, color: [u8; 3]) -> (String, [u8; 3]) {
-    (text.into(), color)
-}
-
-fn line_from_segments(segments: Vec<(String, [u8; 3])>) -> PreviewLine {
-    PreviewLine {
-        text: segments.iter().map(|(text, _)| text.as_str()).collect(),
-        kind: PreviewLineKind::Normal,
-        highlights: segments,
-    }
-}
-
-fn plain_line(text: &str, color: [u8; 3]) -> PreviewLine {
-    line_from_segments(vec![segment(text, color)])
-}
-
-fn heading(text: &str) -> PreviewLine {
-    PreviewLine {
-        text: text.to_string(),
-        kind: PreviewLineKind::Heading(2),
-        highlights: Vec::new(),
-    }
-}
-
-fn blank() -> PreviewLine {
-    PreviewLine {
-        text: String::new(),
-        kind: PreviewLineKind::Normal,
-        highlights: Vec::new(),
-    }
-}
-
-pub fn method_color(method: &str) -> [u8; 3] {
-    match method {
-        "GET" => GREEN,
-        "POST" => YELLOW,
-        "PUT" => BLUE,
-        "PATCH" => MAGENTA,
-        "DELETE" => RED,
-        _ => CYAN,
-    }
-}
-
-fn labeled(label: &str, value: &str, color: [u8; 3]) -> PreviewLine {
-    line_from_segments(vec![
-        segment(format!("{label:<9}"), GRAY),
-        segment(value, color),
-    ])
-}
-
-fn key_value_line(entry: &KeyValue, separator: &str) -> PreviewLine {
-    if entry.enabled {
-        line_from_segments(vec![
-            segment(format!("  {}", entry.name), CYAN),
-            segment(format!("{separator}{}", entry.value), WHITE),
-        ])
-    } else {
-        plain_line(
-            &format!("  {}{separator}{}  (off)", entry.name, entry.value),
-            GRAY,
-        )
-    }
-}
-
-/// The request pane: what will be sent, with templates shown as written (so
-/// secrets do not end up on screen) and the resolved URL underneath.
-pub fn request_preview(
-    spec: &HttpRequestSpec,
-    resolved: &ResolvedRequest,
-    environment: Option<&str>,
-    extra_warnings: &[String],
-) -> PreviewDocument {
-    let mut lines = vec![
-        line_from_segments(vec![
-            segment(format!("{} ", spec.method), method_color(&spec.method)),
-            segment(
-                if spec.name.is_empty() {
-                    String::from("(sin nombre)")
-                } else {
-                    spec.name.clone()
-                },
-                WHITE,
-            ),
-        ]),
-        blank(),
-        labeled("URL", &spec.url, WHITE),
-    ];
-    if resolved.url != spec.url {
-        lines.push(labeled("  →", &resolved.url, GRAY));
-    }
-    lines.push(labeled(
-        "Env",
-        environment.unwrap_or("(sin environment)"),
-        if environment.is_some() { GREEN } else { GRAY },
-    ));
-    lines.push(labeled("Auth", &resolved.auth_label, WHITE));
-
-    let warnings: Vec<String> = resolved
-        .unresolved
-        .iter()
-        .map(|name| format!("Variable sin resolver: {{{{{name}}}}}"))
-        .chain(resolved.warnings.iter().cloned())
-        .chain(extra_warnings.iter().cloned())
-        .collect();
-    if !warnings.is_empty() {
-        lines.push(blank());
-        lines.push(heading("Avisos"));
-        lines.extend(
-            warnings
-                .iter()
-                .map(|warning| plain_line(&format!("  ⚠ {warning}"), YELLOW)),
-        );
-    }
-
-    if !spec.params.is_empty() {
-        lines.push(blank());
-        lines.push(heading(&format!("Params ({})", spec.params.len())));
-        lines.extend(spec.params.iter().map(|param| {
-            let separator = match param.kind {
-                ParamKind::Query => " = ",
-                ParamKind::Path => " (path) = ",
-            };
-            key_value_line(&param.entry, separator)
-        }));
-    }
-
-    if !spec.headers.is_empty() {
-        lines.push(blank());
-        lines.push(heading(&format!("Headers ({})", spec.headers.len())));
-        lines.extend(
-            spec.headers
-                .iter()
-                .map(|header| key_value_line(header, ": ")),
-        );
-    }
-
-    match &spec.body {
-        Body::None => {}
-        Body::Raw { kind, data } => {
-            lines.push(blank());
-            lines.push(heading(&format!("Body · {kind}")));
-            let raw: Vec<String> = data.lines().map(str::to_string).collect();
-            let language = match kind.as_str() {
-                "json" => "json",
-                "xml" => "xml",
-                _ => "txt",
-            };
-            lines.extend(highlight_code_block(&raw, language).into_iter().map(
-                |(text, highlights)| PreviewLine {
-                    text,
-                    kind: PreviewLineKind::Normal,
-                    highlights,
-                },
-            ));
-        }
-        Body::Form(entries) => {
-            lines.push(blank());
-            lines.push(heading("Body · form-urlencoded"));
-            lines.extend(entries.iter().map(|entry| key_value_line(entry, " = ")));
-        }
-        Body::Unsupported(kind) => {
-            lines.push(blank());
-            lines.push(heading(&format!("Body · {kind}")));
-        }
-    }
-
-    if let Some(docs) = &spec.docs {
-        lines.push(blank());
-        lines.push(heading("Docs"));
-        lines.extend(docs.lines().map(|line| plain_line(line, GRAY)));
-    }
-
-    PreviewDocument {
-        lines,
-        links: Vec::new(),
-        mermaid_blocks: 0,
-        mermaid_diagrams: Vec::new(),
-    }
-}
-
-/// Shown instead of the request when its YAML cannot be used.
-pub fn error_preview(error: &str) -> PreviewDocument {
-    PreviewDocument {
-        lines: vec![
-            plain_line("No se pudo leer el request", RED),
-            blank(),
-            plain_line(error, YELLOW),
-            blank(),
-            plain_line("Shift+E abre el archivo en el editor.", GRAY),
-        ],
-        links: Vec::new(),
-        mermaid_blocks: 0,
-        mermaid_diagrams: Vec::new(),
     }
 }
 

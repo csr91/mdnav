@@ -203,12 +203,12 @@ pub const RESPONSE_TABS: [ResponseTab; 3] =
 
 /// Actions of the `:http` menu.
 pub const HTTP_MENU_ITEMS: &[(&str, &str)] = &[
-    ("send", "enviar el request abierto  (Shift+S)"),
-    ("env", "elegir environment  (:httpenv)"),
-    ("new", "crear un request en la carpeta actual"),
+    ("send", "enviar el request abierto  (S)"),
+    ("env", "elegir environment  (e)"),
+    ("new", "crear un request en la collection  (N)"),
     ("init", "convertir la carpeta actual en una collection"),
     ("import", "importar el JSON de Postman seleccionado"),
-    ("copy", "copiar el body de la response  (y)"),
+    ("copy", "copiar el body de la response"),
 ];
 
 /// HTTP state that outlives a single `App`: Shift+E relaunches the app after
@@ -219,7 +219,8 @@ pub struct HttpSession {
     pub in_flight: Option<http::InFlight>,
 }
 
-/// The open file when it is a request of an OpenCollection.
+/// The open file when it is a request of an OpenCollection. The client's
+/// request detail and the send logic read it.
 pub struct HttpView {
     pub collection_root: PathBuf,
     pub request_path: PathBuf,
@@ -232,8 +233,6 @@ pub struct HttpView {
 pub struct HttpState {
     pub session: HttpSession,
     pub view: Option<HttpView>,
-    /// Inside the preview focus, true when the response pane has it.
-    pub response_focus: bool,
     pub response_tab: ResponseTab,
     pub response_scroll: usize,
     pub menu_cursor: usize,
@@ -263,7 +262,6 @@ impl Default for HttpState {
         Self {
             session: HttpSession::default(),
             view: None,
-            response_focus: false,
             response_tab: ResponseTab::Body,
             response_scroll: 0,
             menu_cursor: 0,
@@ -607,16 +605,8 @@ impl App {
             }
         }
 
-        if self.focus == Focus::Preview
-            && self.http_response_focused()
-            && self.handle_response_key(key)?
-        {
-            return Ok(());
-        }
-
         match key.code {
             KeyCode::Char('?') => self.toggle_help(),
-            KeyCode::Char('S') => self.send_http_request()?,
             KeyCode::Esc if self.http_busy() => self.abandon_http_request(),
             KeyCode::Up => match self.focus {
                 Focus::Tree => self.move_selection(-1),
@@ -630,6 +620,11 @@ impl App {
             KeyCode::Char(')') => self.toggle_fullscreen(),
             KeyCode::Char('M') => self.open_mermaid_flow()?,
             KeyCode::Right => self.activate_selected()?,
+            // A request preview is plain YAML without links: Enter hands it
+            // over to the client instead.
+            KeyCode::Enter if self.focus == Focus::Preview && self.http.view.is_some() => {
+                self.open_http_client()
+            }
             KeyCode::Enter if self.focus == Focus::Preview => self.follow_active_link()?,
             KeyCode::Enter => self.activate_selected()?,
             KeyCode::Left | KeyCode::Backspace => {
@@ -1288,13 +1283,6 @@ impl App {
     }
 
     fn toggle_focus(&mut self) {
-        if self.focus == Focus::Preview && self.http.view.is_some() && !self.http.response_focus {
-            self.http.response_focus = true;
-            self.status = String::from("Focus: response");
-            return;
-        }
-        self.http.response_focus = false;
-
         self.focus = match self.focus {
             Focus::Tree => Focus::Preview,
             Focus::Preview => Focus::Tree,
@@ -2129,7 +2117,6 @@ impl App {
         self.mermaid_selected_node = None;
         self.web_link_popup = None;
         self.preview_link_cursor = None;
-        self.http.response_focus = false;
         self.http.response_scroll = 0;
         self.refresh_http_view();
         self.config.record_recent_file(&path.display().to_string());
@@ -3118,10 +3105,6 @@ impl App {
 
     // ── HTTP ──────────────────────────────────────────────────────────────────
 
-    pub fn http_response_focused(&self) -> bool {
-        self.http.view.is_some() && self.http.response_focus
-    }
-
     pub fn http_busy(&self) -> bool {
         self.http.session.in_flight.is_some()
     }
@@ -3149,8 +3132,9 @@ impl App {
             .cloned()
     }
 
-    /// Rebuilds the request pane when the open file is a request of an
-    /// OpenCollection, and clears the HTTP view for any other file.
+    /// Sets the HTTP view when the open file is a request of an OpenCollection,
+    /// and clears it for any other file. The preview itself keeps showing the
+    /// YAML like any other file.
     fn refresh_http_view(&mut self) {
         let Some(path) = self.current_file.clone() else {
             self.http.view = None;
@@ -3161,41 +3145,21 @@ impl App {
             return;
         };
 
-        let (environments, mut warnings) = http::load_environments(&root);
-        let active = self.active_environment_name(&root);
-        let environment = active
-            .as_deref()
-            .and_then(|name| environments.iter().find(|env| env.name == name));
-        if let (Some(name), None) = (active.as_deref(), environment) {
-            warnings.push(format!("El environment '{name}' ya no existe"));
-        }
-        let environment_name = environment.map(|env| env.name.clone());
-
+        let (environments, _) = http::load_environments(&root);
+        // An environment that no longer exists counts as none.
+        let environment = self
+            .active_environment_name(&root)
+            .filter(|name| environments.iter().any(|env| env.name == *name));
         let spec = fs::read_to_string(&path)
             .map_err(anyhow::Error::from)
-            .and_then(|content| http::parse_request(&content));
-        let spec = match spec {
-            Ok(spec) => {
-                let resolved = http::resolve_request(&root, &path, &spec, environment);
-                self.preview =
-                    http::request_preview(&spec, &resolved, environment_name.as_deref(), &warnings);
-                Some(spec)
-            }
-            Err(err) => {
-                self.preview = http::error_preview(&format!("{err:#}"));
-                None
-            }
-        };
-        self.preview_scroll = self
-            .preview_scroll
-            .min(self.preview.lines.len().saturating_sub(1));
-        self.preview_link_cursor = None;
+            .and_then(|content| http::parse_request(&content))
+            .ok();
 
         self.http.view = Some(HttpView {
             collection_root: root,
             request_path: path,
             spec,
-            environment: environment_name,
+            environment,
             environments,
         });
     }
@@ -3204,9 +3168,12 @@ impl App {
     fn http_open_status(&self, path: &Path) -> Option<String> {
         if let Some(view) = &self.http.view {
             let environment = view.environment.as_deref().unwrap_or("sin environment");
-            return Some(format!(
-                "Request HTTP · env: {environment} · Shift+S envia · Tab va a la response"
-            ));
+            let hint = if self.screen == Screen::Http {
+                "Shift+S envia · Tab va a la response"
+            } else {
+                "Enter en el preview abre en HTTP Client"
+            };
+            return Some(format!("Request HTTP · env: {environment} · {hint}"));
         }
         http::is_postman_export(path)
             .then(|| String::from("Export de Postman · :@http → import lo convierte en collection"))
@@ -3310,48 +3277,8 @@ Elegi un environment con :httpenv o definilas en la collection.",
             if response.error.is_some() {
                 self.http.response_tab = ResponseTab::Body;
             }
-            if self.focus == Focus::Preview {
-                self.http.response_focus = true;
-            }
         }
         self.http.session.responses.insert(path, response);
-    }
-
-    /// Keys of the focused response pane. Returns false so everything else
-    /// (Tab, Shift+S, `:`, Esc, ...) falls through to the regular bindings.
-    fn handle_response_key(&mut self, key: KeyEvent) -> Result<bool> {
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char(',') => self.scroll_response(-1),
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('.') => self.scroll_response(1),
-            KeyCode::PageUp => self.scroll_response(-20),
-            KeyCode::PageDown => self.scroll_response(20),
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('[') => self.move_response_tab(-1),
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(']') => self.move_response_tab(1),
-            KeyCode::Char('y') => self.copy_response_body()?,
-            KeyCode::Char('Y') => {
-                self.status = String::from("En la response, y copia el body completo");
-            }
-            _ => return Ok(false),
-        }
-        Ok(true)
-    }
-
-    /// Lines of the active response tab, used to clamp scrolling.
-    pub fn response_line_count(&self) -> usize {
-        let Some(response) = self.current_http_response() else {
-            return 0;
-        };
-        match self.http.response_tab {
-            ResponseTab::Body => response.body_lines.len().max(1),
-            ResponseTab::Headers => response.headers.len().max(1),
-            ResponseTab::Info => 8,
-        }
-    }
-
-    fn scroll_response(&mut self, delta: isize) {
-        let max_scroll = self.response_line_count().saturating_sub(1) as isize;
-        self.http.response_scroll =
-            (self.http.response_scroll as isize + delta).clamp(0, max_scroll) as usize;
     }
 
     fn move_response_tab(&mut self, delta: isize) {
@@ -3411,6 +3338,18 @@ Elegi un environment con :httpenv o definilas en la collection.",
             .get(self.http.client.collection_cursor)
             .cloned();
         self.refresh_http_client_requests();
+        // When the open file is a request, land on it.
+        if let Some(view) = &self.http.view {
+            if let Some(index) = self
+                .http
+                .client
+                .requests
+                .iter()
+                .position(|path| path == &view.request_path)
+            {
+                self.http.client.cursor = index;
+            }
+        }
         self.http.client.focus = if self.http.client.requests.is_empty() {
             0
         } else {
@@ -3496,7 +3435,7 @@ Elegi un environment con :httpenv o definilas en la collection.",
         match name {
             "send" => self.send_http_request()?,
             "env" => self.open_http_env_picker(),
-            "new" => self.start_new_request_input(),
+            "new" => self.start_client_request_input(),
             "init" => self.init_http_collection()?,
             "import" => self.import_postman_selected()?,
             "copy" => self.copy_response_body()?,
@@ -3575,23 +3514,10 @@ Elegi un environment con :httpenv o definilas en la collection.",
         Ok(())
     }
 
-    fn start_new_request_input(&mut self) {
-        let Some(dir) = self.current_tree_dir() else {
-            self.status = String::from("No se pudo determinar la carpeta");
-            return;
-        };
-        if http::find_collection_root(&dir).is_none() {
-            self.show_alert("La carpeta no esta dentro de una collection: usa :@http → init");
-            return;
-        }
-        self.http.input.clear();
-        self.overlay = Overlay::HttpInput;
-        self.status = String::from("Nombre del request nuevo:");
-    }
-
     fn confirm_new_request(&mut self) -> Result<()> {
         self.overlay = Overlay::None;
         let Some(dir) = self.http.client.root.clone() else {
+            self.status = String::from("Primero crea una collection con C");
             return Ok(());
         };
         let path = http::create_request(&dir, &self.http.input)?;
