@@ -7,6 +7,8 @@ use ratatui::{
     Frame,
 };
 
+use std::time::Duration;
+
 use crate::markdown::{PreviewLine, PreviewLineKind};
 use crate::{
     app::{
@@ -47,8 +49,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let s = app.config.strings();
     let footer = if app.screen == Screen::Http {
-        Paragraph::new("Tab panel · ↑↓ navegar · Enter abrir · S enviar · N nuevo · C collection · E env · I importar · M menú · Esc volver")
-            .style(Style::default().fg(Color::Gray))
+        Paragraph::new(Line::from(http_client_footer_spans(app)))
             .block(Block::default().borders(Borders::TOP))
     } else if app.json_viewer_active {
         Paragraph::new(Line::from(Span::styled(
@@ -266,12 +267,7 @@ fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
         Focus::Preview if app.http.view.is_some() => "HTTP",
         Focus::Preview => "PREVIEW",
     };
-    spans.push(Span::styled(
-        format!("{focus}  "),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ));
+    spans.push(footer_focus_span(focus));
 
     let hint = match app.focus {
         Focus::Tree => "↑↓/jk move · Enter/l open · h parent · Tab preview · : command · ? help  ",
@@ -297,10 +293,7 @@ fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
 
     if app.http.view.is_some() {
         // Request results and HTTP feedback matter more than file metadata.
-        spans.push(Span::styled(
-            app.status.clone(),
-            Style::default().fg(Color::Yellow),
-        ));
+        spans.push(footer_status_span(app));
     } else if let Some(metadata) = app.current_file_metadata() {
         spans.push(Span::styled(metadata, Style::default().fg(Color::DarkGray)));
     } else {
@@ -312,6 +305,62 @@ fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
     }
     spans.push(pending_cd_span(app));
     spans
+}
+
+/// Footer of `Screen::Http`, laid out like `context_footer_spans`: the
+/// focused pane, its keys, the request on the wire and the status.
+fn http_client_footer_spans(app: &App) -> Vec<Span<'static>> {
+    let (focus, hint) = match app.http.client.focus {
+        0 => (
+            "COLLECTIONS",
+            "↑↓/jk collection · Enter abrir · S enviar · N nuevo · C collection · I importar · Tab panel · Esc/q volver  ",
+        ),
+        1 => (
+            "REQUESTS",
+            "↑↓/jk request · Enter abrir · S enviar · N nuevo · e env · M menú · Tab panel · Esc/q volver  ",
+        ),
+        _ => (
+            "RESPONSE",
+            "↑↓/jk scroll · []/hl tabs · S enviar · e env · M menú · Tab panel · Esc/q volver  ",
+        ),
+    };
+    let mut spans = vec![
+        footer_focus_span(focus),
+        Span::styled(hint, Style::default().fg(Color::Gray)),
+    ];
+
+    if let Some(in_flight) = &app.http.session.in_flight {
+        let spinner = spinner_frame(in_flight.started.elapsed());
+        spans.push(Span::styled(
+            format!("{spinner} {}  ", in_flight.label),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        // The send confirmation would only repeat the method and URL.
+        if app.status == format!("Enviando {}", in_flight.label) {
+            return spans;
+        }
+    }
+    spans.push(footer_status_span(app));
+    spans
+}
+
+fn footer_focus_span(focus: &str) -> Span<'static> {
+    Span::styled(
+        format!("{focus}  "),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn footer_status_span(app: &App) -> Span<'static> {
+    Span::styled(app.status.clone(), Style::default().fg(Color::Yellow))
+}
+
+fn spinner_frame(elapsed: Duration) -> &'static str {
+    SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()]
 }
 
 fn footer_item_span(app: &App) -> Span<'static> {
@@ -837,7 +886,7 @@ fn render_response(frame: &mut Frame, area: Rect, app: &App) {
 
     if let Some(in_flight) = app.current_request_in_flight() {
         let elapsed = in_flight.started.elapsed();
-        let spinner = SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()];
+        let spinner = spinner_frame(elapsed);
         let lines = vec![
             Line::from(Span::styled(
                 format!("{spinner} Enviando… {}", http::format_elapsed(elapsed)),
@@ -1287,7 +1336,7 @@ fn render_tools_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(Clear, area);
     let items = ["JSON Viewer", "HTTP Client"]
         .into_iter()
-        .map(|label| ListItem::new(label))
+        .map(ListItem::new)
         .collect::<Vec<_>>();
     let list = List::new(items)
         .block(
