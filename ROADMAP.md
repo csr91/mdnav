@@ -35,8 +35,7 @@
 - [x] Configuracion TOML robusta con migracion automatica del formato anterior
 - [x] Operaciones move/copy seguras: sin sobrescritura, rollback y fallback entre filesystems
 - [x] Tests automatizados y CI en Windows/Linux
-- [x] Requests HTTP con collections OpenCollection (compatibles con Bruno): environments, `.env`, auth heredada, response con tabs e import desde Postman (`:http`, `Shift+S`)
-
+- [x] Requests HTTP con collections OpenCollection (compatibles con Bruno): environments, `.env`, auth heredada, response con tabs e import desde Postman (`:@http`, `Shift+S`)
 ## Proximo — v0.2.x
 
 - [ ] Plugin vim: abrir mdnav desde vim y volver al archivo seleccionado

@@ -59,6 +59,7 @@ Decisiones que no se deducen leyendo un solo archivo:
 - **Ejecución:** `reqwest` blocking en un worker thread (`http::spawn_request`). `App::poll_http` recoge el resultado en cada tick, y el loop baja a 100 ms mientras hay un request en curso.
 - **`Shift+E` relanza la `App`:** `main.rs` traslada `HttpSession` (responses y request en curso) y `AppConfig`. Cualquier estado nuevo que tenga que sobrevivir al editor va por ese camino.
 - **Feedback:** con un archivo abierto el footer muestra metadata y no `app.status`, salvo en la vista HTTP. Para errores de una acción usá `show_alert`.
+- **Teclas del HTTP Client:** `HTTP_KEY_SECTIONS` (`app.rs`) describe todo lo que maneja `handle_http_client_key`. La ayuda `?` y los hints del footer salen de esa tabla: si agregás o cambiás una tecla, actualizala ahí.
 - **`serde_json` con `preserve_order`:** no lo saques. Sin eso, las keys de la response se ordenan alfabéticamente.
 - **Tests:** `http.rs` levanta un servidor local (`one_shot_server`) para verificar lo que sale por el cable. Hay otro test que valida la collection de `DocExample/api`, así la demo no queda desactualizada.
 
@@ -72,6 +73,7 @@ src/
   config.rs     — configuracion de usuario
   docs.rs       — árbol de archivos
   http.rs       — requests HTTP: collections OpenCollection, environments, envío
+  http_tree.rs  — árbol de collections, folders y requests del HTTP Client
   postman.rs    — import de collections y environments de Postman
   markdown.rs   — preview y syntax highlighting
   strings.rs    — textos i18n (es/en)

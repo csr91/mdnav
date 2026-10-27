@@ -128,12 +128,12 @@ Los requests se envían desde el **HTTP Client**, que se abre con `:@http` (o de
 | Panel | Teclas |
 |---|---|
 | Árbol | `↑`/`↓` o `j`/`k` mueven, `l`/`→` abre, `h`/`←` cierra; `Enter` en un request salta a su response (o al detalle si todavía no tiene) |
-| Request | `↑`/`↓`, `j`/`k`, `PgUp`/`PgDn` desplazan el detalle; `y` copia el body de la response |
+| Request | `↑`/`↓`, `j`/`k`, `PgUp`/`PgDn` desplazan el detalle; `g`/`G` van al inicio/fin; `y` copia el body de la response |
 | Response | `↑`/`↓`, `j`/`k`, `PgUp`/`PgDn` desplazan; `g`/`G` van al inicio/fin; `[` / `]` o `h`/`l` cambian de tab (Body, Headers, Info); `y` copia el body |
 
 Como en el explorador, las acciones que envían o escriben archivos van con Shift: `S` envía el request seleccionado, `E` edita su YAML en el editor externo (mdnav se relanza y vuelve al cliente con el mismo request), `N` crea un request, `C` crea una collection en la ruta indicada (relativa al root actual o absoluta) e `I` importa el JSON de Postman seleccionado en el explorador. `e` elige el environment activo y `M` abre el menú de acciones HTTP.
 
-`Esc` retrocede de a un paso: primero abandona el request en curso, después devuelve el foco al árbol y, desde el árbol, cierra el cliente. `q` cierra el cliente directamente.
+`Esc` retrocede de a un paso: primero abandona el request en curso, después devuelve el foco al árbol y, desde el árbol, cierra el cliente. `q` cierra el cliente directamente. `?` abre la ayuda del cliente con todas sus teclas, empezando por las del panel enfocado; `?` o `Esc` la cierran.
 
 En el explorador, un request se previsualiza como cualquier YAML, con un aviso arriba. Con foco en el preview, `Enter` abre el HTTP Client con ese request seleccionado; `:@http` hace lo mismo cuando el archivo abierto es un request. `Shift+E` edita el YAML, `:httpenv` elige el environment y `Esc` abandona un request que siga en curso después de cerrar el cliente.
 

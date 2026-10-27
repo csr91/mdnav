@@ -11,37 +11,38 @@ mdnav DocExample              # con mdnav instalado
 cargo run -- DocExample       # desde el código, parado en la raíz del repo
 ```
 
-**1. Abrí un request**
+**1. Abrí un request en el HTTP Client**
 
 - Expandí `api` y después `ejemplos` (`j`/`k` para moverte, `Enter` para expandir).
-- Seleccioná `01-get-y-cambiar-metodo.yml` y `Enter`.
+- Seleccioná `01-get-y-cambiar-metodo.yml` y `Enter`: el preview muestra el YAML, con un aviso arriba.
+- `Tab` pasa el foco al preview y `Enter` abre el **HTTP Client** con ese request seleccionado. `:@http` hace lo mismo.
 
-El preview se parte en **Request** arriba y **Response** abajo, todavía vacía.
+El cliente ocupa toda la pantalla: a la izquierda el árbol de collections, folders y requests; a la derecha el detalle del **Request** y, abajo, la **Response**, todavía vacía. `Tab` recorre los tres paneles y solo el enfocado se resalta.
 
 **2. Elegí el environment** (una sola vez: queda guardado en la config)
 
-- `:` abre la palette. Escribí `httpenv` y `Enter`.
+- `e` abre el selector de environments.
 - Bajá hasta `public` con `j` y `Enter`.
 
-En el panel Request, `Env` pasa a `public` y la línea `→` muestra la URL resuelta, `https://httpbin.org/anything/hola`.
+En el panel Request, `Environment` pasa a `public`.
 
 **3. Enviá**
 
-- `Shift+S`: aparece el spinner y la response llega con el JSON formateado. El foco pasa solo a la response.
-- `j`/`k` hacen scroll, `]` cambia a Headers e Info, `y` copia el body y `Tab` vuelve al árbol.
+- `Shift+S`: aparece el spinner en la barra inferior y la response llega con el JSON formateado.
+- `Enter` en el árbol salta a la response. Ahí `j`/`k` hacen scroll, `]` cambia a Headers e Info, `y` copia el body y `Esc` vuelve al árbol.
 
 **4. Cambiá algo y reenviá**
 
-- `Shift+E` abre el YAML en tu editor. Cambiá `method: GET` por `method: POST`, guardá y salí.
+- `Shift+E` abre el YAML en tu editor. Cambiá `method: GET` por `method: POST`, guardá y salí: mdnav vuelve al cliente con el mismo request.
 - `Shift+S` de nuevo: en la response, `"method"` ahora dice `"POST"`.
 
-Ese ciclo (editar, enviar, mirar la response) es todo el flujo de trabajo.
+Ese ciclo (editar, enviar, mirar la response) es todo el flujo de trabajo. Si te olvidás una tecla, `?` muestra todas las del cliente.
 
 Para probar secretos, creá `DocExample/api/.env` con `DEMO_TOKEN=lo-que-quieras` y enviá `api/echo/post-json.yml`. httpbin devuelve el header `Authorization` que mandaste, y el token nunca aparece en el YAML.
 
 ## Ejemplos para aprender
 
-`api/ejemplos/` tiene un request por concepto. Todos van contra httpbin, que te devuelve lo que mandaste: cambiá algo con `Shift+E`, enviá con `Shift+S` y mirá el efecto en la response. Cada archivo explica qué tocar en sus comentarios, y su sección **Docs** se ve en el panel Request.
+`api/ejemplos/` tiene un request por concepto. Todos van contra httpbin, que te devuelve lo que mandaste: cambiá algo con `Shift+E`, enviá con `Shift+S` y mirá el efecto en la response. Cada archivo explica qué tocar en sus comentarios, y sus docs se ven en el panel Request.
 
 | Archivo | Qué muestra |
 |---------|-------------|
@@ -105,26 +106,40 @@ api/
 | `{{process.env.NOMBRE}}` | `.env` de la collection y después el entorno del proceso |
 | `secret: true` en un environment | se busca por nombre en `.env` |
 
-Una variable sin resolver aparece en **Avisos** dentro del request. Si está en la URL, el request no se envía y mdnav te pide elegir un environment.
+Al enviar, la barra inferior avisa cuántas variables quedaron sin resolver. Si alguna está en la URL, el request no se envía y mdnav te pide elegir un environment.
 
 ## Teclas
 
+Como en el explorador, las acciones que envían o escriben archivos van con Shift. `?` muestra todas las teclas del cliente, empezando por las del panel enfocado.
+
 | Tecla | Acción |
 |-------|--------|
-| `Shift+S` | enviar |
-| `Tab` | árbol → request → response |
+| `Enter` en el preview de un request, o `:@http` | abrir el HTTP Client |
+| `Tab` / `Shift+Tab` | árbol → request → response |
+| `j` `k` / `↑` `↓` | mover en el árbol; scroll en request y response |
+| `l` `h` / `→` `←` | abrir y cerrar collections y folders |
+| `Enter` en el árbol | en un request, saltar a su response (o al detalle si todavía no tiene) |
+| `PgUp` `PgDn` / `g` `G` | scroll rápido; inicio y fin |
 | `[` `]` / `h` `l` | tabs de la response |
 | `y` | copiar el body |
-| `Esc` | abandonar el request en curso |
-| `Shift+E` | editar el YAML |
-| `:http` | send, env, new, init, import |
-| `:httpenv` | elegir environment |
+| `Shift+S` | enviar |
+| `Shift+E` | editar el YAML y volver al cliente |
+| `Shift+N` | nuevo request en la collection |
+| `Shift+C` | nueva collection |
+| `Shift+I` | importar el JSON de Postman seleccionado en el explorador |
+| `e` | elegir environment |
+| `M` | menú: send, env, new, init, import, copy |
+| `Esc` | abandonar el request en curso; si no hay, volver al árbol; desde el árbol, cerrar el cliente |
+| `q` | cerrar el cliente |
+| `?` | ayuda del cliente |
+
+Fuera del cliente, `:httpenv` elige el environment de la collection y `Esc` abandona un request que siga en curso.
 
 ## Arrancar una collection propia
 
-- `:http` → `init` convierte la carpeta seleccionada en una collection: crea un environment `local`, el `.gitignore` del `.env` y un request de ejemplo.
-- `:http` → `new` crea un request en la carpeta seleccionada.
-- `:http` → `import` convierte un `*.postman_collection.json` (v2.1) en una carpeta nueva al lado del JSON. Los `*.postman_environment.json` van a `environments/`, con sus secretos pasados al `.env`.
+- `Shift+C` en el cliente crea una collection en la carpeta que indiques (relativa al root o absoluta): un environment `local`, el `.gitignore` del `.env` y un request de ejemplo. `M` → `init` hace lo mismo con la carpeta seleccionada en el explorador.
+- `Shift+N` crea un request en la collection seleccionada en el árbol.
+- `Shift+I` (o `M` → `import`) convierte el `*.postman_collection.json` (v2.1) seleccionado en el explorador en una carpeta nueva al lado del JSON. Los `*.postman_environment.json` van a `environments/`, con sus secretos pasados al `.env`.
 
 ## Límites actuales
 
