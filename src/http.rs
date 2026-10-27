@@ -691,6 +691,14 @@ pub enum ResolvedBody {
     Form(Vec<(String, String)>),
 }
 
+/// A credential of the applied auth, kept apart so the UI can show it masked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthField {
+    pub name: String,
+    pub value: String,
+    pub secret: bool,
+}
+
 /// A request with every variable, default and auth applied: exactly what goes
 /// over the wire.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -698,9 +706,13 @@ pub struct ResolvedRequest {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
+    /// Enabled path params, then the query params appended to the URL, with
+    /// their values resolved. An api key sent in the query is under auth.
+    pub params: Vec<(ParamKind, String, String)>,
     pub body: ResolvedBody,
     pub settings: RequestSettings,
     pub auth_label: String,
+    pub auth_fields: Vec<AuthField>,
     pub unresolved: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -790,6 +802,15 @@ pub fn resolve_request(
             })
             .collect()
     };
+    let params: Vec<(ParamKind, String, String)> = path_params
+        .iter()
+        .map(|(name, value)| (ParamKind::Path, name.clone(), value.clone()))
+        .chain(
+            query
+                .iter()
+                .map(|(name, value)| (ParamKind::Query, name.clone(), value.clone())),
+        )
+        .collect();
 
     // Auth: `inherit` walks up folder by folder to the collection.
     let (auth, auth_source) = match &spec.auth {
@@ -806,9 +827,16 @@ pub fn resolve_request(
     let has_authorization = headers
         .iter()
         .any(|(name, _)| name.eq_ignore_ascii_case("authorization"));
+    let field = |name: &str, value: &str, secret: bool| AuthField {
+        name: name.to_string(),
+        value: value.to_string(),
+        secret,
+    };
+    let mut auth_fields = Vec::new();
     match &auth {
         Auth::Bearer { token } if !has_authorization => {
             let token = scope.interpolate(token, &mut unresolved);
+            auth_fields.push(field("token", &token, true));
             set_header(
                 &mut headers,
                 String::from("Authorization"),
@@ -818,6 +846,8 @@ pub fn resolve_request(
         Auth::Basic { username, password } if !has_authorization => {
             let username = scope.interpolate(username, &mut unresolved);
             let password = scope.interpolate(password, &mut unresolved);
+            auth_fields.push(field("username", &username, false));
+            auth_fields.push(field("password", &password, true));
             let encoded = base64_encode(format!("{username}:{password}").as_bytes());
             set_header(
                 &mut headers,
@@ -832,6 +862,7 @@ pub fn resolve_request(
         } => {
             let key = scope.interpolate(key, &mut unresolved);
             let value = scope.interpolate(value, &mut unresolved);
+            auth_fields.push(field(&key, &value, true));
             if *in_query {
                 query.push((key, value));
             } else {
@@ -928,12 +959,24 @@ pub fn resolve_request(
         method: spec.method.clone(),
         url,
         headers,
+        params,
         body,
         settings: spec.settings.clone(),
         auth_label,
+        auth_fields,
         unresolved,
         warnings,
     }
+}
+
+/// True when resolving `spec` warns whatever its folders or environment say:
+/// an auth or body mdnav cannot send, scripts or assertions it does not run.
+/// Cheap enough for every leaf of the client's tree.
+pub fn spec_has_warnings(spec: &HttpRequestSpec) -> bool {
+    matches!(spec.auth, Auth::Unsupported(_))
+        || matches!(spec.body, Body::Unsupported(_))
+        || spec.script_count > 0
+        || spec.assertion_count > 0
 }
 
 fn insert_enabled(vars: &mut HashMap<String, String>, entries: &[KeyValue]) {
@@ -1964,11 +2007,52 @@ docs: Creates a user.
             ResolvedBody::Text(String::from(r#"{"name": "ana"}"#))
         );
         assert_eq!(resolved.auth_label, "bearer · heredada de collection");
+        assert_eq!(
+            resolved.auth_fields,
+            [AuthField {
+                name: String::from("token"),
+                value: String::from("from-dotenv"),
+                secret: true,
+            }]
+        );
+        assert_eq!(
+            resolved.params,
+            [
+                (
+                    ParamKind::Path,
+                    String::from("org"),
+                    String::from("folder-org")
+                ),
+                (ParamKind::Query, String::from("dry"), String::from("true")),
+            ],
+            "only enabled params, resolved"
+        );
         assert!(resolved.unresolved.is_empty(), "{:?}", resolved.unresolved);
         assert!(resolved
             .warnings
             .iter()
             .any(|warning| warning.contains("script")));
+        assert!(spec_has_warnings(&spec), "the scripts show up in the tree");
+    }
+
+    #[test]
+    fn spec_warnings_flag_what_mdnav_cannot_send_or_run() {
+        let plain =
+            parse_request("info:\n  type: http\nhttp:\n  method: GET\n  url: https://api.test\n")
+                .unwrap();
+        assert!(!spec_has_warnings(&plain));
+        assert!(spec_has_warnings(&HttpRequestSpec {
+            body: Body::Unsupported(String::from("multipart")),
+            ..plain.clone()
+        }));
+        assert!(spec_has_warnings(&HttpRequestSpec {
+            auth: Auth::Unsupported(String::from("oauth2")),
+            ..plain.clone()
+        }));
+        assert!(spec_has_warnings(&HttpRequestSpec {
+            assertion_count: 1,
+            ..plain
+        }));
     }
 
     #[test]
@@ -2148,12 +2232,14 @@ docs: Creates a user.
             method: method.to_string(),
             url,
             headers: vec![(String::from("Authorization"), String::from("Bearer abc"))],
+            params: Vec::new(),
             body,
             settings: RequestSettings {
                 timeout: Some(Duration::from_secs(10)),
                 ..RequestSettings::default()
             },
             auth_label: String::from("bearer"),
+            auth_fields: Vec::new(),
             unresolved: Vec::new(),
             warnings: Vec::new(),
         }

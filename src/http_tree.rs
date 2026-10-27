@@ -21,6 +21,9 @@ pub enum HttpNodeKind {
 pub struct RequestMeta {
     pub name: Option<String>,
     pub method: Option<String>,
+    /// The file could not be read as a request, or it uses something mdnav
+    /// cannot send or run.
+    pub warning: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,6 +34,8 @@ pub struct HttpTreeNode {
     /// Uppercase method of a request; `None` for folders and for requests
     /// that could not be read.
     pub method: Option<String>,
+    /// See `RequestMeta::warning`; always false on folders.
+    pub warning: bool,
     pub children: Vec<HttpTreeNode>,
 }
 
@@ -41,6 +46,7 @@ pub struct HttpTreeRow {
     pub kind: HttpNodeKind,
     pub label: String,
     pub method: Option<String>,
+    pub warning: bool,
     pub depth: usize,
     pub expanded: bool,
     /// Index into `HttpTree::collections` of the collection holding the row.
@@ -61,6 +67,7 @@ pub fn build_collection(
         kind: HttpNodeKind::Collection,
         label: file_label(root),
         method: None,
+        warning: false,
         children: build_children(root, &requests, &meta),
     }
 }
@@ -97,12 +104,17 @@ fn build_children(
             label: file_label(&path),
             kind: HttpNodeKind::Folder,
             method: None,
+            warning: false,
             children: build_children(&path, &inner, meta),
             path,
         }
     });
     let leaf_nodes = leaves.into_iter().map(|path| {
-        let RequestMeta { name, method } = meta(path);
+        let RequestMeta {
+            name,
+            method,
+            warning,
+        } = meta(path);
         let label = name
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| {
@@ -116,6 +128,7 @@ fn build_children(
             kind: HttpNodeKind::Request,
             label,
             method,
+            warning,
             children: Vec::new(),
         }
     });
@@ -144,6 +157,7 @@ pub fn flatten(collections: &[HttpTreeNode], expanded: &BTreeSet<PathBuf>) -> Ve
             kind: node.kind,
             label: node.label.clone(),
             method: node.method.clone(),
+            warning: node.warning,
             depth,
             expanded: is_expanded,
             collection,
@@ -317,6 +331,7 @@ mod tests {
         let node = build_collection(&root, &requests, |path| RequestMeta {
             name: (path.file_stem().unwrap() == "login").then(|| String::from("Log in")),
             method: Some(String::from("GET")),
+            warning: path.file_stem().unwrap() == "zeta",
         });
         let mut tree = HttpTree::default();
         tree.set_collections(vec![node]);
@@ -367,6 +382,13 @@ mod tests {
         assert!(tree.rows[0].expanded);
         assert_eq!(tree.rows[1].depth, 1);
         assert!(tree.rows.iter().all(|row| row.collection == 0));
+        let warned: Vec<_> = tree
+            .rows
+            .iter()
+            .filter(|row| row.warning)
+            .map(|row| row.label.as_str())
+            .collect();
+        assert_eq!(warned, ["zeta"], "the leaf warning reaches its row");
     }
 
     #[test]

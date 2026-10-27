@@ -24,7 +24,7 @@ El cliente ocupa toda la pantalla: a la izquierda el árbol de collections, fold
 - `e` abre el selector de environments.
 - Bajá hasta `public` con `j` y `Enter`.
 
-En el panel Request, `Environment` pasa a `public`.
+El título del panel Request pasa a `env: public` y la URL se muestra resuelta, con la plantilla original abajo en gris.
 
 **3. Enviá**
 
@@ -105,6 +105,10 @@ api/
 | `{{nombre}}` | collection < environment < folders (gana el más específico) |
 | `{{process.env.NOMBRE}}` | `.env` de la collection y después el entorno del proceso |
 | `secret: true` en un environment | se busca por nombre en `.env` |
+
+El panel Request muestra el request ya resuelto: params, headers, auth (y de dónde se hereda), las primeras líneas del body, settings y docs. Los valores con pinta de secreto (`Authorization`, tokens, API keys, cookies) se ven enmascarados, como `Bearer eyJh…`, y las variables sin resolver quedan en rojo.
+
+Arriba de todo, un bloque **Avisos** junta lo que conviene revisar antes de enviar: variables sin resolver, un environment elegido que ya no existe, `folder.yml` o environments con errores, auth o body no soportados y scripts o assertions que no se ejecutan. Si el YAML no se puede leer, el panel muestra el error en lugar del detalle. En el árbol, un `!` amarillo marca los requests ilegibles o que usan algo que mdnav no envía ni ejecuta.
 
 Al enviar, la barra inferior avisa cuántas variables quedaron sin resolver. Si alguna está en la URL, el request no se envía y mdnav te pide elegir un environment.
 

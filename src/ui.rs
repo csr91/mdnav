@@ -18,6 +18,7 @@ use crate::{
     },
     config::{config_path, TreeInfoMode},
     http::{self, HttpResponse},
+    http_detail::{self, method_color},
     http_tree::{HttpNodeKind, HttpTreeRow},
     strings::Strings,
 };
@@ -1012,7 +1013,8 @@ fn response_tabs_line(app: &App, response: &HttpResponse) -> Line<'static> {
     Line::from(spans)
 }
 
-fn response_tab_lines(app: &App, response: &HttpResponse) -> Vec<Line<'static>> {
+/// Lines of the active response tab. `App` counts them to clamp the scroll.
+pub(crate) fn response_tab_lines(app: &App, response: &HttpResponse) -> Vec<Line<'static>> {
     let gray = Style::default().fg(Color::Gray);
     match app.http.response_tab {
         ResponseTab::Body => {
@@ -1172,6 +1174,14 @@ fn http_tree_item(row: &HttpTreeRow) -> ListItem<'static> {
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::raw(row.label.clone()));
+            if row.warning {
+                spans.push(Span::styled(
+                    " !",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
         }
     }
     ListItem::new(Line::from(spans))
@@ -1187,73 +1197,27 @@ fn method_tag(method: &str) -> &str {
     }
 }
 
-fn method_color(method: &str) -> Color {
-    match method {
-        "GET" => Color::Green,
-        "POST" => Color::Yellow,
-        "PUT" => Color::Blue,
-        "PATCH" => Color::Magenta,
-        "DELETE" => Color::Red,
-        _ => Color::Gray,
-    }
-}
-
 fn render_client_request_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let title = match &app.http.view {
+        Some(view) => format!(
+            " Request · {} · env: {} ",
+            view.collection_root
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            view.environment.as_deref().unwrap_or("ninguno")
+        ),
+        None => String::from(" Request "),
+    };
     let block = Block::default()
-        .title(" Request ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(if app.http.client.focus == HttpPane::Request {
             Style::default().fg(Color::Green)
         } else {
             border_style(false)
         });
-    let lines = if let Some(view) = &app.http.view {
-        if let Some(spec) = &view.spec {
-            let mut lines = vec![
-                Line::from(vec![
-                    Span::styled(
-                        format!("{}  ", spec.method),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(spec.url.clone()),
-                ]),
-                Line::from(Span::styled(
-                    format!(
-                        "Collection: {}",
-                        view.collection_root
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                    ),
-                    Style::default().fg(Color::Gray),
-                )),
-                Line::from(Span::styled(
-                    format!(
-                        "Environment: {}",
-                        view.environment.as_deref().unwrap_or("ninguno")
-                    ),
-                    Style::default().fg(Color::Gray),
-                )),
-            ];
-            if !spec.headers.is_empty() {
-                lines.push(Line::from(format!("Headers: {}", spec.headers.len())));
-            }
-            if let Some(docs) = &spec.docs {
-                lines.extend(docs.lines().map(Line::from));
-            }
-            lines
-        } else {
-            vec![Line::from("Request inválido o no compatible")]
-        }
-    } else {
-        vec![
-            Line::from("Selecciona o crea un request"),
-            Line::from(""),
-            Line::from("l/→ abre carpetas · N crea un request · S envía"),
-        ]
-    };
+    let lines = http_detail::request_detail_lines(app.http.view.as_ref());
     frame.render_widget(
         Paragraph::new(
             lines

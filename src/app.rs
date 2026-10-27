@@ -17,11 +17,12 @@ use crate::{
         parent_dir_if_within, DocItem,
     },
     http::{self, HttpResponse},
+    http_detail,
     http_tree::{self, HttpTree, RequestMeta},
     markdown::{
         load_preview, mermaid_terminal_canvas, MermaidBlock, MermaidCanvas, PreviewDocument,
     },
-    postman,
+    postman, ui,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -378,10 +379,15 @@ pub struct HttpSession {
 pub struct HttpView {
     pub collection_root: PathBuf,
     pub request_path: PathBuf,
-    /// `None` when the YAML could not be read as a request.
-    pub spec: Option<http::HttpRequestSpec>,
+    /// The request as written and as it goes out with the active environment,
+    /// or why its YAML could not be read as a request.
+    pub request: Result<(http::HttpRequestSpec, http::ResolvedRequest), String>,
     pub environment: Option<String>,
-    pub environments: Vec<http::Environment>,
+    /// The environment chosen for the collection when its file is gone: it
+    /// then counts as none.
+    pub missing_environment: Option<String>,
+    /// `environments/*.yml` files that could not be read.
+    pub environment_errors: Vec<String>,
 }
 
 pub struct HttpState {
@@ -1399,33 +1405,17 @@ impl App {
         }
     }
 
-    /// Lines of the client's request detail, as `ui::render_client_request_detail`
-    /// builds them. Used to clamp its scroll.
+    /// Lines of the client's request detail, built by the same function that
+    /// renders it. Used to clamp its scroll.
     fn request_detail_line_count(&self) -> usize {
-        match &self.http.view {
-            Some(HttpView {
-                spec: Some(spec), ..
-            }) => {
-                3 + usize::from(!spec.headers.is_empty())
-                    + spec.docs.as_deref().map_or(0, |docs| docs.lines().count())
-            }
-            Some(_) => 1,
-            None => 3,
-        }
+        http_detail::request_detail_lines(self.http.view.as_ref()).len()
     }
 
-    /// Lines of the active response tab, as `ui::response_tab_lines` builds
-    /// them. Used to clamp its scroll.
+    /// Lines of the active response tab, built by the same function that
+    /// renders it. Used to clamp its scroll.
     fn response_line_count(&self) -> usize {
-        let Some(response) = self.current_http_response() else {
-            return 0;
-        };
-        match self.http.response_tab {
-            ResponseTab::Body if response.error.is_some() => 3,
-            ResponseTab::Body => response.body_lines.len().max(1) + usize::from(response.truncated),
-            ResponseTab::Headers => response.headers.len().max(1),
-            ResponseTab::Info => 7,
-        }
+        self.current_http_response()
+            .map_or(0, |response| ui::response_tab_lines(self, response).len())
     }
 
     /// Shift+E in the client: edits the selected request the way Shift+E edits
@@ -3459,23 +3449,35 @@ impl App {
             return;
         };
 
-        let (environments, _) = http::load_environments(&root);
+        let (environments, environment_errors) = http::load_environments(&root);
         // An environment that no longer exists counts as none.
-        let environment = self
-            .active_environment_name(&root)
-            .filter(|name| environments.iter().any(|env| env.name == *name));
-        let spec = fs::read_to_string(&path)
+        let active = self.active_environment_name(&root);
+        let environment = active
+            .as_deref()
+            .and_then(|name| environments.iter().find(|env| env.name == name));
+        let missing_environment = active.filter(|_| environment.is_none());
+        let request = fs::read_to_string(&path)
             .map_err(anyhow::Error::from)
             .and_then(|content| http::parse_request(&content))
-            .ok();
+            .map(|spec| {
+                let resolved = http::resolve_request(&root, &path, &spec, environment);
+                (spec, resolved)
+            })
+            .map_err(|err| format!("{err:#}"));
 
         self.http.view = Some(HttpView {
+            environment: environment.map(|env| env.name.clone()),
             collection_root: root,
             request_path: path,
-            spec,
-            environment,
-            environments,
+            request,
+            missing_environment,
+            environment_errors,
         });
+        // A different environment can make the detail shorter.
+        self.http.request_scroll = self
+            .http
+            .request_scroll
+            .min(self.request_detail_line_count().saturating_sub(1));
     }
 
     /// Status shown when opening a request or a Postman export.
@@ -3518,16 +3520,11 @@ Abri un .yml de una collection (una carpeta con opencollection.yml) o crea una c
         let Some(view) = self.http.view.as_ref() else {
             return Ok(());
         };
-        let Some(spec) = view.spec.as_ref() else {
+        let Ok((_, resolved)) = &view.request else {
             self.status = String::from("El request tiene errores: revisalo con Shift+E");
             return Ok(());
         };
-        let environment = view
-            .environment
-            .as_deref()
-            .and_then(|name| view.environments.iter().find(|env| env.name == name));
-        let resolved =
-            http::resolve_request(&view.collection_root, &view.request_path, spec, environment);
+        let resolved = resolved.clone();
         // A URL with unresolved variables cannot reach any server.
         if resolved.url.contains("{{") {
             let in_url: Vec<&str> = resolved
@@ -4383,16 +4380,23 @@ fn build_http_tree(roots: &[PathBuf]) -> Vec<http_tree::HttpTreeNode> {
         .collect()
 }
 
+/// Only what the parsed file tells: the warning flag skips folders, `.env` and
+/// environments, which a full resolution per leaf would have to read.
 fn read_request_meta(path: &Path) -> RequestMeta {
     let spec = fs::read_to_string(path)
         .ok()
         .and_then(|content| http::parse_request(&content).ok());
     match spec {
         Some(spec) => RequestMeta {
+            warning: http::spec_has_warnings(&spec),
             name: Some(spec.name),
             method: Some(spec.method),
         },
-        None => RequestMeta::default(),
+        // An unreadable request is worth a warning of its own.
+        None => RequestMeta {
+            warning: true,
+            ..RequestMeta::default()
+        },
     }
 }
 
