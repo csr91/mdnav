@@ -12,9 +12,9 @@ use std::time::Duration;
 use crate::markdown::{PreviewLine, PreviewLineKind};
 use crate::{
     app::{
-        App, CreateKind, CreateStep, FileOpKind, Focus, FullscreenPanel, GitState, GitStatusKind,
-        HelpSection, HttpPane, Overlay, PreviewCursor, ResponseTab, Screen, HTTP_MENU_ITEMS,
-        RESPONSE_TABS,
+        http_footer_hints, http_key_sections, App, CreateKind, CreateStep, FileOpKind, Focus,
+        FullscreenPanel, GitState, GitStatusKind, HelpSection, HttpPane, Overlay, PreviewCursor,
+        ResponseTab, Screen, HTTP_MENU_ITEMS, RESPONSE_TABS,
     },
     config::{config_path, TreeInfoMode},
     http::{self, HttpResponse},
@@ -178,6 +178,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::HttpMenu => render_http_menu_popup(frame, app),
         Overlay::HttpEnv => render_http_env_popup(frame, app),
         Overlay::HttpInput => render_http_input_popup(frame, app),
+        Overlay::HttpHelp => render_http_help_popup(frame, app),
         Overlay::Rename => {}
         Overlay::None => {}
     }
@@ -215,7 +216,7 @@ fn mode_label(app: &App) -> (&'static str, Color) {
         Overlay::Find => ("FIND", Color::Magenta),
         Overlay::Search => ("FILES", Color::Cyan),
         Overlay::Git => ("GIT", Color::Yellow),
-        Overlay::Help => ("HELP", Color::Yellow),
+        Overlay::Help | Overlay::HttpHelp => ("HELP", Color::Yellow),
         Overlay::RecentFiles => ("RECENT", Color::Cyan),
         Overlay::Toc => ("TOC", Color::Magenta),
         Overlay::Create | Overlay::Rename | Overlay::DestPicker | Overlay::Alert => {
@@ -299,20 +300,17 @@ fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
 /// Footer of `Screen::Http`, laid out like `context_footer_spans`: the
 /// focused pane, its keys, the request on the wire and the status.
 fn http_client_footer_spans(app: &App) -> Vec<Span<'static>> {
-    let (focus, hint) = match app.http.client.focus {
-        HttpPane::Tree => (
-            "COLLECTIONS",
-            "↑↓/jk mover · l/→ abrir · h/← cerrar · Enter entrar · S enviar · E editar · N nuevo · C collection · I importar · e env · M menú · Tab panel · Esc/q salir  ",
-        ),
-        HttpPane::Request => (
-            "REQUEST",
-            "↑↓/jk scroll · S enviar · E editar · y copiar body · e env · Tab panel · Esc árbol  ",
-        ),
-        HttpPane::Response => (
-            "RESPONSE",
-            "↑↓/jk scroll · g/G inicio/fin · []/hl tabs · y copiar body · S enviar · Tab panel · Esc árbol  ",
-        ),
+    let pane = app.http.client.focus;
+    let focus = match pane {
+        HttpPane::Tree => "COLLECTIONS",
+        HttpPane::Request => "REQUEST",
+        HttpPane::Response => "RESPONSE",
     };
+    // The same table as the `?` help, so the two cannot drift apart.
+    let hint = format!(
+        "{}  ",
+        http_footer_hints(pane).collect::<Vec<_>>().join(" · ")
+    );
     let mut spans = vec![
         footer_focus_span(focus),
         Span::styled(hint, Style::default().fg(Color::Gray)),
@@ -1678,6 +1676,86 @@ fn render_shortcuts_help(frame: &mut Frame, area: Rect, s: &'static Strings) {
             *pane,
         );
     }
+}
+
+/// `?` on `Screen::Http`: every key of the client, framed like the markdown
+/// help, in one scrollable column.
+fn render_http_help_popup(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    let popup_area = Rect {
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(4).max(1),
+        height: area.height.saturating_sub(3).max(1),
+    };
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Ayuda · HTTP Client ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    frame.render_widget(block, popup_area);
+
+    let inner = Rect {
+        x: popup_area.x.saturating_add(2),
+        y: popup_area.y.saturating_add(1),
+        width: popup_area.width.saturating_sub(4),
+        height: popup_area.height.saturating_sub(2),
+    };
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let lines: Vec<Line> = http_help_lines(app.http.client.focus)
+        .into_iter()
+        .skip(app.http.help_scroll)
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new("↑↓/jk scroll · PgUp/PgDn · g/G inicio/fin · ? o Esc cerrar")
+            .style(Style::default().fg(Color::Gray))
+            .alignment(Alignment::Center),
+        sections[1],
+    );
+}
+
+/// The help's lines, counted by `app::http_help_line_count`: per section a
+/// title and its keys, with a blank line between sections. The focused pane
+/// comes first and stands out.
+fn http_help_lines(focus: HttpPane) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for section in http_key_sections(focus) {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        let title = if section.pane == Some(focus) {
+            Span::styled(
+                format!("{} · panel actual", section.title),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(
+                section.title,
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+        lines.push(Line::from(title));
+        lines.extend(
+            section
+                .keys
+                .iter()
+                .map(|key| shortcut_line(key.keys, key.action)),
+        );
+    }
+    lines
 }
 
 fn render_web_link_popup(frame: &mut Frame, app: &App) {

@@ -77,6 +77,7 @@ pub enum Overlay {
     HttpMenu,
     HttpEnv,
     HttpInput,
+    HttpHelp,
 }
 
 /// The single reversible file operation kept around for `undo`. Nothing is ever
@@ -212,6 +213,154 @@ pub const HTTP_MENU_ITEMS: &[(&str, &str)] = &[
     ("copy", "copiar el body de la response  (y)"),
 ];
 
+/// One key of the HTTP client, as the `?` help lists it.
+pub struct HttpKey {
+    pub keys: &'static str,
+    pub action: &'static str,
+    /// Short form for the footer of `hint_panes`; help-only keys have none.
+    pub hint: &'static str,
+    pub hint_panes: &'static [HttpPane],
+}
+
+impl HttpKey {
+    const fn new(keys: &'static str, action: &'static str) -> Self {
+        Self {
+            keys,
+            action,
+            hint: "",
+            hint_panes: &[],
+        }
+    }
+
+    const fn hinted(self, hint: &'static str, hint_panes: &'static [HttpPane]) -> Self {
+        Self {
+            hint,
+            hint_panes,
+            ..self
+        }
+    }
+}
+
+/// The global keys of the HTTP client (`pane: None`) or those of one pane.
+pub struct HttpKeySection {
+    pub pane: Option<HttpPane>,
+    pub title: &'static str,
+    pub keys: &'static [HttpKey],
+}
+
+const ALL_PANES: &[HttpPane] = &HttpPane::ALL;
+const TREE: &[HttpPane] = &[HttpPane::Tree];
+const REQUEST: &[HttpPane] = &[HttpPane::Request];
+const RESPONSE: &[HttpPane] = &[HttpPane::Response];
+
+/// Every key `handle_http_client_key` handles. The `?` help and the footer
+/// hints both read it, so keep it in step with that handler.
+pub const HTTP_KEY_SECTIONS: &[HttpKeySection] = &[
+    HttpKeySection {
+        pane: None,
+        title: "Globales",
+        keys: &[
+            HttpKey::new("S", "enviar el request seleccionado").hinted("S enviar", ALL_PANES),
+            HttpKey::new(
+                "E",
+                "editar el YAML del request; al cerrar el editor vuelve al cliente",
+            )
+            .hinted("E editar", &[HttpPane::Tree, HttpPane::Request]),
+            HttpKey::new("N", "crear un request en la collection activa").hinted("N nuevo", TREE),
+            HttpKey::new("C", "crear una collection en una carpeta nueva")
+                .hinted("C collection", TREE),
+            HttpKey::new(
+                "I",
+                "importar el JSON de Postman seleccionado en el explorador",
+            )
+            .hinted("I importar", TREE),
+            HttpKey::new("e", "elegir el environment de la collection")
+                .hinted("e env", &[HttpPane::Tree, HttpPane::Request]),
+            HttpKey::new("M / m", "menú de acciones HTTP").hinted("M menú", TREE),
+            HttpKey::new("Tab / Shift+Tab", "panel siguiente / anterior")
+                .hinted("Tab panel", ALL_PANES),
+            HttpKey::new(
+                "Esc",
+                "abandona el request en curso; si no hay, vuelve al árbol; en el árbol cierra el cliente",
+            )
+            .hinted("Esc árbol", &[HttpPane::Request, HttpPane::Response]),
+            HttpKey::new("q", "cerrar el cliente").hinted("Esc/q salir", TREE),
+            HttpKey::new("?", "mostrar u ocultar esta ayuda").hinted("? ayuda", ALL_PANES),
+        ],
+    },
+    HttpKeySection {
+        pane: Some(HttpPane::Tree),
+        title: "Árbol de collections",
+        keys: &[
+            HttpKey::new("↑↓ / j k", "mover la selección").hinted("↑↓/jk mover", TREE),
+            HttpKey::new(
+                "→ / l",
+                "abrir la collection o el folder; si ya está abierto, entrar al primer hijo",
+            )
+            .hinted("l/→ abrir", TREE),
+            HttpKey::new("← / h", "cerrar el folder o subir al padre").hinted("h/← cerrar", TREE),
+            HttpKey::new(
+                "Enter",
+                "como l; en un request, ir a su response (o al detalle si todavía no tiene)",
+            )
+            .hinted("Enter entrar", TREE),
+        ],
+    },
+    HttpKeySection {
+        pane: Some(HttpPane::Request),
+        title: "Request",
+        keys: &[
+            HttpKey::new("↑↓ / j k", "scroll del detalle").hinted("↑↓/jk scroll", REQUEST),
+            HttpKey::new("PgUp / PgDn", "scroll de a 20 líneas"),
+            HttpKey::new("g / G", "ir al inicio / al final"),
+            HttpKey::new("y", "copiar el body de la response").hinted("y copiar body", REQUEST),
+        ],
+    },
+    HttpKeySection {
+        pane: Some(HttpPane::Response),
+        title: "Response",
+        keys: &[
+            HttpKey::new("↑↓ / j k", "scroll de la response").hinted("↑↓/jk scroll", RESPONSE),
+            HttpKey::new("PgUp / PgDn", "scroll de a 20 líneas"),
+            HttpKey::new("g / G", "ir al inicio / al final").hinted("g/G inicio/fin", RESPONSE),
+            HttpKey::new("[ ] / h l", "tab anterior / siguiente: Body, Headers, Info")
+                .hinted("[]/hl tabs", RESPONSE),
+            HttpKey::new("y", "copiar el body").hinted("y copiar body", RESPONSE),
+        ],
+    },
+];
+
+/// The help sections in display order: the focused pane first, then the
+/// global keys and the other panes in Tab order.
+pub fn http_key_sections(focus: HttpPane) -> impl Iterator<Item = &'static HttpKeySection> {
+    let focused = HTTP_KEY_SECTIONS
+        .iter()
+        .filter(move |section| section.pane == Some(focus));
+    let rest = HTTP_KEY_SECTIONS
+        .iter()
+        .filter(move |section| section.pane != Some(focus));
+    focused.chain(rest)
+}
+
+/// Footer hints of the focused pane: its own keys, then the global ones.
+pub fn http_footer_hints(focus: HttpPane) -> impl Iterator<Item = &'static str> {
+    http_key_sections(focus)
+        .flat_map(|section| section.keys.iter())
+        .filter(move |key| key.hint_panes.contains(&focus))
+        .map(|key| key.hint)
+}
+
+/// Lines of the HTTP help, as `ui::http_help_lines` builds them: a title and
+/// the keys per section, with a blank line between sections. Used to clamp
+/// its scroll.
+fn http_help_line_count() -> usize {
+    let lines: usize = HTTP_KEY_SECTIONS
+        .iter()
+        .map(|section| 1 + section.keys.len())
+        .sum();
+    lines + HTTP_KEY_SECTIONS.len().saturating_sub(1)
+}
+
 /// HTTP state that outlives a single `App`: Shift+E relaunches the app after
 /// the editor closes, and responses or a request on the wire must survive it.
 #[derive(Default)]
@@ -242,6 +391,8 @@ pub struct HttpState {
     pub response_scroll: usize,
     /// Scroll of the client's request detail.
     pub request_scroll: usize,
+    /// Scroll of the client's `?` help.
+    pub help_scroll: usize,
     pub menu_cursor: usize,
     pub env_root: Option<PathBuf>,
     pub env_options: Vec<String>,
@@ -317,6 +468,7 @@ impl Default for HttpState {
             response_tab: ResponseTab::Body,
             response_scroll: 0,
             request_scroll: 0,
+            help_scroll: 0,
             menu_cursor: 0,
             env_root: None,
             env_options: Vec::new(),
@@ -1105,6 +1257,24 @@ impl App {
                 KeyCode::Char(c) => self.http.input.push(c),
                 _ => {}
             },
+            Overlay::HttpHelp => {
+                let delta = match key.code {
+                    KeyCode::Char('?') | KeyCode::Esc => {
+                        // The client's focus was never touched: it resumes as it was.
+                        self.close_overlay("Ayuda cerrada");
+                        return Ok(());
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => -1,
+                    KeyCode::Down | KeyCode::Char('j') => 1,
+                    KeyCode::PageUp => -HTTP_PAGE_LINES,
+                    KeyCode::PageDown => HTTP_PAGE_LINES,
+                    KeyCode::Char('g') => isize::MIN,
+                    KeyCode::Char('G') => isize::MAX,
+                    _ => return Ok(()),
+                };
+                self.http.help_scroll =
+                    clamped_scroll(self.http.help_scroll, delta, http_help_line_count());
+            }
             Overlay::Rename => match key.code {
                 KeyCode::Esc => self.close_overlay("Renombrar cancelado"),
                 KeyCode::Enter => self.confirm_rename(),
@@ -1200,6 +1370,11 @@ impl App {
             }
             KeyCode::Char('e') => self.open_http_env_picker(),
             KeyCode::Char('m') | KeyCode::Char('M') => self.open_http_menu(),
+            KeyCode::Char('?') => {
+                self.http.help_scroll = 0;
+                self.overlay = Overlay::HttpHelp;
+                self.status = String::from("Ayuda abierta");
+            }
             _ => {}
         }
 
@@ -4710,6 +4885,34 @@ mod tests {
         assert_eq!(HttpPane::Request.cycle(1), HttpPane::Response);
         assert_eq!(HttpPane::Response.cycle(1), HttpPane::Tree);
         assert_eq!(HttpPane::Tree.cycle(-1), HttpPane::Response);
+    }
+
+    #[test]
+    fn http_help_starts_with_the_focused_pane() {
+        let panes: Vec<_> = http_key_sections(HttpPane::Response)
+            .map(|section| section.pane)
+            .collect();
+        assert_eq!(
+            panes,
+            [
+                Some(HttpPane::Response),
+                None,
+                Some(HttpPane::Tree),
+                Some(HttpPane::Request)
+            ]
+        );
+    }
+
+    #[test]
+    fn http_footer_hints_come_from_the_help_table() {
+        let hints: Vec<_> = http_footer_hints(HttpPane::Response).collect();
+        assert_eq!(
+            hints.join(" · "),
+            "↑↓/jk scroll · g/G inicio/fin · []/hl tabs · y copiar body · S enviar · Tab panel · Esc árbol · ? ayuda"
+        );
+        assert!(HttpPane::ALL
+            .iter()
+            .all(|pane| http_footer_hints(*pane).any(|hint| hint == "? ayuda")));
     }
 
     #[test]
