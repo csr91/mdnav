@@ -1,6 +1,6 @@
 # mdnav
 
-Explorador TUI para navegar documentacion Markdown y proyectos MkDocs desde la terminal.
+Explorador TUI para navegar el sistema de archivos desde la terminal.
 
 Navega el arbol de archivos, previsualiza Markdown con syntax highlighting, editá con tu editor favorito y gestioná tu repo git — todo sin salir de la terminal.
 
