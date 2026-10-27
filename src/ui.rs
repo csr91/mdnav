@@ -13,7 +13,8 @@ use crate::markdown::{PreviewLine, PreviewLineKind};
 use crate::{
     app::{
         App, CreateKind, CreateStep, FileOpKind, Focus, FullscreenPanel, GitState, GitStatusKind,
-        HelpSection, Overlay, PreviewCursor, ResponseTab, Screen, HTTP_MENU_ITEMS, RESPONSE_TABS,
+        HelpSection, HttpPane, Overlay, PreviewCursor, ResponseTab, Screen, HTTP_MENU_ITEMS,
+        RESPONSE_TABS,
     },
     config::{config_path, TreeInfoMode},
     http::{self, HttpResponse},
@@ -299,13 +300,17 @@ fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
 /// focused pane, its keys, the request on the wire and the status.
 fn http_client_footer_spans(app: &App) -> Vec<Span<'static>> {
     let (focus, hint) = match app.http.client.focus {
-        0 => (
+        HttpPane::Tree => (
             "COLLECTIONS",
-            "↑↓/jk mover · l/→ abrir · h/← cerrar · Enter response · S enviar · N nuevo · C collection · I importar · e env · M menú · Tab panel · Esc/q volver  ",
+            "↑↓/jk mover · l/→ abrir · h/← cerrar · Enter entrar · S enviar · E editar · N nuevo · C collection · I importar · e env · M menú · Tab panel · Esc/q salir  ",
         ),
-        _ => (
+        HttpPane::Request => (
+            "REQUEST",
+            "↑↓/jk scroll · S enviar · E editar · y copiar body · e env · Tab panel · Esc árbol  ",
+        ),
+        HttpPane::Response => (
             "RESPONSE",
-            "↑↓/jk scroll · []/hl tabs · S enviar · e env · M menú · Tab panel · Esc/q volver  ",
+            "↑↓/jk scroll · g/G inicio/fin · []/hl tabs · y copiar body · S enviar · Tab panel · Esc árbol  ",
         ),
     };
     let mut spans = vec![
@@ -315,8 +320,9 @@ fn http_client_footer_spans(app: &App) -> Vec<Span<'static>> {
 
     if let Some(in_flight) = &app.http.session.in_flight {
         let spinner = spinner_frame(in_flight.started.elapsed());
+        // Esc abandons it before doing anything else.
         spans.push(Span::styled(
-            format!("{spinner} {}  ", in_flight.label),
+            format!("{spinner} {} · Esc abandona  ", in_flight.label),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -862,7 +868,7 @@ fn request_notice_rows(app: &App) -> u16 {
 }
 
 fn render_response(frame: &mut Frame, area: Rect, app: &App) {
-    let focused = app.screen == Screen::Http && app.http.client.focus == 1;
+    let focused = app.screen == Screen::Http && app.http.client.focus == HttpPane::Response;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style(focused));
@@ -905,9 +911,9 @@ fn render_response(frame: &mut Frame, area: Rect, app: &App) {
             )),
             Line::from(""),
             shortcut_line("Shift+S", "enviar el request"),
-            shortcut_line("Tab", "pasar de request a response"),
-            shortcut_line(":httpenv", "elegir environment"),
             shortcut_line("Shift+E", "editar el YAML"),
+            shortcut_line("e", "elegir environment"),
+            shortcut_line("Tab", "cambiar de panel"),
         ];
         if app.http_busy() {
             lines.push(Line::from(""));
@@ -1120,7 +1126,7 @@ fn render_http_client(frame: &mut Frame, area: Rect, app: &App) {
                 Block::default()
                     .title(" Collections ")
                     .borders(Borders::ALL)
-                    .border_style(if app.http.client.focus == 0 {
+                    .border_style(if app.http.client.focus == HttpPane::Tree {
                         Style::default().fg(Color::Green)
                     } else {
                         border_style(false)
@@ -1198,7 +1204,7 @@ fn render_client_request_detail(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .title(" Request ")
         .borders(Borders::ALL)
-        .border_style(if app.http.client.focus == 1 {
+        .border_style(if app.http.client.focus == HttpPane::Request {
             Style::default().fg(Color::Green)
         } else {
             border_style(false)
@@ -1251,9 +1257,14 @@ fn render_client_request_detail(frame: &mut Frame, area: Rect, app: &App) {
         ]
     };
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(app.http.request_scroll)
+                .collect::<Vec<_>>(),
+        )
+        .block(block)
+        .wrap(Wrap { trim: false }),
         area,
     );
 }

@@ -69,7 +69,8 @@ fn run_cli(docs_root: PathBuf) -> Result<()> {
             current_root = app.root.clone();
             // The editor round-trip relaunches the app: carry over what changed
             // in this session (settings, recents, active environments) and the
-            // HTTP responses, including a request still on the wire.
+            // HTTP responses, including a request still on the wire, and whether
+            // to come back to the HTTP client.
             config = app.config.clone();
             http_session = std::mem::take(&mut app.http.session);
             open_in_editor(&path, &app.config.editor)?;
@@ -280,7 +281,7 @@ fn run(
     app.http.session = http_session;
 
     if let Some(path) = resume_path {
-        app.restore_path_focus(&path)?;
+        app.resume_after_edit(&path)?;
     }
 
     while app.running {

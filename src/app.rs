@@ -208,8 +208,8 @@ pub const HTTP_MENU_ITEMS: &[(&str, &str)] = &[
     ("env", "elegir environment  (e)"),
     ("new", "crear un request en la collection  (N)"),
     ("init", "convertir la carpeta actual en una collection"),
-    ("import", "importar el JSON de Postman seleccionado"),
-    ("copy", "copiar el body de la response"),
+    ("import", "importar el JSON de Postman seleccionado  (I)"),
+    ("copy", "copiar el body de la response  (y)"),
 ];
 
 /// HTTP state that outlives a single `App`: Shift+E relaunches the app after
@@ -218,6 +218,9 @@ pub const HTTP_MENU_ITEMS: &[(&str, &str)] = &[
 pub struct HttpSession {
     pub responses: HashMap<PathBuf, HttpResponse>,
     pub in_flight: Option<http::InFlight>,
+    /// Set when Shift+E was pressed in the HTTP client, so the relaunched app
+    /// reopens the client on the edited request instead of the explorer.
+    pub resume_client: bool,
 }
 
 /// A request of an OpenCollection: the one selected in the client's tree on
@@ -237,6 +240,8 @@ pub struct HttpState {
     pub view: Option<HttpView>,
     pub response_tab: ResponseTab,
     pub response_scroll: usize,
+    /// Scroll of the client's request detail.
+    pub request_scroll: usize,
     pub menu_cursor: usize,
     pub env_root: Option<PathBuf>,
     pub env_options: Vec<String>,
@@ -252,13 +257,57 @@ pub struct HttpClientState {
     /// Collections, folders and requests, with their expansion state. The
     /// selected row drives the request detail and the active collection.
     pub tree: HttpTree,
-    /// 0 tree, 1 request detail / response.
-    pub focus: u8,
+    pub focus: HttpPane,
     pub creating_collection: bool,
 }
 
-/// Panes of the HTTP client that `focus` cycles through.
-const HTTP_CLIENT_PANES: u8 = 2;
+/// Panes of the HTTP client, in the order Tab cycles through them. Only the
+/// focused one is highlighted and receives the navigation keys.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HttpPane {
+    #[default]
+    Tree,
+    Request,
+    Response,
+}
+
+impl HttpPane {
+    const ALL: [HttpPane; 3] = [Self::Tree, Self::Request, Self::Response];
+
+    fn cycle(self, delta: isize) -> Self {
+        let index = Self::ALL.iter().position(|pane| *pane == self).unwrap_or(0) as isize;
+        Self::ALL[(index + delta).rem_euclid(Self::ALL.len() as isize) as usize]
+    }
+}
+
+/// What Esc does on `Screen::Http` once overlays are closed: the most local
+/// thing first, so repeated presses walk back out of the client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpEscape {
+    AbandonRequest,
+    FocusTree,
+    CloseClient,
+}
+
+fn http_escape(busy: bool, focus: HttpPane) -> HttpEscape {
+    if busy {
+        HttpEscape::AbandonRequest
+    } else if focus != HttpPane::Tree {
+        HttpEscape::FocusTree
+    } else {
+        HttpEscape::CloseClient
+    }
+}
+
+/// Lines PgUp/PgDn move in the client's request detail and response.
+const HTTP_PAGE_LINES: isize = 20;
+
+/// Moves a scroll offset by `delta`, never past the last of `line_count`
+/// lines, so that line stays on screen.
+fn clamped_scroll(current: usize, delta: isize, line_count: usize) -> usize {
+    let max = line_count.saturating_sub(1) as isize;
+    (current as isize).saturating_add(delta).clamp(0, max) as usize
+}
 
 impl Default for HttpState {
     fn default() -> Self {
@@ -267,6 +316,7 @@ impl Default for HttpState {
             view: None,
             response_tab: ResponseTab::Body,
             response_scroll: 0,
+            request_scroll: 0,
             menu_cursor: 0,
             env_root: None,
             env_options: Vec::new(),
@@ -1072,72 +1122,165 @@ impl App {
 
     /// Keys of `Screen::Http` when no overlay is open.
     fn handle_http_client_key(&mut self, key: KeyEvent) -> Result<()> {
+        let focus = self.http.client.focus;
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.close_http_client(),
-            KeyCode::Tab => {
-                self.http.client.focus = (self.http.client.focus + 1) % HTTP_CLIENT_PANES
-            }
-            KeyCode::BackTab => {
-                self.http.client.focus =
-                    (self.http.client.focus + HTTP_CLIENT_PANES - 1) % HTTP_CLIENT_PANES
-            }
-            KeyCode::Up | KeyCode::Char('k') if self.http.client.focus == 0 => {
+            KeyCode::Esc => match http_escape(self.http_busy(), focus) {
+                HttpEscape::AbandonRequest => self.abandon_http_request(),
+                HttpEscape::FocusTree => self.http.client.focus = HttpPane::Tree,
+                HttpEscape::CloseClient => self.close_http_client(),
+            },
+            KeyCode::Char('q') => self.close_http_client(),
+            KeyCode::Tab => self.http.client.focus = focus.cycle(1),
+            KeyCode::BackTab => self.http.client.focus = focus.cycle(-1),
+            KeyCode::Up | KeyCode::Char('k') if focus == HttpPane::Tree => {
                 self.move_http_tree_cursor(-1)
             }
-            KeyCode::Down | KeyCode::Char('j') if self.http.client.focus == 0 => {
+            KeyCode::Down | KeyCode::Char('j') if focus == HttpPane::Tree => {
                 self.move_http_tree_cursor(1)
             }
-            KeyCode::Right | KeyCode::Char('l') if self.http.client.focus == 0 => {
+            KeyCode::Right | KeyCode::Char('l') if focus == HttpPane::Tree => {
                 self.http.client.tree.expand();
                 self.sync_http_client_selection();
             }
-            KeyCode::Left | KeyCode::Char('h') if self.http.client.focus == 0 => {
+            KeyCode::Left | KeyCode::Char('h') if focus == HttpPane::Tree => {
                 self.http.client.tree.collapse();
                 self.sync_http_client_selection();
             }
-            // On a request the tree has nothing to open: go to its response.
-            KeyCode::Enter if self.http.client.focus == 0 => {
-                if !self.http.client.tree.expand() && self.http.view.is_some() {
-                    self.http.client.focus = 1;
-                }
+            // On a request the tree has nothing to open: go to its response,
+            // or to its detail while it has none.
+            KeyCode::Enter if focus == HttpPane::Tree => {
+                let opened = self.http.client.tree.expand();
                 self.sync_http_client_selection();
+                if !opened && self.http.client.tree.selected_request().is_some() {
+                    self.http.client.focus = if self.current_http_response().is_some() {
+                        HttpPane::Response
+                    } else {
+                        HttpPane::Request
+                    };
+                }
             }
-            KeyCode::Up | KeyCode::Char('k') if self.http.client.focus == 1 => {
-                self.http.response_scroll = self.http.response_scroll.saturating_sub(1)
+            KeyCode::Up | KeyCode::Char('k') if focus != HttpPane::Tree => {
+                self.scroll_http_pane(-1)
             }
-            KeyCode::Down | KeyCode::Char('j') if self.http.client.focus == 1 => {
-                self.http.response_scroll = self.http.response_scroll.saturating_add(1)
+            KeyCode::Down | KeyCode::Char('j') if focus != HttpPane::Tree => {
+                self.scroll_http_pane(1)
             }
-            KeyCode::Char('[') | KeyCode::Char('h') if self.http.client.focus == 1 => {
+            KeyCode::PageUp if focus != HttpPane::Tree => self.scroll_http_pane(-HTTP_PAGE_LINES),
+            KeyCode::PageDown if focus != HttpPane::Tree => self.scroll_http_pane(HTTP_PAGE_LINES),
+            // The clamp turns the extremes into top and bottom.
+            KeyCode::Char('g') if focus != HttpPane::Tree => self.scroll_http_pane(isize::MIN),
+            KeyCode::Char('G') if focus != HttpPane::Tree => self.scroll_http_pane(isize::MAX),
+            KeyCode::Char('[') | KeyCode::Char('h') if focus == HttpPane::Response => {
                 self.move_response_tab(-1)
             }
-            KeyCode::Char(']') | KeyCode::Char('l') if self.http.client.focus == 1 => {
+            KeyCode::Char(']') | KeyCode::Char('l') if focus == HttpPane::Response => {
                 self.move_response_tab(1)
             }
-            KeyCode::Char('s') | KeyCode::Char('S') => {
+            KeyCode::Char('y') if focus != HttpPane::Tree => self.copy_response_body()?,
+            // Like in the explorer, actions that send or write files are Shift-only.
+            KeyCode::Char('S') => {
                 if self.http.client.tree.selected_request().is_some() {
                     self.send_http_request()?;
                 } else {
                     self.status = String::from("Selecciona un request para enviarlo");
                 }
             }
-            KeyCode::Char('n') | KeyCode::Char('N') => self.start_client_request_input(),
-            KeyCode::Char('c') | KeyCode::Char('C') => {
+            KeyCode::Char('E') => self.edit_http_request(),
+            KeyCode::Char('N') => self.start_client_request_input(),
+            KeyCode::Char('C') => {
                 self.http.input.clear();
                 self.http.client.creating_collection = true;
                 self.overlay = Overlay::HttpInput;
                 self.status = String::from("Ruta de carpeta nueva para la collection:");
             }
-            KeyCode::Char('e') => self.open_http_env_picker(),
-            KeyCode::Char('i') | KeyCode::Char('I') => {
+            KeyCode::Char('I') => {
                 self.import_postman_selected()?;
                 self.reload_http_client_tree();
                 self.sync_http_client_selection();
             }
+            KeyCode::Char('e') => self.open_http_env_picker(),
             KeyCode::Char('m') | KeyCode::Char('M') => self.open_http_menu(),
             _ => {}
         }
 
+        Ok(())
+    }
+
+    /// Scrolls the focused request detail or response, clamped to its lines.
+    fn scroll_http_pane(&mut self, delta: isize) {
+        match self.http.client.focus {
+            HttpPane::Tree => {}
+            HttpPane::Request => {
+                self.http.request_scroll = clamped_scroll(
+                    self.http.request_scroll,
+                    delta,
+                    self.request_detail_line_count(),
+                )
+            }
+            HttpPane::Response => {
+                self.http.response_scroll =
+                    clamped_scroll(self.http.response_scroll, delta, self.response_line_count())
+            }
+        }
+    }
+
+    /// Lines of the client's request detail, as `ui::render_client_request_detail`
+    /// builds them. Used to clamp its scroll.
+    fn request_detail_line_count(&self) -> usize {
+        match &self.http.view {
+            Some(HttpView {
+                spec: Some(spec), ..
+            }) => {
+                3 + usize::from(!spec.headers.is_empty())
+                    + spec.docs.as_deref().map_or(0, |docs| docs.lines().count())
+            }
+            Some(_) => 1,
+            None => 3,
+        }
+    }
+
+    /// Lines of the active response tab, as `ui::response_tab_lines` builds
+    /// them. Used to clamp its scroll.
+    fn response_line_count(&self) -> usize {
+        let Some(response) = self.current_http_response() else {
+            return 0;
+        };
+        match self.http.response_tab {
+            ResponseTab::Body if response.error.is_some() => 3,
+            ResponseTab::Body => response.body_lines.len().max(1) + usize::from(response.truncated),
+            ResponseTab::Headers => response.headers.len().max(1),
+            ResponseTab::Info => 7,
+        }
+    }
+
+    /// Shift+E in the client: edits the selected request the way Shift+E edits
+    /// a file in the explorer, and asks the relaunched app to come back here.
+    fn edit_http_request(&mut self) {
+        let Some(path) = self
+            .http
+            .client
+            .tree
+            .selected_request()
+            .map(Path::to_path_buf)
+        else {
+            self.status = String::from("Selecciona un request para editarlo");
+            return;
+        };
+        self.http.session.resume_client = true;
+        self.pending_external_edit = Some(path);
+        self.running = false;
+        self.status = format!("Relanzando mdnav despues de {}", self.config.editor);
+    }
+
+    /// Reopens `path` once the external editor closes (see `main.rs`), and the
+    /// HTTP client on it when the edit started there.
+    pub fn resume_after_edit(&mut self, path: &Path) -> Result<()> {
+        self.restore_path_focus(path)?;
+        if std::mem::take(&mut self.http.session.resume_client) {
+            // The explorer now has the request open, so the client lands on it.
+            self.open_http_client();
+            self.status = format!("Request editado: {}", display_name(path));
+        }
         Ok(())
     }
 
@@ -3164,10 +3307,12 @@ impl App {
     fn http_open_status(&self, path: &Path) -> Option<String> {
         if let Some(view) = &self.http.view {
             let environment = view.environment.as_deref().unwrap_or("sin environment");
-            let hint = if self.screen == Screen::Http {
-                "Shift+S envia · Tab va a la response"
-            } else {
+            let hint = if self.screen != Screen::Http {
                 "Enter en el preview abre en HTTP Client"
+            } else if self.http.session.responses.contains_key(path) {
+                "Shift+S envia · Enter ve la response"
+            } else {
+                "Shift+S envia · Shift+E edita el YAML"
             };
             return Some(format!("Request HTTP · env: {environment} · {hint}"));
         }
@@ -3343,7 +3488,7 @@ Elegi un environment con :httpenv o definilas en la collection.",
         if let Some(root) = tree.active_collection().map(Path::to_path_buf) {
             tree.expand_path(&root);
         }
-        self.http.client.focus = 0;
+        self.http.client.focus = HttpPane::Tree;
         self.overlay = Overlay::None;
         self.sync_http_client_selection();
         self.status = String::from("HTTP Client");
@@ -3379,6 +3524,7 @@ Elegi un environment con :httpenv o definilas en la collection.",
             .map(|view| view.request_path.clone());
         if current != previous {
             self.http.response_scroll = 0;
+            self.http.request_scroll = 0;
             if let Some(path) = current {
                 if let Some(status) = self.http_open_status(&path) {
                     self.status = status;
@@ -3592,7 +3738,7 @@ Elegi un environment con :httpenv o definilas en la collection.",
         self.screen = Screen::Http;
         self.reveal_in_http_client(&path);
         self.http.client.tree.expand_path(&path);
-        self.http.client.focus = 0;
+        self.http.client.focus = HttpPane::Tree;
         self.status = format!(
             "Collection creada en {} ({} archivos)",
             path.display(),
@@ -4531,6 +4677,39 @@ mod tests {
         assert_eq!(parse_git_status_line(""), None);
         assert_eq!(parse_git_status_line("M"), None);
         assert_eq!(parse_git_status_line("   "), None);
+    }
+
+    #[test]
+    fn clamps_scroll_to_the_content() {
+        assert_eq!(clamped_scroll(0, -1, 10), 0);
+        assert_eq!(clamped_scroll(3, 1, 10), 4);
+        assert_eq!(clamped_scroll(8, HTTP_PAGE_LINES, 10), 9);
+        assert_eq!(clamped_scroll(5, isize::MIN, 10), 0);
+        assert_eq!(clamped_scroll(5, isize::MAX, 10), 9);
+        // Content that shrank pulls the offset back; no content means no scroll.
+        assert_eq!(clamped_scroll(40, 0, 10), 9);
+        assert_eq!(clamped_scroll(3, 1, 0), 0);
+    }
+
+    #[test]
+    fn esc_walks_back_out_of_the_http_client() {
+        for focus in HttpPane::ALL {
+            assert_eq!(http_escape(true, focus), HttpEscape::AbandonRequest);
+        }
+        assert_eq!(http_escape(false, HttpPane::Request), HttpEscape::FocusTree);
+        assert_eq!(
+            http_escape(false, HttpPane::Response),
+            HttpEscape::FocusTree
+        );
+        assert_eq!(http_escape(false, HttpPane::Tree), HttpEscape::CloseClient);
+    }
+
+    #[test]
+    fn tab_cycles_the_http_panes() {
+        assert_eq!(HttpPane::Tree.cycle(1), HttpPane::Request);
+        assert_eq!(HttpPane::Request.cycle(1), HttpPane::Response);
+        assert_eq!(HttpPane::Response.cycle(1), HttpPane::Tree);
+        assert_eq!(HttpPane::Tree.cycle(-1), HttpPane::Response);
     }
 
     #[test]
