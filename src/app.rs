@@ -36,6 +36,15 @@ pub enum FullscreenPanel {
     Preview,
 }
 
+/// The top-level view that owns the body. Overlays draw on top of it and
+/// closing one returns to whichever screen is active.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Screen {
+    #[default]
+    Markdown,
+    Http,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MermaidOutputMode {
     Terminal,
@@ -65,7 +74,6 @@ pub enum Overlay {
     DestPicker,
     Alert,
     HttpMenu,
-    HttpClient,
     HttpEnv,
     HttpInput,
 }
@@ -234,13 +242,20 @@ pub struct HttpState {
     /// 0 is "no environment", then `env_options` in order.
     pub env_cursor: usize,
     pub input: String,
-    pub client_root: Option<PathBuf>,
-    pub client_collections: Vec<PathBuf>,
-    pub client_collection_cursor: usize,
-    pub client_requests: Vec<PathBuf>,
-    pub client_cursor: usize,
-    pub client_focus: u8,
-    pub client_creating_collection: bool,
+    pub client: HttpClientState,
+}
+
+/// State of the fullscreen HTTP client (`Screen::Http`).
+#[derive(Default)]
+pub struct HttpClientState {
+    pub root: Option<PathBuf>,
+    pub collections: Vec<PathBuf>,
+    pub collection_cursor: usize,
+    pub requests: Vec<PathBuf>,
+    pub cursor: usize,
+    /// 0 collections, 1 requests, 2 request detail / response.
+    pub focus: u8,
+    pub creating_collection: bool,
 }
 
 impl Default for HttpState {
@@ -256,13 +271,7 @@ impl Default for HttpState {
             env_options: Vec::new(),
             env_cursor: 0,
             input: String::new(),
-            client_root: None,
-            client_collections: Vec::new(),
-            client_collection_cursor: 0,
-            client_requests: Vec::new(),
-            client_cursor: 0,
-            client_focus: 0,
-            client_creating_collection: false,
+            client: HttpClientState::default(),
         }
     }
 }
@@ -283,6 +292,7 @@ pub struct App {
     pub focus: Focus,
     pub fullscreen: FullscreenPanel,
     pub split_level: u8,
+    pub screen: Screen,
     pub overlay: Overlay,
     pub mermaid_selected_index: usize,
     pub mermaid_output_selected_index: usize,
@@ -396,6 +406,7 @@ impl App {
             focus: Focus::Tree,
             fullscreen: FullscreenPanel::None,
             split_level: 3,
+            screen: Screen::default(),
             overlay: Overlay::None,
             mermaid_selected_index: 0,
             mermaid_output_selected_index: 0,
@@ -477,6 +488,10 @@ impl App {
 
         if self.overlay != Overlay::None {
             return self.handle_overlay_key(key);
+        }
+
+        if self.screen == Screen::Http {
+            return self.handle_http_client_key(key);
         }
 
         if self.selection.is_some() {
@@ -1012,89 +1027,6 @@ impl App {
                 KeyCode::Enter => self.run_http_menu_item()?,
                 _ => {}
             },
-            Overlay::HttpClient => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("HTTP Client cerrado"),
-                KeyCode::Tab => self.http.client_focus = (self.http.client_focus + 1) % 3,
-                KeyCode::BackTab => self.http.client_focus = (self.http.client_focus + 2) % 3,
-                KeyCode::Left | KeyCode::Char('[') if self.http.client_focus == 0 => {
-                    self.shift_http_collection(-1)
-                }
-                KeyCode::Right | KeyCode::Char(']') if self.http.client_focus == 0 => {
-                    self.shift_http_collection(1)
-                }
-                KeyCode::Up | KeyCode::Char('k') if self.http.client_focus == 0 => {
-                    self.shift_http_collection(-1)
-                }
-                KeyCode::Down | KeyCode::Char('j') if self.http.client_focus == 0 => {
-                    self.shift_http_collection(1)
-                }
-                KeyCode::Up | KeyCode::Char('k') if self.http.client_focus == 1 => {
-                    self.http.client_cursor = self.http.client_cursor.saturating_sub(1);
-                    self.open_client_cursor_request()?;
-                }
-                KeyCode::Down | KeyCode::Char('j') if self.http.client_focus == 1 => {
-                    self.http.client_cursor = (self.http.client_cursor + 1)
-                        .min(self.http.client_requests.len().saturating_sub(1));
-                    self.open_client_cursor_request()?;
-                }
-                KeyCode::Up | KeyCode::Char('k') if self.http.client_focus == 2 => {
-                    self.http.response_scroll = self.http.response_scroll.saturating_sub(1)
-                }
-                KeyCode::Down | KeyCode::Char('j') if self.http.client_focus == 2 => {
-                    self.http.response_scroll = self.http.response_scroll.saturating_add(1)
-                }
-                KeyCode::Char('[') | KeyCode::Char('h') if self.http.client_focus == 2 => {
-                    self.move_response_tab(-1)
-                }
-                KeyCode::Char(']') | KeyCode::Char('l') if self.http.client_focus == 2 => {
-                    self.move_response_tab(1)
-                }
-                KeyCode::Enter => {
-                    self.open_client_cursor_request()?;
-                    self.http.client_focus = 2;
-                }
-                KeyCode::Char('s') | KeyCode::Char('S') => {
-                    if let Some(path) = self
-                        .http
-                        .client_requests
-                        .get(self.http.client_cursor)
-                        .cloned()
-                    {
-                        self.open_file(path)?;
-                        self.send_http_request()?;
-                    } else {
-                        self.status = String::from("Selecciona o abre un request para enviarlo");
-                    }
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') => self.start_client_request_input(),
-                KeyCode::Char('c') | KeyCode::Char('C') => {
-                    self.http.input.clear();
-                    self.http.client_creating_collection = true;
-                    self.overlay = Overlay::HttpInput;
-                    self.status = String::from("Ruta de carpeta nueva para la collection:");
-                }
-                KeyCode::Char('e') => self.open_http_env_picker(),
-                KeyCode::Char('i') | KeyCode::Char('I') => {
-                    self.import_postman_selected()?;
-                    self.http.client_collections = collect_http_collections(&self.root);
-                    if let Some(root) = self.current_collection_root() {
-                        self.http.client_collection_cursor = self
-                            .http
-                            .client_collections
-                            .iter()
-                            .position(|p| p == &root)
-                            .unwrap_or(0);
-                        self.http.client_root = self
-                            .http
-                            .client_collections
-                            .get(self.http.client_collection_cursor)
-                            .cloned();
-                        self.refresh_http_client_requests();
-                    }
-                }
-                KeyCode::Char('m') | KeyCode::Char('M') => self.open_http_menu(),
-                _ => {}
-            },
             Overlay::HttpEnv => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     self.http.env_root = None;
@@ -1112,10 +1044,10 @@ impl App {
             },
             Overlay::HttpInput => match key.code {
                 KeyCode::Esc => {
-                    self.http.client_creating_collection = false;
+                    self.http.client.creating_collection = false;
                     self.close_overlay("Accion HTTP cancelada");
                 }
-                KeyCode::Enter if self.http.client_creating_collection => {
+                KeyCode::Enter if self.http.client.creating_collection => {
                     self.create_http_collection_at_input_path()?
                 }
                 KeyCode::Enter => self.confirm_new_request()?,
@@ -1135,6 +1067,98 @@ impl App {
                 _ => {}
             },
             Overlay::None => {}
+        }
+
+        Ok(())
+    }
+
+    /// Keys of `Screen::Http` when no overlay is open.
+    fn handle_http_client_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.close_http_client(),
+            KeyCode::Tab => self.http.client.focus = (self.http.client.focus + 1) % 3,
+            KeyCode::BackTab => self.http.client.focus = (self.http.client.focus + 2) % 3,
+            KeyCode::Left | KeyCode::Char('[') if self.http.client.focus == 0 => {
+                self.shift_http_collection(-1)
+            }
+            KeyCode::Right | KeyCode::Char(']') if self.http.client.focus == 0 => {
+                self.shift_http_collection(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.http.client.focus == 0 => {
+                self.shift_http_collection(-1)
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.http.client.focus == 0 => {
+                self.shift_http_collection(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.http.client.focus == 1 => {
+                self.http.client.cursor = self.http.client.cursor.saturating_sub(1);
+                self.open_client_cursor_request()?;
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.http.client.focus == 1 => {
+                self.http.client.cursor = (self.http.client.cursor + 1)
+                    .min(self.http.client.requests.len().saturating_sub(1));
+                self.open_client_cursor_request()?;
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.http.client.focus == 2 => {
+                self.http.response_scroll = self.http.response_scroll.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.http.client.focus == 2 => {
+                self.http.response_scroll = self.http.response_scroll.saturating_add(1)
+            }
+            KeyCode::Char('[') | KeyCode::Char('h') if self.http.client.focus == 2 => {
+                self.move_response_tab(-1)
+            }
+            KeyCode::Char(']') | KeyCode::Char('l') if self.http.client.focus == 2 => {
+                self.move_response_tab(1)
+            }
+            KeyCode::Enter => {
+                self.open_client_cursor_request()?;
+                self.http.client.focus = 2;
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                if let Some(path) = self
+                    .http
+                    .client
+                    .requests
+                    .get(self.http.client.cursor)
+                    .cloned()
+                {
+                    self.open_file(path)?;
+                    self.send_http_request()?;
+                } else {
+                    self.status = String::from("Selecciona o abre un request para enviarlo");
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => self.start_client_request_input(),
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.http.input.clear();
+                self.http.client.creating_collection = true;
+                self.overlay = Overlay::HttpInput;
+                self.status = String::from("Ruta de carpeta nueva para la collection:");
+            }
+            KeyCode::Char('e') => self.open_http_env_picker(),
+            KeyCode::Char('i') | KeyCode::Char('I') => {
+                self.import_postman_selected()?;
+                self.http.client.collections = collect_http_collections(&self.root);
+                if let Some(root) = self.current_collection_root() {
+                    self.http.client.collection_cursor = self
+                        .http
+                        .client
+                        .collections
+                        .iter()
+                        .position(|p| p == &root)
+                        .unwrap_or(0);
+                    self.http.client.root = self
+                        .http
+                        .client
+                        .collections
+                        .get(self.http.client.collection_cursor)
+                        .cloned();
+                    self.refresh_http_client_requests();
+                }
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') => self.open_http_menu(),
+            _ => {}
         }
 
         Ok(())
@@ -3371,44 +3395,52 @@ Elegi un environment con :httpenv o definilas en la collection.",
             self.selected_item_path()
                 .and_then(|path| http::find_collection_root(&path))
         });
-        self.http.client_collections = collect_http_collections(&self.root);
+        self.http.client.collections = collect_http_collections(&self.root);
         if let Some(root) = current {
-            if let Some(index) = self.http.client_collections.iter().position(|p| p == &root) {
-                self.http.client_collection_cursor = index;
+            if let Some(index) = self.http.client.collections.iter().position(|p| p == &root) {
+                self.http.client.collection_cursor = index;
             } else {
-                self.http.client_collections.push(root.clone());
-                self.http.client_collection_cursor = self.http.client_collections.len() - 1;
+                self.http.client.collections.push(root.clone());
+                self.http.client.collection_cursor = self.http.client.collections.len() - 1;
             }
         }
-        self.http.client_root = self
+        self.http.client.root = self
             .http
-            .client_collections
-            .get(self.http.client_collection_cursor)
+            .client
+            .collections
+            .get(self.http.client.collection_cursor)
             .cloned();
         self.refresh_http_client_requests();
-        self.http.client_focus = if self.http.client_requests.is_empty() {
+        self.http.client.focus = if self.http.client.requests.is_empty() {
             0
         } else {
             1
         };
         let _ = self.open_client_cursor_request();
-        self.overlay = Overlay::HttpClient;
+        self.overlay = Overlay::None;
+        self.screen = Screen::Http;
         self.status = String::from("HTTP Client");
     }
 
+    fn close_http_client(&mut self) {
+        self.screen = Screen::Markdown;
+        self.status = String::from("HTTP Client cerrado");
+    }
+
     fn shift_http_collection(&mut self, delta: isize) {
-        if self.http.client_collections.is_empty() {
+        if self.http.client.collections.is_empty() {
             return;
         }
-        let len = self.http.client_collections.len() as isize;
-        self.http.client_collection_cursor =
-            (self.http.client_collection_cursor as isize + delta).rem_euclid(len) as usize;
-        self.http.client_root = self
+        let len = self.http.client.collections.len() as isize;
+        self.http.client.collection_cursor =
+            (self.http.client.collection_cursor as isize + delta).rem_euclid(len) as usize;
+        self.http.client.root = self
             .http
-            .client_collections
-            .get(self.http.client_collection_cursor)
+            .client
+            .collections
+            .get(self.http.client.collection_cursor)
             .cloned();
-        self.http.client_cursor = 0;
+        self.http.client.cursor = 0;
         self.refresh_http_client_requests();
         let _ = self.open_client_cursor_request();
     }
@@ -3416,8 +3448,9 @@ Elegi un environment con :httpenv o definilas en la collection.",
     fn open_client_cursor_request(&mut self) -> Result<()> {
         let Some(path) = self
             .http
-            .client_requests
-            .get(self.http.client_cursor)
+            .client
+            .requests
+            .get(self.http.client.cursor)
             .cloned()
         else {
             self.http.view = None;
@@ -3429,27 +3462,28 @@ Elegi un environment con :httpenv o definilas en la collection.",
     }
 
     fn refresh_http_client_requests(&mut self) {
-        let Some(root) = self.http.client_root.clone() else {
-            self.http.client_requests.clear();
-            self.http.client_cursor = 0;
+        let Some(root) = self.http.client.root.clone() else {
+            self.http.client.requests.clear();
+            self.http.client.cursor = 0;
             return;
         };
         let mut requests = collect_http_requests(&root);
         requests.sort();
-        self.http.client_requests = requests;
-        self.http.client_cursor = self
+        self.http.client.requests = requests;
+        self.http.client.cursor = self
             .http
-            .client_cursor
-            .min(self.http.client_requests.len().saturating_sub(1));
+            .client
+            .cursor
+            .min(self.http.client.requests.len().saturating_sub(1));
     }
 
     fn start_client_request_input(&mut self) {
-        if self.http.client_root.is_none() {
+        if self.http.client.root.is_none() {
             self.status = String::from("Primero crea una collection con C");
             return;
         }
         self.http.input.clear();
-        self.http.client_creating_collection = false;
+        self.http.client.creating_collection = false;
         self.overlay = Overlay::HttpInput;
         self.status = String::from("Nombre del request nuevo:");
     }
@@ -3474,8 +3508,8 @@ Elegi un environment con :httpenv o definilas en la collection.",
     /// The collection the HTTP actions apply to: the open request's, or the
     /// one containing the selected tree item.
     fn current_collection_root(&self) -> Option<PathBuf> {
-        if self.overlay == Overlay::HttpClient {
-            if let Some(root) = &self.http.client_root {
+        if self.screen == Screen::Http {
+            if let Some(root) = &self.http.client.root {
                 return Some(root.clone());
             }
         }
@@ -3557,11 +3591,11 @@ Elegi un environment con :httpenv o definilas en la collection.",
 
     fn confirm_new_request(&mut self) -> Result<()> {
         self.overlay = Overlay::None;
-        let Some(dir) = self.http.client_root.clone() else {
+        let Some(dir) = self.http.client.root.clone() else {
             return Ok(());
         };
         let path = http::create_request(&dir, &self.http.input)?;
-        self.http.client_root = Some(dir);
+        self.http.client.root = Some(dir);
         self.refresh_http_client_requests();
         self.restore_path_focus(&path)?;
         self.status = format!(
@@ -3605,14 +3639,15 @@ Elegi un environment con :httpenv o definilas en la collection.",
         };
         fs::create_dir_all(&path)?;
         let created = http::init_collection(&path)?;
-        self.http.client_root = Some(path.clone());
-        self.http.client_collections.push(path.clone());
-        self.http.client_collection_cursor = self.http.client_collections.len() - 1;
+        self.http.client.root = Some(path.clone());
+        self.http.client.collections.push(path.clone());
+        self.http.client.collection_cursor = self.http.client.collections.len() - 1;
         self.reload_items()?;
         self.refresh_http_client_requests();
-        self.http.client_focus = 1;
-        self.http.client_creating_collection = false;
-        self.overlay = Overlay::HttpClient;
+        self.http.client.focus = 1;
+        self.http.client.creating_collection = false;
+        self.overlay = Overlay::None;
+        self.screen = Screen::Http;
         self.status = format!(
             "Collection creada en {} ({} archivos)",
             path.display(),

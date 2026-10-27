@@ -11,7 +11,7 @@ use crate::markdown::{PreviewLine, PreviewLineKind};
 use crate::{
     app::{
         App, CreateKind, CreateStep, FileOpKind, Focus, FullscreenPanel, GitState, GitStatusKind,
-        HelpSection, Overlay, PreviewCursor, ResponseTab, HTTP_MENU_ITEMS, RESPONSE_TABS,
+        HelpSection, Overlay, PreviewCursor, ResponseTab, Screen, HTTP_MENU_ITEMS, RESPONSE_TABS,
     },
     config::{config_path, TreeInfoMode},
     http::{self, HttpResponse},
@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Min(3), Constraint::Length(2)])
         .split(frame.area());
 
-    if app.overlay == Overlay::HttpClient {
+    if app.screen == Screen::Http {
         render_http_client(frame, areas[0], app);
     } else if app.json_viewer_active {
         render_json_viewer(frame, areas[0], app);
@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     let s = app.config.strings();
-    let footer = if app.overlay == Overlay::HttpClient {
+    let footer = if app.screen == Screen::Http {
         Paragraph::new("Tab panel · ↑↓ navegar · Enter abrir · S enviar · N nuevo · C collection · E env · I importar · M menú · Esc volver")
             .style(Style::default().fg(Color::Gray))
             .block(Block::default().borders(Borders::TOP))
@@ -173,7 +173,6 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Git => render_git_popup(frame, app),
         Overlay::Alert => render_alert_popup(frame, app),
         Overlay::HttpMenu => render_http_menu_popup(frame, app),
-        Overlay::HttpClient => {}
         Overlay::HttpEnv => render_http_env_popup(frame, app),
         Overlay::HttpInput => render_http_input_popup(frame, app),
         Overlay::Rename => {}
@@ -223,10 +222,11 @@ fn mode_label(app: &App) -> (&'static str, Color) {
             ("MERMAID", Color::Cyan)
         }
         Overlay::WebLink => ("LINK", Color::Cyan),
-        Overlay::HttpMenu | Overlay::HttpClient | Overlay::HttpEnv | Overlay::HttpInput => {
-            ("HTTP", Color::Green)
-        }
+        Overlay::HttpMenu | Overlay::HttpEnv | Overlay::HttpInput => ("HTTP", Color::Green),
         Overlay::None => {
+            if app.screen == Screen::Http {
+                return ("HTTP", Color::Green);
+            }
             if app.json_viewer_active {
                 return ("JSON", Color::Green);
             }
@@ -829,7 +829,7 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bord
 }
 
 fn render_response(frame: &mut Frame, area: Rect, app: &App) {
-    let focused = (app.overlay == Overlay::HttpClient && app.http.client_focus == 2)
+    let focused = (app.screen == Screen::Http && app.http.client.focus == 2)
         || (app.focus == Focus::Preview && app.http.response_focus);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1072,11 +1072,12 @@ fn render_http_client(frame: &mut Frame, area: Rect, app: &App) {
             Constraint::Percentage(49),
         ])
         .split(area);
-    let collection_items: Vec<ListItem> = if app.http.client_collections.is_empty() {
+    let collection_items: Vec<ListItem> = if app.http.client.collections.is_empty() {
         vec![ListItem::new("  Sin collections")]
     } else {
         app.http
-            .client_collections
+            .client
+            .collections
             .iter()
             .map(|path| {
                 ListItem::new(format!(
@@ -1087,8 +1088,8 @@ fn render_http_client(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
     let mut collection_state = ListState::default();
-    if !app.http.client_collections.is_empty() {
-        collection_state.select(Some(app.http.client_collection_cursor));
+    if !app.http.client.collections.is_empty() {
+        collection_state.select(Some(app.http.client.collection_cursor));
     }
     frame.render_stateful_widget(
         List::new(collection_items)
@@ -1096,7 +1097,7 @@ fn render_http_client(frame: &mut Frame, area: Rect, app: &App) {
                 Block::default()
                     .title(" Collections ")
                     .borders(Borders::ALL)
-                    .border_style(if app.http.client_focus == 0 {
+                    .border_style(if app.http.client.focus == 0 {
                         Style::default().fg(Color::Green)
                     } else {
                         border_style(false)
@@ -1112,16 +1113,18 @@ fn render_http_client(frame: &mut Frame, area: Rect, app: &App) {
         &mut collection_state,
     );
 
-    let request_items: Vec<ListItem> = if app.http.client_requests.is_empty() {
+    let request_items: Vec<ListItem> = if app.http.client.requests.is_empty() {
         vec![ListItem::new("  N: crear request")]
     } else {
         app.http
-            .client_requests
+            .client
+            .requests
             .iter()
             .map(|path| {
                 let label = app
                     .http
-                    .client_root
+                    .client
+                    .root
                     .as_ref()
                     .and_then(|root| path.strip_prefix(root).ok())
                     .unwrap_or(path)
@@ -1133,8 +1136,8 @@ fn render_http_client(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
     let mut request_state = ListState::default();
-    if !app.http.client_requests.is_empty() {
-        request_state.select(Some(app.http.client_cursor));
+    if !app.http.client.requests.is_empty() {
+        request_state.select(Some(app.http.client.cursor));
     }
     frame.render_stateful_widget(
         List::new(request_items)
@@ -1142,7 +1145,7 @@ fn render_http_client(frame: &mut Frame, area: Rect, app: &App) {
                 Block::default()
                     .title(" Requests ")
                     .borders(Borders::ALL)
-                    .border_style(if app.http.client_focus == 1 {
+                    .border_style(if app.http.client.focus == 1 {
                         Style::default().fg(Color::Green)
                     } else {
                         border_style(false)
@@ -1170,7 +1173,7 @@ fn render_client_request_detail(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .title(" Request ")
         .borders(Borders::ALL)
-        .border_style(if app.http.client_focus == 2 {
+        .border_style(if app.http.client.focus == 2 {
             Style::default().fg(Color::Green)
         } else {
             border_style(false)
