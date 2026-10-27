@@ -282,7 +282,7 @@ pub const HTTP_KEY_SECTIONS: &[HttpKeySection] = &[
                 .hinted("Tab panel", ALL_PANES),
             HttpKey::new(
                 "Esc",
-                "abandona el request en curso; si no hay, vuelve al árbol; en el árbol cierra el cliente",
+                "cancela el request en curso; si no hay, vuelve al árbol; en el árbol cierra el cliente",
             )
             .hinted("Esc árbol", &[HttpPane::Request, HttpPane::Response]),
             HttpKey::new("q", "cerrar el cliente").hinted("Esc/q salir", TREE),
@@ -441,14 +441,14 @@ impl HttpPane {
 /// thing first, so repeated presses walk back out of the client.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpEscape {
-    AbandonRequest,
+    CancelRequest,
     FocusTree,
     CloseClient,
 }
 
 fn http_escape(busy: bool, focus: HttpPane) -> HttpEscape {
     if busy {
-        HttpEscape::AbandonRequest
+        HttpEscape::CancelRequest
     } else if focus != HttpPane::Tree {
         HttpEscape::FocusTree
     } else {
@@ -818,7 +818,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('?') => self.toggle_help(),
-            KeyCode::Esc if self.http_busy() => self.abandon_http_request(),
+            KeyCode::Esc if self.http_busy() => self.cancel_http_request(),
             KeyCode::Up => match self.focus {
                 Focus::Tree => self.move_selection(-1),
                 Focus::Preview => self.scroll_preview(-1),
@@ -1301,7 +1301,7 @@ impl App {
         let focus = self.http.client.focus;
         match key.code {
             KeyCode::Esc => match http_escape(self.http_busy(), focus) {
-                HttpEscape::AbandonRequest => self.abandon_http_request(),
+                HttpEscape::CancelRequest => self.cancel_http_request(),
                 HttpEscape::FocusTree => self.http.client.focus = HttpPane::Tree,
                 HttpEscape::CloseClient => self.close_http_client(),
             },
@@ -3460,7 +3460,13 @@ impl App {
             .map_err(anyhow::Error::from)
             .and_then(|content| http::parse_request(&content))
             .map(|spec| {
-                let resolved = http::resolve_request(&root, &path, &spec, environment);
+                let resolved = http::resolve_request(
+                    &root,
+                    &path,
+                    &spec,
+                    environment,
+                    self.config.http_timeout(),
+                );
                 (spec, resolved)
             })
             .map_err(|err| format!("{err:#}"));
@@ -3508,7 +3514,7 @@ Abri un .yml de una collection (una carpeta con opencollection.yml) o crea una c
         }
         if let Some(in_flight) = &self.http.session.in_flight {
             self.status = format!(
-                "Ya hay un request en curso: {} (Esc lo abandona)",
+                "Ya hay un request en curso: {} (Esc lo cancela)",
                 in_flight.label
             );
             return Ok(());
@@ -3557,12 +3563,24 @@ Elegi un environment con :httpenv o definilas en la collection.",
         Ok(())
     }
 
-    /// Stops waiting for the request on the wire. The worker thread cannot be
-    /// interrupted, so its eventual result is simply discarded.
-    fn abandon_http_request(&mut self) {
-        if let Some(in_flight) = self.http.session.in_flight.take() {
-            self.status = format!("Request abandonado: {}", in_flight.label);
+    /// Cancels the request on the wire: its connection is closed, the worker
+    /// exits, and the response pane shows it as cancelled.
+    fn cancel_http_request(&mut self) {
+        let Some(in_flight) = self.http.session.in_flight.take() else {
+            return;
+        };
+        self.status = format!("Request cancelado: {}", in_flight.label);
+        let path = in_flight.request_path.clone();
+        if self
+            .http
+            .view
+            .as_ref()
+            .is_some_and(|view| view.request_path == path)
+        {
+            self.http.response_tab = ResponseTab::Body;
+            self.http.response_scroll = 0;
         }
+        self.http.session.responses.insert(path, in_flight.cancel());
     }
 
     /// Collects the response of the request on the wire once it is done.
@@ -4873,7 +4891,7 @@ mod tests {
     #[test]
     fn esc_walks_back_out_of_the_http_client() {
         for focus in HttpPane::ALL {
-            assert_eq!(http_escape(true, focus), HttpEscape::AbandonRequest);
+            assert_eq!(http_escape(true, focus), HttpEscape::CancelRequest);
         }
         assert_eq!(http_escape(false, HttpPane::Request), HttpEscape::FocusTree);
         assert_eq!(

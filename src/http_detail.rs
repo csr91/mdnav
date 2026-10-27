@@ -12,8 +12,8 @@ use serde_json::Value;
 use crate::{
     app::HttpView,
     http::{
-        self, Auth, Body, HttpRequestSpec, ParamKind, RequestSettings, ResolvedBody,
-        ResolvedRequest,
+        Auth, Body, EffectiveTimeout, HttpRequestSpec, ParamKind, RequestSettings, ResolvedBody,
+        ResolvedRequest, TimeoutSource,
     },
 };
 
@@ -181,7 +181,7 @@ fn resolved_lines(
     push_section(
         &mut lines,
         String::from("Settings"),
-        settings_lines(&resolved.settings),
+        settings_lines(&resolved.settings, &resolved.timeout),
     );
 
     if let Some(docs) = &spec.docs {
@@ -266,13 +266,19 @@ fn cut_short(mut rows: Vec<Line<'static>>) -> Vec<Line<'static>> {
     rows
 }
 
-/// Only what differs from the defaults: no timeout and following up to five
-/// redirects go unsaid.
-fn settings_lines(settings: &RequestSettings) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    if let Some(timeout) = settings.timeout {
-        lines.push(entry_line("timeout", ": ", &http::format_elapsed(timeout)));
-    }
+/// The timeout the request runs with and where it comes from, then redirects
+/// only when they differ from following up to five.
+fn settings_lines(settings: &RequestSettings, timeout: &EffectiveTimeout) -> Vec<Line<'static>> {
+    let origin = match &timeout.source {
+        TimeoutSource::Request => String::new(),
+        TimeoutSource::Inherited(label) => format!(" (heredado de {label})"),
+        TimeoutSource::Default => String::from(" (default)"),
+    };
+    let mut lines = vec![entry_line(
+        "timeout",
+        ": ",
+        &format!("{}{origin}", timeout.label()),
+    )];
     if !settings.follow_redirects {
         lines.push(entry_line("redirects", ": ", "no se siguen"));
     } else if settings.max_redirects != RequestSettings::default().max_redirects {
@@ -493,6 +499,10 @@ mod tests {
             ],
             body: ResolvedBody::Text(format!("{{\"items\": [{items}]}}")),
             settings: RequestSettings::default(),
+            timeout: EffectiveTimeout {
+                limit: Some(Duration::from_secs(30)),
+                source: TimeoutSource::Default,
+            },
             auth_label: String::from("bearer · heredada de collection"),
             auth_fields: vec![AuthField {
                 name: String::from("token"),
@@ -631,9 +641,11 @@ mod tests {
         position("  bearer · heredada de collection");
         position("  token = eyJh…");
         position("  … 6 líneas más");
-        assert!(
-            !lines.iter().any(|line| line.contains("Settings")),
-            "default settings are omitted"
+        assert!(position("Body · json") < position("Settings"));
+        assert_eq!(
+            lines[position("Settings") + 1],
+            "  timeout: 30 s (default)",
+            "the effective timeout, marked when it is the user's default"
         );
         assert_eq!(lines.last().map(String::as_str), Some("Trae un usuario"));
     }
@@ -654,9 +666,12 @@ mod tests {
             params: Vec::new(),
             body: ResolvedBody::None,
             settings: RequestSettings {
-                timeout: Some(Duration::from_millis(1500)),
                 follow_redirects: false,
-                max_redirects: 5,
+                ..RequestSettings::default()
+            },
+            timeout: EffectiveTimeout {
+                limit: Some(Duration::from_millis(1500)),
+                source: TimeoutSource::Request,
             },
             auth_fields: Vec::new(),
             unresolved: Vec::new(),
@@ -676,6 +691,15 @@ mod tests {
                 "  timeout: 1.50 s",
                 "  redirects: no se siguen",
             ]
+        );
+
+        let inherited = EffectiveTimeout {
+            limit: None,
+            source: TimeoutSource::Inherited(String::from("folder users")),
+        };
+        assert_eq!(
+            texts(&settings_lines(&RequestSettings::default(), &inherited)),
+            ["  timeout: sin limite (heredado de folder users)"]
         );
     }
 

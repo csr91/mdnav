@@ -967,6 +967,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "syntect",
+ "tokio",
  "toml",
 ]
 

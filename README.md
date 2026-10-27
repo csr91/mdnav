@@ -133,13 +133,15 @@ Los requests se envían desde el **HTTP Client**, que se abre con `:@http` (o de
 
 Como en el explorador, las acciones que envían o escriben archivos van con Shift: `S` envía el request seleccionado, `E` edita su YAML en el editor externo (mdnav se relanza y vuelve al cliente con el mismo request), `N` crea un request, `C` crea una collection en la ruta indicada (relativa al root actual o absoluta) e `I` importa el JSON de Postman seleccionado en el explorador. `e` elige el environment activo y `M` abre el menú de acciones HTTP.
 
-`Esc` retrocede de a un paso: primero abandona el request en curso, después devuelve el foco al árbol y, desde el árbol, cierra el cliente. `q` cierra el cliente directamente. `?` abre la ayuda del cliente con todas sus teclas, empezando por las del panel enfocado; `?` o `Esc` la cierran.
+`Esc` retrocede de a un paso: primero cancela el request en curso, después devuelve el foco al árbol y, desde el árbol, cierra el cliente. `q` cierra el cliente directamente. `?` abre la ayuda del cliente con todas sus teclas, empezando por las del panel enfocado; `?` o `Esc` la cierran.
 
-En el explorador, un request se previsualiza como cualquier YAML, con un aviso arriba. Con foco en el preview, `Enter` abre el HTTP Client con ese request seleccionado; `:@http` hace lo mismo cuando el archivo abierto es un request. `Shift+E` edita el YAML, `:httpenv` elige el environment y `Esc` abandona un request que siga en curso después de cerrar el cliente.
+En el explorador, un request se previsualiza como cualquier YAML, con un aviso arriba. Con foco en el preview, `Enter` abre el HTTP Client con ese request seleccionado; `:@http` hace lo mismo cuando el archivo abierto es un request. `Shift+E` edita el YAML, `:httpenv` elige el environment y `Esc` cancela un request que siga en curso después de cerrar el cliente.
 
-El panel Request muestra lo que se va a enviar, ya resuelto con el environment activo (el título indica collection y environment): método y URL resuelta (con la plantilla original abajo, en gris, si difiere), un bloque **Avisos** en amarillo, y después Params, Headers, Auth (con de dónde se hereda), Body (las primeras 10 líneas, JSON formateado), Settings (timeout y redirects, solo si se cambiaron) y Docs. Las secciones vacías no aparecen. Los valores de headers, params y auth con pinta de secreto (`Authorization`, tokens, API keys, cookies) se ven enmascarados (`Bearer eyJh…`) y las variables sin resolver quedan en rojo. Avisos junta las variables sin resolver, el environment elegido que ya no existe, los `folder.yml` o `environments/*.yml` con errores, la auth o el body no soportados y los scripts/assertions que no se ejecutan. Si el YAML del request no se puede leer, el panel muestra el error en lugar del detalle. En el árbol, un `!` amarillo marca los requests que no se pueden leer o que usan algo que mdnav no envía ni ejecuta.
+El panel Request muestra lo que se va a enviar, ya resuelto con el environment activo (el título indica collection y environment): método y URL resuelta (con la plantilla original abajo, en gris, si difiere), un bloque **Avisos** en amarillo, y después Params, Headers, Auth (con de dónde se hereda), Body (las primeras 10 líneas, JSON formateado), Settings (el timeout efectivo, marcado `(default)` si sale de la config o `(heredado de …)` si sale de un folder o la collection, y los redirects solo si se cambiaron) y Docs. Las secciones vacías no aparecen. Los valores de headers, params y auth con pinta de secreto (`Authorization`, tokens, API keys, cookies) se ven enmascarados (`Bearer eyJh…`) y las variables sin resolver quedan en rojo. Avisos junta las variables sin resolver, el environment elegido que ya no existe, los `folder.yml` o `environments/*.yml` con errores, la auth o el body no soportados y los scripts/assertions que no se ejecutan. Si el YAML del request no se puede leer, el panel muestra el error en lugar del detalle. En el árbol, un `!` amarillo marca los requests que no se pueden leer o que usan algo que mdnav no envía ni ejecuta.
 
-Los requests se envían en un thread aparte: la UI no se congela y la response se conserva al volver del editor.
+Los requests se envían en un thread aparte: la UI no se congela y la response se conserva al volver del editor. Cancelar con `Esc` (o salir de mdnav) cierra la conexión de verdad, aunque esté bajando el body, y la response muestra **Request cancelado**; `Shift+S` lo vuelve a enviar.
+
+**Timeout:** `settings.timeout` del request, en milisegundos. Si no lo define (o dice `inherit`), se toma `request.settings.http.timeout` del `folder.yml` más cercano o de `opencollection.yml`, y si nadie lo define, `http_timeout_secs` de la config de mdnav (30 s por defecto). `0`, en el YAML o en la config, significa sin límite: la spec de OpenCollection no le da un significado y Bruno lo trata así. El timeout cubre todo el request, body incluido, y el error dice qué límite aplicó y dónde cambiarlo.
 
 **Variables:** `{{nombre}}` se resuelve con esta precedencia: variables de la collection < environment < folders. `{{process.env.NOMBRE}}` lee el `.env` de la collection y después el entorno del proceso. Las variables `secret: true` de un environment no guardan valor en el archivo: mdnav las busca por nombre en `.env`.
 
@@ -165,6 +167,8 @@ Abrí `?` → pestaña **Settings** (o **Ajustes**). Navegá con `j`/`k` y cambi
 La configuración se guarda en:
 - Windows: `%APPDATA%\mdnav\config.toml`
 - Linux: `~/.config/mdnav/config.toml`
+
+Además de lo que se cambia desde Settings, `http_timeout_secs` (30 por defecto; `0` = sin límite) fija el timeout de los requests HTTP que no definen uno.
 
 ## Shell hook
 

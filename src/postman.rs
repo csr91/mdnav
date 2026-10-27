@@ -773,7 +773,13 @@ mod tests {
         assert_eq!(health.url, "https://shop.test/health");
 
         // The imported request resolves end to end with collection variables.
-        let resolved = resolve_request(&root, &root.join("Users/Get user.yml"), &get_user, None);
+        let resolved = resolve_request(
+            &root,
+            &root.join("Users/Get user.yml"),
+            &get_user,
+            None,
+            None,
+        );
         assert_eq!(resolved.url, "https://shop.test/users/7?expand=orders");
         assert_eq!(resolved.unresolved, vec![String::from("token")]);
     }

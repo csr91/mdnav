@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,8 @@ pub struct AppConfig {
     pub recent_commands: Vec<String>,
     /// Recently opened files, most recent first.
     pub recent_files: Vec<String>,
+    /// Timeout of HTTP requests that set none, in seconds; 0 waits forever.
+    pub http_timeout_secs: u64,
     /// Active HTTP environment per collection, keyed by the collection root.
     pub http_environments: BTreeMap<String, String>,
 }
@@ -81,14 +83,22 @@ impl Default for AppConfig {
             show_git_status: true,
             recent_commands: Vec::new(),
             recent_files: Vec::new(),
+            http_timeout_secs: DEFAULT_HTTP_TIMEOUT_SECS,
             http_environments: BTreeMap::new(),
         }
     }
 }
 
+pub const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 30;
+
 impl AppConfig {
     pub fn strings(&self) -> &'static strings::Strings {
         strings::get(&self.language)
+    }
+
+    /// The timeout of HTTP requests that set none; `None` waits forever.
+    pub fn http_timeout(&self) -> Option<Duration> {
+        (self.http_timeout_secs > 0).then(|| Duration::from_secs(self.http_timeout_secs))
     }
 
     pub fn load() -> Result<Self> {
@@ -337,6 +347,40 @@ show_git_status = false
         assert_eq!(config.tree_info, TreeInfoMode::Lines);
         assert_eq!(config.tree_sort, TreeSortMode::Modified);
         assert!(!config.show_git_status);
+    }
+
+    #[test]
+    fn http_timeout_defaults_to_30_seconds_and_round_trips() {
+        let config = AppConfig::default();
+        assert_eq!(config.http_timeout_secs, DEFAULT_HTTP_TIMEOUT_SECS);
+        assert_eq!(config.http_timeout(), Some(Duration::from_secs(30)));
+
+        let custom = AppConfig {
+            http_timeout_secs: 0,
+            ..AppConfig::default()
+        };
+        let encoded = custom.to_toml().expect("config should serialize");
+        assert!(encoded.contains("http_timeout_secs = 0"), "{encoded}");
+        let decoded = parse_config(&encoded).expect("config should parse");
+        assert_eq!(decoded.http_timeout(), None, "0 waits forever");
+    }
+
+    #[test]
+    fn configs_without_http_timeout_still_load() {
+        let config = parse_config(
+            r#"
+only_mds = false
+editor = "vim"
+
+[http_environments]
+"C:\\api" = "dev"
+"#,
+        )
+        .expect("an older config should parse");
+
+        assert!(!config.only_mds);
+        assert_eq!(config.http_timeout_secs, DEFAULT_HTTP_TIMEOUT_SECS);
+        assert_eq!(config.http_environments["C:\\api"], "dev");
     }
 
     #[test]

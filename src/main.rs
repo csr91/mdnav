@@ -79,6 +79,11 @@ fn run_cli(docs_root: PathBuf) -> Result<()> {
             continue;
         }
 
+        // Quitting with a request on the wire: close its connection now
+        // rather than leave the worker running until the process ends.
+        if let Some(in_flight) = app.http.session.in_flight.take() {
+            in_flight.cancel();
+        }
         emit_pending_cd(&app);
         return Ok(());
     }

@@ -75,8 +75,8 @@ flowchart LR
     W --> P[Panel Response]
 ```
 
-- El resolver junta los defaults heredados (`opencollection.yml` y los `folder.yml`: variables, headers y auth), el environment activo y los secretos del `.env`.
-- El request sale en un thread aparte: la UI no se congela y `Esc` lo abandona.
+- El resolver junta los defaults heredados (`opencollection.yml` y los `folder.yml`: variables, headers, auth y timeout), el environment activo y los secretos del `.env`.
+- El request sale en un thread aparte: la UI no se congela y `Esc` lo cancela. Cancelar cierra la conexión, aunque el body se esté bajando, y la response muestra **Request cancelado**; `Shift+S` lo vuelve a enviar. Salir de mdnav con un request en curso también lo cancela.
 - La response queda en memoria por request y sobrevive a `Shift+E` (editar y volver).
 
 ## El formato: OpenCollection
@@ -110,6 +110,16 @@ El panel Request muestra el request ya resuelto: params, headers, auth (y de dó
 
 Arriba de todo, un bloque **Avisos** junta lo que conviene revisar antes de enviar: variables sin resolver, un environment elegido que ya no existe, `folder.yml` o environments con errores, auth o body no soportados y scripts o assertions que no se ejecutan. Si el YAML no se puede leer, el panel muestra el error en lugar del detalle. En el árbol, un `!` amarillo marca los requests ilegibles o que usan algo que mdnav no envía ni ejecuta.
 
+## Timeout
+
+Ningún request espera para siempre salvo que lo pidas. El timeout, en milisegundos, se busca en este orden:
+
+1. `settings.timeout` del request.
+2. Si falta o dice `inherit`: `request.settings.http.timeout` del `folder.yml` más cercano y después de `opencollection.yml`.
+3. Si nadie lo define: `http_timeout_secs` en la config de mdnav (`config.toml`), 30 segundos por defecto.
+
+`0` significa sin límite, tanto en el YAML como en la config: la spec de OpenCollection no le da un significado a 0 y Bruno lo trata así. El timeout cubre todo el request, body incluido. En Settings, el panel Request muestra el timeout efectivo, con `(default)` si sale de la config o `(heredado de …)` si sale de un folder o la collection. Si se vence, la response dice qué límite aplicó y dónde cambiarlo.
+
 Al enviar, la barra inferior avisa cuántas variables quedaron sin resolver. Si alguna está en la URL, el request no se envía y mdnav te pide elegir un environment.
 
 ## Teclas
@@ -133,11 +143,11 @@ Como en el explorador, las acciones que envían o escriben archivos van con Shif
 | `Shift+I` | importar el JSON de Postman seleccionado en el explorador |
 | `e` | elegir environment |
 | `M` | menú: send, env, new, init, import, copy |
-| `Esc` | abandonar el request en curso; si no hay, volver al árbol; desde el árbol, cerrar el cliente |
+| `Esc` | cancelar el request en curso; si no hay, volver al árbol; desde el árbol, cerrar el cliente |
 | `q` | cerrar el cliente |
 | `?` | ayuda del cliente |
 
-Fuera del cliente, `:httpenv` elige el environment de la collection y `Esc` abandona un request que siga en curso.
+Fuera del cliente, `:httpenv` elige el environment de la collection y `Esc` cancela un request que siga en curso.
 
 ## Arrancar una collection propia
 

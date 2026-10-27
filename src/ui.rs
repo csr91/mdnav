@@ -17,7 +17,7 @@ use crate::{
         ResponseTab, Screen, HTTP_MENU_ITEMS, RESPONSE_TABS,
     },
     config::{config_path, TreeInfoMode},
-    http::{self, HttpResponse},
+    http::{self, HttpErrorKind, HttpResponse},
     http_detail::{self, method_color},
     http_tree::{HttpNodeKind, HttpTreeRow},
     strings::Strings,
@@ -319,9 +319,9 @@ fn http_client_footer_spans(app: &App) -> Vec<Span<'static>> {
 
     if let Some(in_flight) = &app.http.session.in_flight {
         let spinner = spinner_frame(in_flight.started.elapsed());
-        // Esc abandons it before doing anything else.
+        // Esc cancels it before doing anything else.
         spans.push(Span::styled(
-            format!("{spinner} {} · Esc abandona  ", in_flight.label),
+            format!("{spinner} {} · Esc cancela  ", in_flight.label),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -889,7 +889,7 @@ fn render_response(frame: &mut Frame, area: Rect, app: &App) {
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "Esc abandona el request",
+                "Esc cancela el request",
                 Style::default().fg(Color::DarkGray),
             )),
         ];
@@ -973,6 +973,9 @@ fn response_title(response: &HttpResponse) -> Line<'static> {
             format!("{code} {}", response.reason).trim().to_string(),
             status_color(code),
         ),
+        (Some(error), _) if error.kind == HttpErrorKind::Cancelled => {
+            (String::from("cancelado"), Color::Yellow)
+        }
         _ => (String::from("error"), Color::Red),
     };
     let mut details = format!(" · {elapsed}");
@@ -1019,16 +1022,27 @@ pub(crate) fn response_tab_lines(app: &App, response: &HttpResponse) -> Vec<Line
     match app.http.response_tab {
         ResponseTab::Body => {
             if let Some(error) = &response.error {
+                let (color, hint) = match error.kind {
+                    HttpErrorKind::Cancelled => (
+                        Color::Yellow,
+                        "Se cancelo con Esc y se cerro la conexion. Shift+S lo envia de nuevo.",
+                    ),
+                    HttpErrorKind::Timeout => (
+                        Color::Red,
+                        "Cambia el limite con settings.timeout en el YAML (ms, 0 = sin limite) o con http_timeout_secs en la config de mdnav.",
+                    ),
+                    HttpErrorKind::Connect | HttpErrorKind::Other => (
+                        Color::Red,
+                        "Revisa la URL, el environment activo y que el servidor este levantado.",
+                    ),
+                };
                 return vec![
                     Line::from(Span::styled(
-                        error.clone(),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        error.message.clone(),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
                     )),
                     Line::from(""),
-                    Line::from(Span::styled(
-                        "Revisa la URL, el environment activo y que el servidor este levantado.",
-                        gray,
-                    )),
+                    Line::from(Span::styled(hint, gray)),
                 ];
             }
             if response.body_lines.is_empty() {
@@ -1853,7 +1867,7 @@ fn shortcut_groups(s: &'static Strings) -> Vec<ShortcutGroup> {
             title: "HTTP",
             items: vec![
                 ("Enter", "open the previewed request in HTTP Client"),
-                ("Esc", "abandon the request in flight"),
+                ("Esc", "cancel the request in flight"),
                 (":@http", "open HTTP Client"),
                 (":httpenv", "choose the environment"),
             ],

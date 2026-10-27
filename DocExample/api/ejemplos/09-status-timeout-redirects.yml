@@ -12,7 +12,7 @@ http:
   url: "{{echo_api}}/status/418"
 settings:
   encodeUrl: true
-  timeout: 5000 # milisegundos; 0 = sin limite (Esc abandona el request)
+  timeout: 5000 # milisegundos; 0 = sin limite; sin timeout, 30 s por defecto (Esc cancela el request)
   followRedirects: true
   maxRedirects: 5
 docs: |-

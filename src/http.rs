@@ -9,10 +9,12 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    env, fs,
-    io::Read,
+    env, fmt, fs,
+    future::{poll_fn, Future},
     path::{Path, PathBuf},
+    pin::{pin, Pin},
     sync::mpsc::{self, Receiver, TryRecvError},
+    task::Poll,
     thread,
     time::{Duration, Instant},
 };
@@ -20,6 +22,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
+use tokio::sync::oneshot;
 
 use crate::markdown::{highlight_code_block, PreviewLine, PreviewLineKind};
 
@@ -163,10 +166,74 @@ impl Auth {
     }
 }
 
+/// A `settings.timeout` as written, in milliseconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TimeoutSetting {
+    /// Absent or `inherit`: the folders, then the collection, then the user's
+    /// default (`http_timeout_secs` in the config) decide.
+    #[default]
+    Inherit,
+    /// `timeout: 0`. OpenCollection gives 0 no meaning; like Bruno, whose
+    /// runtime (axios) reads 0 as "no limit", it waits forever.
+    Unlimited,
+    After(Duration),
+}
+
+/// Where the timeout a request runs with comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TimeoutSource {
+    Request,
+    /// The label of the folder or collection that set it.
+    Inherited(String),
+    /// `http_timeout_secs` in the user config.
+    Default,
+}
+
+/// The timeout a request actually runs with. `None` waits forever.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectiveTimeout {
+    pub limit: Option<Duration>,
+    pub source: TimeoutSource,
+}
+
+impl EffectiveTimeout {
+    /// The limit as the Settings section and the timeout error show it.
+    pub fn label(&self) -> String {
+        match self.limit {
+            Some(limit) => format_timeout(limit),
+            None => String::from("sin limite"),
+        }
+    }
+
+    /// Where the user changes this timeout, for the timeout error.
+    fn origin(&self) -> String {
+        match &self.source {
+            TimeoutSource::Request => String::from("settings.timeout del request"),
+            TimeoutSource::Inherited(label) => {
+                format!("settings.http.timeout heredado de {label}")
+            }
+            TimeoutSource::Default => {
+                let file = crate::config::config_path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| String::from("la config de mdnav"));
+                format!("default de mdnav: http_timeout_secs en {file}")
+            }
+        }
+    }
+}
+
+/// Whole seconds read better than `30.00 s` for a limit.
+fn format_timeout(limit: Duration) -> String {
+    if limit.subsec_millis() == 0 && limit.as_secs() > 0 {
+        format!("{} s", limit.as_secs())
+    } else {
+        format_elapsed(limit)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestSettings {
-    /// `None` means no timeout, which is what `timeout: 0` asks for.
-    pub timeout: Option<Duration>,
+    pub timeout: TimeoutSetting,
     pub follow_redirects: bool,
     pub max_redirects: usize,
 }
@@ -174,7 +241,7 @@ pub struct RequestSettings {
 impl Default for RequestSettings {
     fn default() -> Self {
         Self {
-            timeout: None,
+            timeout: TimeoutSetting::Inherit,
             follow_redirects: true,
             max_redirects: 5,
         }
@@ -196,13 +263,14 @@ pub struct HttpRequestSpec {
     pub docs: Option<String>,
 }
 
-/// Headers, auth and variables declared under `request:` in
+/// Headers, auth, variables and the timeout declared under `request:` in
 /// `opencollection.yml` or a `folder.yml`, inherited by the requests below.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RequestDefaults {
     pub headers: Vec<KeyValue>,
     pub auth: Option<Auth>,
     pub variables: Vec<KeyValue>,
+    pub timeout: TimeoutSetting,
 }
 
 fn parse_yaml(content: &str) -> Result<Value> {
@@ -247,10 +315,15 @@ pub fn parse_request(content: &str) -> Result<HttpRequestSpec> {
 pub fn parse_request_defaults(content: &str) -> Result<RequestDefaults> {
     let doc = parse_yaml(content)?;
     let request = &doc["request"];
+    // The spec splits default settings by request type (`settings.http`);
+    // a flat `settings.timeout` is read too.
+    let settings = &request["settings"];
+    let http_settings = settings.get("http").unwrap_or(settings);
     Ok(RequestDefaults {
         headers: parse_key_values(request.get("headers")),
         auth: request.get("auth").map(parse_auth),
         variables: parse_variables(request.get("variables")),
+        timeout: parse_timeout(http_settings.get("timeout")),
     })
 }
 
@@ -401,11 +474,7 @@ fn parse_auth(value: &Value) -> Auth {
 fn parse_settings(value: &Value) -> RequestSettings {
     let defaults = RequestSettings::default();
     RequestSettings {
-        timeout: value
-            .get("timeout")
-            .and_then(Value::as_u64)
-            .filter(|millis| *millis > 0)
-            .map(Duration::from_millis),
+        timeout: parse_timeout(value.get("timeout")),
         follow_redirects: value
             .get("followRedirects")
             .and_then(Value::as_bool)
@@ -416,6 +485,46 @@ fn parse_settings(value: &Value) -> RequestSettings {
             .map(|max| max as usize)
             .unwrap_or(defaults.max_redirects),
     }
+}
+
+/// Milliseconds, `0` for no limit; `inherit` and anything else defer.
+fn parse_timeout(value: Option<&Value>) -> TimeoutSetting {
+    match value.and_then(Value::as_u64) {
+        Some(0) => TimeoutSetting::Unlimited,
+        Some(millis) => TimeoutSetting::After(Duration::from_millis(millis)),
+        None => TimeoutSetting::Inherit,
+    }
+}
+
+/// The request's own timeout, else the closest folder's, else the
+/// collection's, else the user's default. `chain` is outermost first.
+pub fn effective_timeout(
+    request: TimeoutSetting,
+    chain: &[(String, RequestDefaults)],
+    default: Option<Duration>,
+) -> EffectiveTimeout {
+    let limit = |setting: TimeoutSetting| match setting {
+        TimeoutSetting::After(limit) => Some(limit),
+        _ => None,
+    };
+    if request != TimeoutSetting::Inherit {
+        return EffectiveTimeout {
+            limit: limit(request),
+            source: TimeoutSource::Request,
+        };
+    }
+    chain
+        .iter()
+        .rev()
+        .find(|(_, defaults)| defaults.timeout != TimeoutSetting::Inherit)
+        .map(|(label, defaults)| EffectiveTimeout {
+            limit: limit(defaults.timeout),
+            source: TimeoutSource::Inherited(label.clone()),
+        })
+        .unwrap_or(EffectiveTimeout {
+            limit: default,
+            source: TimeoutSource::Default,
+        })
 }
 
 fn docs_text(value: &Value) -> Option<String> {
@@ -711,17 +820,22 @@ pub struct ResolvedRequest {
     pub params: Vec<(ParamKind, String, String)>,
     pub body: ResolvedBody,
     pub settings: RequestSettings,
+    /// `settings.timeout` with inheritance and the user's default applied.
+    pub timeout: EffectiveTimeout,
     pub auth_label: String,
     pub auth_fields: Vec<AuthField>,
     pub unresolved: Vec<String>,
     pub warnings: Vec<String>,
 }
 
+/// `default_timeout` applies when neither the request nor its folders or
+/// collection set one: the user's `http_timeout_secs`.
 pub fn resolve_request(
     root: &Path,
     request_path: &Path,
     spec: &HttpRequestSpec,
     environment: Option<&Environment>,
+    default_timeout: Option<Duration>,
 ) -> ResolvedRequest {
     let (chain, mut warnings) = defaults_chain(root, request_path);
     let dotenv = fs::read_to_string(root.join(DOTENV_FILE))
@@ -962,6 +1076,7 @@ pub fn resolve_request(
         params,
         body,
         settings: spec.settings.clone(),
+        timeout: effective_timeout(spec.settings.timeout, &chain, default_timeout),
         auth_label,
         auth_fields,
         unresolved,
@@ -1074,14 +1189,43 @@ pub struct HttpResponse {
     pub body_text: String,
     /// `body_text` already highlighted, computed off the UI thread.
     pub body_lines: Vec<PreviewLine>,
-    pub error: Option<String>,
+    pub error: Option<HttpError>,
+}
+
+/// Why a request ended without a full response. The kind picks how the
+/// response pane explains it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpErrorKind {
+    /// The user cancelled it (Esc) before it finished.
+    Cancelled,
+    Timeout,
+    Connect,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpError {
+    pub kind: HttpErrorKind,
+    pub message: String,
+}
+
+impl HttpError {
+    fn new(kind: HttpErrorKind, message: String) -> Self {
+        Self { kind, message }
+    }
+}
+
+impl fmt::Display for HttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 impl HttpResponse {
-    fn failed(request: &ResolvedRequest, elapsed: Duration, error: String) -> Self {
+    fn failed(method: &str, url: &str, elapsed: Duration, error: HttpError) -> Self {
         Self {
-            method: request.method.clone(),
-            url: request.url.clone(),
+            method: method.to_string(),
+            url: url.to_string(),
             status: None,
             reason: String::new(),
             elapsed,
@@ -1096,29 +1240,102 @@ impl HttpResponse {
     }
 }
 
-/// Sends the request and reads the response. Blocking: always call it from a
-/// worker thread (see `spawn_request`), never from the UI loop.
-pub fn execute(request: &ResolvedRequest) -> HttpResponse {
+/// Sends the request and reads the response on a current-thread runtime, until
+/// it finishes or `cancel` fires: a send on its sender or the sender being
+/// dropped. `None` when cancelled. Dropping the exchange mid-flight and then
+/// the runtime closes the connection, even in the middle of the body.
+/// Blocking: always call it from a worker thread (see `spawn_request`), never
+/// from the UI loop.
+pub fn execute(request: &ResolvedRequest, cancel: oneshot::Receiver<()>) -> Option<HttpResponse> {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            return Some(HttpResponse::failed(
+                &request.method,
+                &request.url,
+                Duration::ZERO,
+                HttpError::new(
+                    HttpErrorKind::Other,
+                    format!("No se pudo iniciar el cliente HTTP: {err}"),
+                ),
+            ))
+        }
+    };
+    let response = runtime.block_on(async {
+        let mut exchange = pin!(exchange(request));
+        let mut cancel = cancel;
+        poll_fn(|cx| {
+            if Pin::new(&mut cancel).poll(cx).is_ready() {
+                return Poll::Ready(None);
+            }
+            exchange.as_mut().poll(cx).map(Some)
+        })
+        .await
+    });
+    // Dropping the runtime would wait for a DNS lookup still running on its
+    // blocking pool; the worker must not outlive a cancel by that much.
+    runtime.shutdown_background();
+    response
+}
+
+/// Runs `future` until `deadline`; `None` once it passes.
+async fn within<F: Future>(deadline: Option<tokio::time::Instant>, future: F) -> Option<F::Output> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, future).await.ok(),
+        None => Some(future.await),
+    }
+}
+
+async fn exchange(request: &ResolvedRequest) -> HttpResponse {
     let started = Instant::now();
-    let fail = |error: String| HttpResponse::failed(request, started.elapsed(), error);
+    // The timeout covers the whole exchange, body included.
+    let deadline = request
+        .timeout
+        .limit
+        .map(|limit| tokio::time::Instant::now() + limit);
+    let fail = |error: HttpError| {
+        HttpResponse::failed(&request.method, &request.url, started.elapsed(), error)
+    };
+    let timed_out = || {
+        HttpError::new(
+            HttpErrorKind::Timeout,
+            format!(
+                "Timeout: sin respuesta completa en {} ({})",
+                request.timeout.label(),
+                request.timeout.origin()
+            ),
+        )
+    };
 
     let policy = if request.settings.follow_redirects {
         reqwest::redirect::Policy::limited(request.settings.max_redirects)
     } else {
         reqwest::redirect::Policy::none()
     };
-    let client = match reqwest::blocking::Client::builder()
+    let client = match reqwest::Client::builder()
         .redirect(policy)
-        .timeout(request.settings.timeout)
         .user_agent(concat!("mdnav/", env!("CARGO_PKG_VERSION")))
         .build()
     {
         Ok(client) => client,
-        Err(err) => return fail(format!("No se pudo crear el cliente HTTP: {err}")),
+        Err(err) => {
+            return fail(HttpError::new(
+                HttpErrorKind::Other,
+                format!("No se pudo crear el cliente HTTP: {err}"),
+            ))
+        }
     };
     let method = match reqwest::Method::from_bytes(request.method.as_bytes()) {
         Ok(method) => method,
-        Err(_) => return fail(format!("Metodo HTTP invalido: {}", request.method)),
+        Err(_) => {
+            return fail(HttpError::new(
+                HttpErrorKind::Other,
+                format!("Metodo HTTP invalido: {}", request.method),
+            ))
+        }
     };
 
     let mut builder = client.request(method, &request.url);
@@ -1137,9 +1354,10 @@ pub fn execute(request: &ResolvedRequest) -> HttpResponse {
         ),
     };
 
-    let response = match builder.send() {
-        Ok(response) => response,
-        Err(err) => return fail(describe_reqwest_error(&err)),
+    let mut response = match within(deadline, builder.send()).await {
+        Some(Ok(response)) => response,
+        Some(Err(err)) => return fail(describe_reqwest_error(&err)),
+        None => return fail(timed_out()),
     };
 
     let status = response.status();
@@ -1161,16 +1379,27 @@ pub fn execute(request: &ResolvedRequest) -> HttpResponse {
     let content_length = response.content_length();
     let final_url = response.url().to_string();
 
+    // Chunk by chunk, so a cancel or the deadline can stop a slow or huge
+    // download, and reading stops one chunk past the limit.
     let mut bytes = Vec::new();
-    let read_result = response
-        .take(RESPONSE_BODY_LIMIT as u64 + 1)
-        .read_to_end(&mut bytes);
-    let elapsed = started.elapsed();
-    if let Err(err) = read_result {
-        let mut failed = fail(format!("Error leyendo la response: {err}"));
+    while bytes.len() <= RESPONSE_BODY_LIMIT {
+        let error = match within(deadline, response.chunk()).await {
+            Some(Ok(Some(chunk))) => {
+                bytes.extend_from_slice(&chunk);
+                continue;
+            }
+            Some(Ok(None)) => break,
+            Some(Err(err)) => HttpError::new(
+                HttpErrorKind::Other,
+                format!("Error leyendo la response: {err}"),
+            ),
+            None => timed_out(),
+        };
+        let mut failed = fail(error);
         failed.status = Some(status.as_u16());
         return failed;
     }
+    let elapsed = started.elapsed();
 
     let truncated = bytes.len() > RESPONSE_BODY_LIMIT;
     bytes.truncate(RESPONSE_BODY_LIMIT);
@@ -1199,17 +1428,17 @@ pub fn execute(request: &ResolvedRequest) -> HttpResponse {
     }
 }
 
-fn describe_reqwest_error(err: &reqwest::Error) -> String {
-    let kind = if err.is_timeout() {
-        "Timeout"
+fn describe_reqwest_error(err: &reqwest::Error) -> HttpError {
+    let (kind, label) = if err.is_timeout() {
+        (HttpErrorKind::Timeout, "Timeout")
     } else if err.is_connect() {
-        "No se pudo conectar"
+        (HttpErrorKind::Connect, "No se pudo conectar")
     } else if err.is_builder() {
-        "Request invalido"
+        (HttpErrorKind::Other, "Request invalido")
     } else if err.is_redirect() {
-        "Demasiados redirects"
+        (HttpErrorKind::Other, "Demasiados redirects")
     } else {
-        "Error HTTP"
+        (HttpErrorKind::Other, "Error HTTP")
     };
     // reqwest nests the useful detail (DNS, refused, TLS, ...) in sources.
     let mut detail = err.to_string();
@@ -1218,7 +1447,7 @@ fn describe_reqwest_error(err: &reqwest::Error) -> String {
         detail = format!("{detail}: {inner}");
         source = inner.source();
     }
-    format!("{kind}: {detail}")
+    HttpError::new(kind, format!("{label}: {detail}"))
 }
 
 fn plain_line(text: &str, color: [u8; 3]) -> PreviewLine {
@@ -1275,13 +1504,17 @@ fn render_body(bytes: &[u8], content_type: Option<&str>) -> (String, Vec<Preview
     (body_text, lines)
 }
 
-/// A request running on a worker thread. Dropping it abandons the request:
-/// the thread finishes on its own and its result is discarded.
+/// A request running on a worker thread. Dropping it cancels the request: the
+/// worker closes the connection and exits without a result.
 pub struct InFlight {
     pub request_path: PathBuf,
     pub label: String,
     pub started: Instant,
+    method: String,
+    url: String,
     receiver: Receiver<HttpResponse>,
+    /// Never sent: dropping it is the cancel signal.
+    _cancel: oneshot::Sender<()>,
 }
 
 impl InFlight {
@@ -1290,35 +1523,47 @@ impl InFlight {
         match self.receiver.try_recv() {
             Ok(response) => Some(response),
             Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(HttpResponse {
-                method: String::new(),
-                url: String::new(),
-                status: None,
-                reason: String::new(),
-                elapsed: self.started.elapsed(),
-                headers: Vec::new(),
-                size: 0,
-                truncated: false,
-                content_type: None,
-                body_text: String::new(),
-                body_lines: Vec::new(),
-                error: Some(String::from("El worker HTTP termino sin respuesta")),
-            }),
+            Err(TryRecvError::Disconnected) => Some(HttpResponse::failed(
+                &self.method,
+                &self.url,
+                self.started.elapsed(),
+                HttpError::new(
+                    HttpErrorKind::Other,
+                    String::from("El worker HTTP termino sin respuesta"),
+                ),
+            )),
         }
+    }
+
+    /// Cancels the request and returns what the response pane shows for it.
+    pub fn cancel(self) -> HttpResponse {
+        HttpResponse::failed(
+            &self.method,
+            &self.url,
+            self.started.elapsed(),
+            HttpError::new(HttpErrorKind::Cancelled, String::from("Request cancelado")),
+        )
     }
 }
 
 pub fn spawn_request(request_path: PathBuf, request: ResolvedRequest) -> InFlight {
     let (sender, receiver) = mpsc::channel();
+    let (cancel_sender, cancel) = oneshot::channel();
     let label = format!("{} {}", request.method, request.url);
+    let (method, url) = (request.method.clone(), request.url.clone());
     thread::spawn(move || {
-        let _ = sender.send(execute(&request));
+        if let Some(response) = execute(&request, cancel) {
+            let _ = sender.send(response);
+        }
     });
     InFlight {
         request_path,
         label,
         started: Instant::now(),
+        method,
+        url,
         receiver,
+        _cancel: cancel_sender,
     }
 }
 
@@ -1738,7 +1983,7 @@ fn request_template(name: &str, seq: usize, url: &str) -> OcRequestFileOut {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::Write,
+        io::{Read, Write},
         net::TcpListener,
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -1835,7 +2080,10 @@ docs: Creates a user.
             }
         );
         assert_eq!(spec.auth, Auth::Inherit);
-        assert_eq!(spec.settings.timeout, Some(Duration::from_millis(1500)));
+        assert_eq!(
+            spec.settings.timeout,
+            TimeoutSetting::After(Duration::from_millis(1500))
+        );
         assert!(!spec.settings.follow_redirects);
         assert_eq!(spec.script_count, 1);
         assert_eq!(spec.docs.as_deref(), Some("Creates a user."));
@@ -1981,7 +2229,7 @@ docs: Creates a user.
         );
 
         let spec = parse_request(CREATE_USER).unwrap();
-        let resolved = resolve_request(temp.path(), &request, &spec, environments.first());
+        let resolved = resolve_request(temp.path(), &request, &spec, environments.first(), None);
 
         // Folder variables beat the environment, which beats the collection.
         assert_eq!(resolved.url, "http://localhost:9/users/folder-org?dry=true");
@@ -2059,7 +2307,7 @@ docs: Creates a user.
     fn reports_unresolved_variables_without_an_environment() {
         let (temp, request) = sample_collection();
         let spec = parse_request(CREATE_USER).unwrap();
-        let resolved = resolve_request(temp.path(), &request, &spec, None);
+        let resolved = resolve_request(temp.path(), &request, &spec, None, None);
 
         assert!(resolved.unresolved.contains(&String::from("base_url")));
         assert!(resolved.unresolved.contains(&String::from("token")));
@@ -2076,7 +2324,7 @@ docs: Creates a user.
             "info:\n  type: http\nhttp:\n  method: GET\n  url: https://api.test/s?q=a b\n  params:\n    - name: q\n      value: a b\n      type: query\n  auth:\n    type: apikey\n    key: api_key\n    value: k&1\n    placement: query\n",
         );
         let spec = parse_request(&fs::read_to_string(&request).unwrap()).unwrap();
-        let resolved = resolve_request(temp.path(), &request, &spec, None);
+        let resolved = resolve_request(temp.path(), &request, &spec, None, None);
 
         assert_eq!(resolved.url, "https://api.test/s?q=a b&api_key=k%261");
     }
@@ -2163,7 +2411,7 @@ docs: Creates a user.
         let spec = parse_request(&fs::read_to_string(&health).unwrap()).unwrap();
         assert_eq!(spec.url, "{{base_url}}/health");
         assert_eq!(spec.auth, Auth::Inherit);
-        let resolved = resolve_request(&dir, &health, &spec, environments.first());
+        let resolved = resolve_request(&dir, &health, &spec, environments.first(), None);
         assert_eq!(resolved.url, "http://localhost:3000/health");
 
         assert!(init_collection(&dir).is_err(), "init never runs twice");
@@ -2227,6 +2475,49 @@ docs: Creates a user.
         (address, receiver)
     }
 
+    /// Accepts one connection, reads the request head, writes `prefix` (maybe
+    /// nothing) and then never answers. Signals once the prefix is sent, and
+    /// again once the client closes the connection.
+    fn stalling_server(prefix: &'static str) -> (String, mpsc::Receiver<()>, mpsc::Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let (accepted_sender, accepted) = mpsc::channel();
+        let (closed_sender, closed) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            // Answering before the request arrives would make the client
+            // drop the connection as unexpected.
+            let mut buffer = [0_u8; 4096];
+            let mut head = Vec::new();
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(read) if read > 0 => head.extend_from_slice(&buffer[..read]),
+                    _ => return,
+                }
+            }
+            stream.write_all(prefix.as_bytes()).unwrap();
+            let _ = accepted_sender.send(());
+            // Reads block until the client closes: FIN or, on Windows often,
+            // a reset.
+            while let Ok(read) = stream.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+            }
+            let _ = closed_sender.send(());
+        });
+        (address, accepted, closed)
+    }
+
+    /// Runs `request` to completion on the calling thread.
+    fn send(request: &ResolvedRequest) -> HttpResponse {
+        let (_keep_open, cancel) = oneshot::channel();
+        execute(request, cancel).expect("nothing cancels it")
+    }
+
     fn resolved(method: &str, url: String, body: ResolvedBody) -> ResolvedRequest {
         ResolvedRequest {
             method: method.to_string(),
@@ -2234,9 +2525,10 @@ docs: Creates a user.
             headers: vec![(String::from("Authorization"), String::from("Bearer abc"))],
             params: Vec::new(),
             body,
-            settings: RequestSettings {
-                timeout: Some(Duration::from_secs(10)),
-                ..RequestSettings::default()
+            settings: RequestSettings::default(),
+            timeout: EffectiveTimeout {
+                limit: Some(Duration::from_secs(10)),
+                source: TimeoutSource::Default,
             },
             auth_label: String::from("bearer"),
             auth_fields: Vec::new(),
@@ -2251,7 +2543,7 @@ docs: Creates a user.
             "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 20\r\nConnection: close\r\n\r\n{\"ok\":true,\"id\":42}\n",
         );
 
-        let response = execute(&resolved(
+        let response = send(&resolved(
             "POST",
             format!("{address}/users?x=1"),
             ResolvedBody::Text(String::from("{\"name\":\"ana\"}")),
@@ -2282,7 +2574,7 @@ docs: Creates a user.
             "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         );
 
-        let response = execute(&resolved(
+        let response = send(&resolved(
             "PUT",
             address,
             ResolvedBody::Form(vec![(String::from("a b"), String::from("1&2"))]),
@@ -2302,21 +2594,27 @@ docs: Creates a user.
             .local_addr()
             .unwrap()
             .port();
-        let response = execute(&resolved(
+        let response = send(&resolved(
             "GET",
             format!("http://127.0.0.1:{port}/"),
             ResolvedBody::None,
         ));
 
         assert_eq!(response.status, None);
-        assert!(response.error.unwrap().starts_with("No se pudo conectar"));
+        let error = response.error.unwrap();
+        assert_eq!(error.kind, HttpErrorKind::Connect);
+        assert!(error.message.starts_with("No se pudo conectar"));
 
-        let invalid = execute(&resolved(
+        let invalid = send(&resolved(
             "NOT A METHOD",
             String::from("http://x"),
             ResolvedBody::None,
         ));
-        assert!(invalid.error.unwrap().contains("Metodo HTTP invalido"));
+        assert!(invalid
+            .error
+            .unwrap()
+            .message
+            .contains("Metodo HTTP invalido"));
     }
 
     #[test]
@@ -2341,6 +2639,225 @@ docs: Creates a user.
         assert_eq!(response.status, Some(200));
         assert_eq!(response.body_text, "hello");
         assert!(in_flight.label.starts_with("GET http://127.0.0.1:"));
+    }
+
+    const STALLED_BODY: &str =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1000000\r\n\r\npartial";
+
+    #[test]
+    fn cancelling_closes_the_connection_and_ends_the_worker() {
+        let (address, accepted, closed) = stalling_server("");
+        let request = resolved("GET", address, ResolvedBody::None);
+        let (cancel_sender, cancel) = oneshot::channel::<()>();
+        let (done_sender, done) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done_sender.send(execute(&request, cancel).is_none());
+        });
+
+        accepted.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(cancel_sender);
+
+        assert_eq!(
+            done.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "the worker returns promptly, without a response"
+        );
+        closed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the server sees the connection closed");
+    }
+
+    #[test]
+    fn cancelling_stops_a_body_download() {
+        let (address, accepted, closed) = stalling_server(STALLED_BODY);
+        let in_flight = spawn_request(
+            PathBuf::from("download.yml"),
+            resolved("GET", address, ResolvedBody::None),
+        );
+        accepted.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Let the client get past the headers and into the body.
+        thread::sleep(Duration::from_millis(200));
+
+        let cancelled = in_flight.cancel();
+
+        let error = cancelled
+            .error
+            .expect("a cancelled request has no response");
+        assert_eq!(error.kind, HttpErrorKind::Cancelled);
+        assert_eq!(error.message, "Request cancelado");
+        assert_eq!(cancelled.method, "GET");
+        closed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the download stops: the connection is closed");
+    }
+
+    #[test]
+    fn timeouts_name_the_limit_and_where_it_comes_from() {
+        let (address, _accepted, _closed) = stalling_server(STALLED_BODY);
+        let response = send(&ResolvedRequest {
+            timeout: EffectiveTimeout {
+                limit: Some(Duration::from_millis(300)),
+                source: TimeoutSource::Request,
+            },
+            ..resolved("GET", address, ResolvedBody::None)
+        });
+        assert_eq!(
+            response.status,
+            Some(200),
+            "it fired while reading the body"
+        );
+        let error = response.error.unwrap();
+        assert_eq!(error.kind, HttpErrorKind::Timeout);
+        assert_eq!(
+            error.message,
+            "Timeout: sin respuesta completa en 300 ms (settings.timeout del request)"
+        );
+
+        let (address, _accepted, _closed) = stalling_server("");
+        let response = send(&ResolvedRequest {
+            timeout: EffectiveTimeout {
+                limit: Some(Duration::from_millis(300)),
+                source: TimeoutSource::Default,
+            },
+            ..resolved("GET", address, ResolvedBody::None)
+        });
+        assert_eq!(response.status, None);
+        let error = response.error.unwrap();
+        assert_eq!(error.kind, HttpErrorKind::Timeout);
+        assert!(
+            error
+                .message
+                .contains("default de mdnav: http_timeout_secs en"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn reads_timeout_settings() {
+        let timeout = |yaml: &str| parse_timeout(parse_yaml(yaml).unwrap().get("timeout"));
+        assert_eq!(
+            timeout("timeout: 2500"),
+            TimeoutSetting::After(Duration::from_millis(2500))
+        );
+        assert_eq!(timeout("timeout: 0"), TimeoutSetting::Unlimited);
+        assert_eq!(timeout("timeout: inherit"), TimeoutSetting::Inherit);
+        assert_eq!(timeout("other: 1"), TimeoutSetting::Inherit);
+
+        let defaults = |yaml: &str| parse_request_defaults(yaml).unwrap().timeout;
+        assert_eq!(
+            defaults("request:\n  settings:\n    http:\n      timeout: 4000\n"),
+            TimeoutSetting::After(Duration::from_millis(4000))
+        );
+        assert_eq!(
+            defaults("request:\n  settings:\n    timeout: 0\n"),
+            TimeoutSetting::Unlimited,
+            "a flat settings.timeout is read too"
+        );
+        assert_eq!(
+            defaults("request:\n  headers: []\n"),
+            TimeoutSetting::Inherit
+        );
+    }
+
+    #[test]
+    fn effective_timeout_prefers_request_then_folders_then_default() {
+        let secs = |n: u64| Duration::from_secs(n);
+        let level = |label: &str, timeout: TimeoutSetting| {
+            (
+                String::from(label),
+                RequestDefaults {
+                    timeout,
+                    ..RequestDefaults::default()
+                },
+            )
+        };
+        let chain = [
+            level("collection", TimeoutSetting::After(secs(5))),
+            level("folder users", TimeoutSetting::After(secs(7))),
+            level("folder admins", TimeoutSetting::Inherit),
+        ];
+
+        assert_eq!(
+            effective_timeout(TimeoutSetting::After(secs(2)), &chain, Some(secs(30))),
+            EffectiveTimeout {
+                limit: Some(secs(2)),
+                source: TimeoutSource::Request,
+            }
+        );
+        assert_eq!(
+            effective_timeout(TimeoutSetting::Unlimited, &chain, Some(secs(30))),
+            EffectiveTimeout {
+                limit: None,
+                source: TimeoutSource::Request,
+            },
+            "timeout: 0 on the request waits forever"
+        );
+        assert_eq!(
+            effective_timeout(TimeoutSetting::Inherit, &chain, Some(secs(30))),
+            EffectiveTimeout {
+                limit: Some(secs(7)),
+                source: TimeoutSource::Inherited(String::from("folder users")),
+            },
+            "the closest folder that sets one wins"
+        );
+        assert_eq!(
+            effective_timeout(TimeoutSetting::Inherit, &chain[..1], Some(secs(30))),
+            EffectiveTimeout {
+                limit: Some(secs(5)),
+                source: TimeoutSource::Inherited(String::from("collection")),
+            }
+        );
+        assert_eq!(
+            effective_timeout(TimeoutSetting::Inherit, &chain[2..], Some(secs(30))),
+            EffectiveTimeout {
+                limit: Some(secs(30)),
+                source: TimeoutSource::Default,
+            },
+            "nothing set: the user's default"
+        );
+        assert_eq!(
+            effective_timeout(TimeoutSetting::Inherit, &[], None).limit,
+            None,
+            "a default of 0 means no limit"
+        );
+    }
+
+    #[test]
+    fn resolves_the_timeout_through_folders() {
+        let (temp, request) = sample_collection();
+        temp.write(
+            "users/folder.yml",
+            "request:\n  settings:\n    http:\n      timeout: 4000\n",
+        );
+        let inherit =
+            parse_request("info:\n  type: http\nhttp:\n  url: x\nsettings:\n  timeout: inherit\n")
+                .unwrap();
+        let resolved = resolve_request(
+            temp.path(),
+            &request,
+            &inherit,
+            None,
+            Some(Duration::from_secs(30)),
+        );
+        assert_eq!(
+            resolved.timeout,
+            EffectiveTimeout {
+                limit: Some(Duration::from_millis(4000)),
+                source: TimeoutSource::Inherited(String::from("folder users")),
+            }
+        );
+
+        let own = parse_request(CREATE_USER).unwrap();
+        let resolved = resolve_request(
+            temp.path(),
+            &request,
+            &own,
+            None,
+            Some(Duration::from_secs(30)),
+        );
+        assert_eq!(resolved.timeout.limit, Some(Duration::from_millis(1500)));
+        assert_eq!(resolved.timeout.source, TimeoutSource::Request);
     }
 
     #[test]
@@ -2385,7 +2902,7 @@ docs: Creates a user.
         for path in requests {
             let spec = parse_request(&fs::read_to_string(&path).unwrap())
                 .unwrap_or_else(|err| panic!("{}: {err:#}", path.display()));
-            let resolved = resolve_request(&root, &path, &spec, Some(public));
+            let resolved = resolve_request(&root, &path, &spec, Some(public), None);
             assert!(
                 resolved.url.starts_with("https://") && !resolved.url.contains("{{"),
                 "{}: {}",
@@ -2402,7 +2919,7 @@ docs: Creates a user.
 
         let echo = root.join("echo/post-json.yml");
         let spec = parse_request(&fs::read_to_string(&echo).unwrap()).unwrap();
-        let resolved = resolve_request(&root, &echo, &spec, Some(public));
+        let resolved = resolve_request(&root, &echo, &spec, Some(public), None);
         assert_eq!(resolved.auth_label, "bearer · heredada de folder echo");
     }
 }
