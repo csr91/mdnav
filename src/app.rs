@@ -17,6 +17,7 @@ use crate::{
         parent_dir_if_within, DocItem,
     },
     http::{self, HttpResponse},
+    http_tree::{self, HttpTree, RequestMeta},
     markdown::{
         load_preview, mermaid_terminal_canvas, MermaidBlock, MermaidCanvas, PreviewDocument,
     },
@@ -219,8 +220,9 @@ pub struct HttpSession {
     pub in_flight: Option<http::InFlight>,
 }
 
-/// The open file when it is a request of an OpenCollection. The client's
-/// request detail and the send logic read it.
+/// A request of an OpenCollection: the one selected in the client's tree on
+/// `Screen::Http`, the open file otherwise. The client's request detail and the
+/// send logic read it.
 pub struct HttpView {
     pub collection_root: PathBuf,
     pub request_path: PathBuf,
@@ -247,15 +249,16 @@ pub struct HttpState {
 /// State of the fullscreen HTTP client (`Screen::Http`).
 #[derive(Default)]
 pub struct HttpClientState {
-    pub root: Option<PathBuf>,
-    pub collections: Vec<PathBuf>,
-    pub collection_cursor: usize,
-    pub requests: Vec<PathBuf>,
-    pub cursor: usize,
-    /// 0 collections, 1 requests, 2 request detail / response.
+    /// Collections, folders and requests, with their expansion state. The
+    /// selected row drives the request detail and the active collection.
+    pub tree: HttpTree,
+    /// 0 tree, 1 request detail / response.
     pub focus: u8,
     pub creating_collection: bool,
 }
+
+/// Panes of the HTTP client that `focus` cycles through.
+const HTTP_CLIENT_PANES: u8 = 2;
 
 impl Default for HttpState {
     fn default() -> Self {
@@ -1071,57 +1074,51 @@ impl App {
     fn handle_http_client_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.close_http_client(),
-            KeyCode::Tab => self.http.client.focus = (self.http.client.focus + 1) % 3,
-            KeyCode::BackTab => self.http.client.focus = (self.http.client.focus + 2) % 3,
-            KeyCode::Left | KeyCode::Char('[') if self.http.client.focus == 0 => {
-                self.shift_http_collection(-1)
+            KeyCode::Tab => {
+                self.http.client.focus = (self.http.client.focus + 1) % HTTP_CLIENT_PANES
             }
-            KeyCode::Right | KeyCode::Char(']') if self.http.client.focus == 0 => {
-                self.shift_http_collection(1)
+            KeyCode::BackTab => {
+                self.http.client.focus =
+                    (self.http.client.focus + HTTP_CLIENT_PANES - 1) % HTTP_CLIENT_PANES
             }
             KeyCode::Up | KeyCode::Char('k') if self.http.client.focus == 0 => {
-                self.shift_http_collection(-1)
+                self.move_http_tree_cursor(-1)
             }
             KeyCode::Down | KeyCode::Char('j') if self.http.client.focus == 0 => {
-                self.shift_http_collection(1)
+                self.move_http_tree_cursor(1)
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.http.client.focus == 0 => {
+                self.http.client.tree.expand();
+                self.sync_http_client_selection();
+            }
+            KeyCode::Left | KeyCode::Char('h') if self.http.client.focus == 0 => {
+                self.http.client.tree.collapse();
+                self.sync_http_client_selection();
+            }
+            // On a request the tree has nothing to open: go to its response.
+            KeyCode::Enter if self.http.client.focus == 0 => {
+                if !self.http.client.tree.expand() && self.http.view.is_some() {
+                    self.http.client.focus = 1;
+                }
+                self.sync_http_client_selection();
             }
             KeyCode::Up | KeyCode::Char('k') if self.http.client.focus == 1 => {
-                self.http.client.cursor = self.http.client.cursor.saturating_sub(1);
-                self.open_client_cursor_request()?;
-            }
-            KeyCode::Down | KeyCode::Char('j') if self.http.client.focus == 1 => {
-                self.http.client.cursor = (self.http.client.cursor + 1)
-                    .min(self.http.client.requests.len().saturating_sub(1));
-                self.open_client_cursor_request()?;
-            }
-            KeyCode::Up | KeyCode::Char('k') if self.http.client.focus == 2 => {
                 self.http.response_scroll = self.http.response_scroll.saturating_sub(1)
             }
-            KeyCode::Down | KeyCode::Char('j') if self.http.client.focus == 2 => {
+            KeyCode::Down | KeyCode::Char('j') if self.http.client.focus == 1 => {
                 self.http.response_scroll = self.http.response_scroll.saturating_add(1)
             }
-            KeyCode::Char('[') | KeyCode::Char('h') if self.http.client.focus == 2 => {
+            KeyCode::Char('[') | KeyCode::Char('h') if self.http.client.focus == 1 => {
                 self.move_response_tab(-1)
             }
-            KeyCode::Char(']') | KeyCode::Char('l') if self.http.client.focus == 2 => {
+            KeyCode::Char(']') | KeyCode::Char('l') if self.http.client.focus == 1 => {
                 self.move_response_tab(1)
             }
-            KeyCode::Enter => {
-                self.open_client_cursor_request()?;
-                self.http.client.focus = 2;
-            }
             KeyCode::Char('s') | KeyCode::Char('S') => {
-                if let Some(path) = self
-                    .http
-                    .client
-                    .requests
-                    .get(self.http.client.cursor)
-                    .cloned()
-                {
-                    self.open_file(path)?;
+                if self.http.client.tree.selected_request().is_some() {
                     self.send_http_request()?;
                 } else {
-                    self.status = String::from("Selecciona o abre un request para enviarlo");
+                    self.status = String::from("Selecciona un request para enviarlo");
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') => self.start_client_request_input(),
@@ -1134,23 +1131,8 @@ impl App {
             KeyCode::Char('e') => self.open_http_env_picker(),
             KeyCode::Char('i') | KeyCode::Char('I') => {
                 self.import_postman_selected()?;
-                self.http.client.collections = collect_http_collections(&self.root);
-                if let Some(root) = self.current_collection_root() {
-                    self.http.client.collection_cursor = self
-                        .http
-                        .client
-                        .collections
-                        .iter()
-                        .position(|p| p == &root)
-                        .unwrap_or(0);
-                    self.http.client.root = self
-                        .http
-                        .client
-                        .collections
-                        .get(self.http.client.collection_cursor)
-                        .cloned();
-                    self.refresh_http_client_requests();
-                }
+                self.reload_http_client_tree();
+                self.sync_http_client_selection();
             }
             KeyCode::Char('m') | KeyCode::Char('M') => self.open_http_menu(),
             _ => {}
@@ -3132,11 +3114,25 @@ impl App {
             .cloned()
     }
 
-    /// Sets the HTTP view when the open file is a request of an OpenCollection,
-    /// and clears it for any other file. The preview itself keeps showing the
-    /// YAML like any other file.
+    /// The request the HTTP view describes: the one selected in the client's
+    /// tree on `Screen::Http`, the open file otherwise.
+    fn http_view_path(&self) -> Option<PathBuf> {
+        if self.screen == Screen::Http {
+            self.http
+                .client
+                .tree
+                .selected_request()
+                .map(Path::to_path_buf)
+        } else {
+            self.current_file.clone()
+        }
+    }
+
+    /// Sets the HTTP view when `http_view_path` is a request of an
+    /// OpenCollection, and clears it for any other file. The preview itself
+    /// keeps showing the YAML like any other file.
     fn refresh_http_view(&mut self) {
-        let Some(path) = self.current_file.clone() else {
+        let Some(path) = self.http_view_path() else {
             self.http.view = None;
             return;
         };
@@ -3318,106 +3314,119 @@ Elegi un environment con :httpenv o definilas en la collection.",
     }
 
     fn open_http_client(&mut self) {
-        let current = self.current_collection_root().or_else(|| {
-            self.selected_item_path()
-                .and_then(|path| http::find_collection_root(&path))
-        });
-        self.http.client.collections = collect_http_collections(&self.root);
-        if let Some(root) = current {
-            if let Some(index) = self.http.client.collections.iter().position(|p| p == &root) {
-                self.http.client.collection_cursor = index;
-            } else {
-                self.http.client.collections.push(root.clone());
-                self.http.client.collection_cursor = self.http.client.collections.len() - 1;
-            }
-        }
-        self.http.client.root = self
+        // Read in markdown terms, before the screen switch: the open request
+        // and the collection of the open file or the selected tree item.
+        let request = self
             .http
-            .client
-            .collections
-            .get(self.http.client.collection_cursor)
-            .cloned();
-        self.refresh_http_client_requests();
+            .view
+            .as_ref()
+            .map(|view| view.request_path.clone());
+        let current = self.current_collection_root();
+        self.screen = Screen::Http;
+        self.reload_http_client_tree();
+        if let Some(root) = &current {
+            self.ensure_http_collection(root);
+        }
+
+        let tree = &mut self.http.client.tree;
         // When the open file is a request, land on it.
-        if let Some(view) = &self.http.view {
-            if let Some(index) = self
-                .http
-                .client
-                .requests
-                .iter()
-                .position(|path| path == &view.request_path)
-            {
-                self.http.client.cursor = index;
+        let revealed = request.is_some_and(|path| tree.reveal(&path));
+        if !revealed {
+            if let Some(root) = current {
+                // Keep a previous selection inside the same collection.
+                if tree.active_collection() != Some(root.as_path()) {
+                    tree.reveal(&root);
+                }
             }
         }
-        self.http.client.focus = if self.http.client.requests.is_empty() {
-            0
-        } else {
-            1
-        };
-        let _ = self.open_client_cursor_request();
+        // The active collection starts open.
+        if let Some(root) = tree.active_collection().map(Path::to_path_buf) {
+            tree.expand_path(&root);
+        }
+        self.http.client.focus = 0;
         self.overlay = Overlay::None;
-        self.screen = Screen::Http;
+        self.sync_http_client_selection();
         self.status = String::from("HTTP Client");
     }
 
     fn close_http_client(&mut self) {
         self.screen = Screen::Markdown;
+        // The view followed the client's selection: give it back to the open
+        // file so the markdown preview describes what it shows.
+        self.refresh_http_view();
         self.status = String::from("HTTP Client cerrado");
     }
 
-    fn shift_http_collection(&mut self, delta: isize) {
-        if self.http.client.collections.is_empty() {
-            return;
+    fn move_http_tree_cursor(&mut self, delta: isize) {
+        self.http.client.tree.move_cursor(delta);
+        self.sync_http_client_selection();
+    }
+
+    /// Points the request detail and the response at the selected row. Only
+    /// the request file is read: the markdown side (open file, preview,
+    /// recents) is left untouched.
+    fn sync_http_client_selection(&mut self) {
+        let previous = self
+            .http
+            .view
+            .as_ref()
+            .map(|view| view.request_path.clone());
+        self.refresh_http_view();
+        let current = self
+            .http
+            .view
+            .as_ref()
+            .map(|view| view.request_path.clone());
+        if current != previous {
+            self.http.response_scroll = 0;
+            if let Some(path) = current {
+                if let Some(status) = self.http_open_status(&path) {
+                    self.status = status;
+                }
+            }
         }
-        let len = self.http.client.collections.len() as isize;
-        self.http.client.collection_cursor =
-            (self.http.client.collection_cursor as isize + delta).rem_euclid(len) as usize;
-        self.http.client.root = self
-            .http
-            .client
-            .collections
-            .get(self.http.client.collection_cursor)
-            .cloned();
-        self.http.client.cursor = 0;
-        self.refresh_http_client_requests();
-        let _ = self.open_client_cursor_request();
     }
 
-    fn open_client_cursor_request(&mut self) -> Result<()> {
-        let Some(path) = self
-            .http
+    /// Rebuilds the tree from disk, keeping collections found earlier outside
+    /// the docs root and the selected path.
+    fn reload_http_client_tree(&mut self) {
+        let mut roots = collect_http_collections(&self.root);
+        for root in self.http.client.tree.collection_roots() {
+            if !roots.contains(&root) && http::is_collection_dir(&root) {
+                roots.push(root);
+            }
+        }
+        self.http
             .client
-            .requests
-            .get(self.http.client.cursor)
-            .cloned()
-        else {
-            self.http.view = None;
-            return Ok(());
-        };
-        self.open_file(path)?;
-        self.http.response_scroll = 0;
-        Ok(())
+            .tree
+            .set_collections(build_http_tree(&roots));
     }
 
-    fn refresh_http_client_requests(&mut self) {
-        let Some(root) = self.http.client.root.clone() else {
-            self.http.client.requests.clear();
-            self.http.client.cursor = 0;
-            return;
-        };
-        let mut requests = collect_http_requests(&root);
-        requests.sort();
-        self.http.client.requests = requests;
-        self.http.client.cursor = self
-            .http
-            .client
-            .cursor
-            .min(self.http.client.requests.len().saturating_sub(1));
+    /// Lists `root` in the tree when discovery missed it, e.g. a collection
+    /// outside the docs root.
+    fn ensure_http_collection(&mut self, root: &Path) {
+        let mut roots = self.http.client.tree.collection_roots();
+        if !roots.iter().any(|known| known == root) {
+            roots.push(root.to_path_buf());
+            self.http
+                .client
+                .tree
+                .set_collections(build_http_tree(&roots));
+        }
+    }
+
+    /// Rebuilds the tree and selects `path`, opening its folders.
+    fn reveal_in_http_client(&mut self, path: &Path) {
+        self.reload_http_client_tree();
+        if let Some(root) = http::find_collection_root(path) {
+            self.ensure_http_collection(&root);
+        }
+        self.http.client.tree.reveal(path);
+        self.sync_http_client_selection();
     }
 
     fn start_client_request_input(&mut self) {
-        if self.http.client.root.is_none() {
+        if self.http.client.tree.active_collection().is_none() {
             self.status = String::from("Primero crea una collection con C");
             return;
         }
@@ -3441,15 +3450,21 @@ Elegi un environment con :httpenv o definilas en la collection.",
             "copy" => self.copy_response_body()?,
             _ => {}
         }
+        // init and import add collections the tree has to list.
+        if self.screen == Screen::Http && matches!(name, "init" | "import") {
+            self.reload_http_client_tree();
+            self.sync_http_client_selection();
+        }
         Ok(())
     }
 
-    /// The collection the HTTP actions apply to: the open request's, or the
-    /// one containing the selected tree item.
+    /// The collection the HTTP actions apply to: in the client, the one of the
+    /// selected row; otherwise the open request's, or the one containing the
+    /// selected tree item.
     fn current_collection_root(&self) -> Option<PathBuf> {
         if self.screen == Screen::Http {
-            if let Some(root) = &self.http.client.root {
-                return Some(root.clone());
+            if let Some(root) = self.http.client.tree.active_collection() {
+                return Some(root.to_path_buf());
             }
         }
         if let Some(view) = &self.http.view {
@@ -3516,14 +3531,20 @@ Elegi un environment con :httpenv o definilas en la collection.",
 
     fn confirm_new_request(&mut self) -> Result<()> {
         self.overlay = Overlay::None;
-        let Some(dir) = self.http.client.root.clone() else {
+        let Some(dir) = self
+            .http
+            .client
+            .tree
+            .active_collection()
+            .map(Path::to_path_buf)
+        else {
             self.status = String::from("Primero crea una collection con C");
             return Ok(());
         };
         let path = http::create_request(&dir, &self.http.input)?;
-        self.http.client.root = Some(dir);
-        self.refresh_http_client_requests();
-        self.restore_path_focus(&path)?;
+        // Keep the explorer in sync with the new file without opening it.
+        self.reload_items()?;
+        self.reveal_in_http_client(&path);
         self.status = format!(
             "Request creado: {} · Shift+E para editarlo",
             display_name(&path)
@@ -3565,15 +3586,13 @@ Elegi un environment con :httpenv o definilas en la collection.",
         };
         fs::create_dir_all(&path)?;
         let created = http::init_collection(&path)?;
-        self.http.client.root = Some(path.clone());
-        self.http.client.collections.push(path.clone());
-        self.http.client.collection_cursor = self.http.client.collections.len() - 1;
         self.reload_items()?;
-        self.refresh_http_client_requests();
-        self.http.client.focus = 1;
         self.http.client.creating_collection = false;
         self.overlay = Overlay::None;
         self.screen = Screen::Http;
+        self.reveal_in_http_client(&path);
+        self.http.client.tree.expand_path(&path);
+        self.http.client.focus = 0;
         self.status = format!(
             "Collection creada en {} ({} archivos)",
             path.display(),
@@ -4029,6 +4048,30 @@ Elegi un environment con :httpenv o definilas en la collection.",
         self.file_op_source = None;
         self.overlay = Overlay::None;
         self.status = String::from(status);
+    }
+}
+
+/// Builds the client's tree for `roots`. Every request is parsed once here so
+/// the leaves can show their method and name.
+fn build_http_tree(roots: &[PathBuf]) -> Vec<http_tree::HttpTreeNode> {
+    roots
+        .iter()
+        .map(|root| {
+            http_tree::build_collection(root, &collect_http_requests(root), read_request_meta)
+        })
+        .collect()
+}
+
+fn read_request_meta(path: &Path) -> RequestMeta {
+    let spec = fs::read_to_string(path)
+        .ok()
+        .and_then(|content| http::parse_request(&content).ok());
+    match spec {
+        Some(spec) => RequestMeta {
+            name: Some(spec.name),
+            method: Some(spec.method),
+        },
+        None => RequestMeta::default(),
     }
 }
 

@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod docs;
 mod http;
+mod http_tree;
 mod markdown;
 mod postman;
 mod share;

@@ -17,6 +17,7 @@ use crate::{
     },
     config::{config_path, TreeInfoMode},
     http::{self, HttpResponse},
+    http_tree::{HttpNodeKind, HttpTreeRow},
     strings::Strings,
 };
 
@@ -300,11 +301,7 @@ fn http_client_footer_spans(app: &App) -> Vec<Span<'static>> {
     let (focus, hint) = match app.http.client.focus {
         0 => (
             "COLLECTIONS",
-            "↑↓/jk collection · Enter abrir · S enviar · N nuevo · C collection · I importar · Tab panel · Esc/q volver  ",
-        ),
-        1 => (
-            "REQUESTS",
-            "↑↓/jk request · Enter abrir · S enviar · N nuevo · e env · M menú · Tab panel · Esc/q volver  ",
+            "↑↓/jk mover · l/→ abrir · h/← cerrar · Enter response · S enviar · N nuevo · C collection · I importar · e env · M menú · Tab panel · Esc/q volver  ",
         ),
         _ => (
             "RESPONSE",
@@ -865,7 +862,7 @@ fn request_notice_rows(app: &App) -> u16 {
 }
 
 fn render_response(frame: &mut Frame, area: Rect, app: &App) {
-    let focused = app.screen == Screen::Http && app.http.client.focus == 2;
+    let focused = app.screen == Screen::Http && app.http.client.focus == 1;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style(focused));
@@ -1101,33 +1098,24 @@ fn response_tab_lines(app: &App, response: &HttpResponse) -> Vec<Line<'static>> 
 fn render_http_client(frame: &mut Frame, area: Rect, app: &App) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(24),
-            Constraint::Percentage(27),
-            Constraint::Percentage(49),
-        ])
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(area);
-    let collection_items: Vec<ListItem> = if app.http.client.collections.is_empty() {
-        vec![ListItem::new("  Sin collections")]
+
+    let tree = &app.http.client.tree;
+    let items: Vec<ListItem> = if tree.rows.is_empty() {
+        vec![
+            ListItem::new("  Sin collections"),
+            ListItem::new("  C: crear collection"),
+        ]
     } else {
-        app.http
-            .client
-            .collections
-            .iter()
-            .map(|path| {
-                ListItem::new(format!(
-                    "  {}",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                ))
-            })
-            .collect()
+        tree.rows.iter().map(http_tree_item).collect()
     };
-    let mut collection_state = ListState::default();
-    if !app.http.client.collections.is_empty() {
-        collection_state.select(Some(app.http.client.collection_cursor));
+    let mut state = ListState::default();
+    if !tree.rows.is_empty() {
+        state.select(Some(tree.cursor));
     }
     frame.render_stateful_widget(
-        List::new(collection_items)
+        List::new(items)
             .block(
                 Block::default()
                     .title(" Collections ")
@@ -1145,70 +1133,72 @@ fn render_http_client(frame: &mut Frame, area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
         columns[0],
-        &mut collection_state,
-    );
-
-    let request_items: Vec<ListItem> = if app.http.client.requests.is_empty() {
-        vec![ListItem::new("  N: crear request")]
-    } else {
-        app.http
-            .client
-            .requests
-            .iter()
-            .map(|path| {
-                let label = app
-                    .http
-                    .client
-                    .root
-                    .as_ref()
-                    .and_then(|root| path.strip_prefix(root).ok())
-                    .unwrap_or(path)
-                    .with_extension("")
-                    .display()
-                    .to_string();
-                ListItem::new(format!("  {label}"))
-            })
-            .collect()
-    };
-    let mut request_state = ListState::default();
-    if !app.http.client.requests.is_empty() {
-        request_state.select(Some(app.http.client.cursor));
-    }
-    frame.render_stateful_widget(
-        List::new(request_items)
-            .block(
-                Block::default()
-                    .title(" Requests ")
-                    .borders(Borders::ALL)
-                    .border_style(if app.http.client.focus == 1 {
-                        Style::default().fg(Color::Green)
-                    } else {
-                        border_style(false)
-                    }),
-            )
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        columns[1],
-        &mut request_state,
+        &mut state,
     );
 
     let detail = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-        .split(columns[2]);
+        .split(columns[1]);
     render_client_request_detail(frame, detail[0], app);
     render_response(frame, detail[1], app);
+}
+
+/// One row of the client's tree: an open/closed marker on collections and
+/// folders, the colored method on requests.
+fn http_tree_item(row: &HttpTreeRow) -> ListItem<'static> {
+    let indent = "  ".repeat(row.depth);
+    let mut spans = vec![Span::raw(format!(" {indent}"))];
+    match row.kind {
+        HttpNodeKind::Collection | HttpNodeKind::Folder => {
+            let marker = if row.expanded { "▾" } else { "▸" };
+            let style = if row.kind == HttpNodeKind::Collection {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            spans.push(Span::styled(format!("{marker} {}", row.label), style));
+        }
+        HttpNodeKind::Request => {
+            let method = row.method.as_deref().unwrap_or("?");
+            spans.push(Span::styled(
+                format!("{:<4} ", method_tag(method)),
+                Style::default()
+                    .fg(method_color(method))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(row.label.clone()));
+        }
+    }
+    ListItem::new(Line::from(spans))
+}
+
+/// Short form of a method so the tags line up in the narrow tree pane.
+fn method_tag(method: &str) -> &str {
+    match method {
+        "DELETE" => "DEL",
+        "PATCH" => "PTCH",
+        "OPTIONS" => "OPT",
+        other => other.get(..4).unwrap_or(other),
+    }
+}
+
+fn method_color(method: &str) -> Color {
+    match method {
+        "GET" => Color::Green,
+        "POST" => Color::Yellow,
+        "PUT" => Color::Blue,
+        "PATCH" => Color::Magenta,
+        "DELETE" => Color::Red,
+        _ => Color::Gray,
+    }
 }
 
 fn render_client_request_detail(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .title(" Request ")
         .borders(Borders::ALL)
-        .border_style(if app.http.client.focus == 2 {
+        .border_style(if app.http.client.focus == 1 {
             Style::default().fg(Color::Green)
         } else {
             border_style(false)
@@ -1257,7 +1247,7 @@ fn render_client_request_detail(frame: &mut Frame, area: Rect, app: &App) {
         vec![
             Line::from("Selecciona o crea un request"),
             Line::from(""),
-            Line::from("Enter abre · S envía"),
+            Line::from("l/→ abre carpetas · N crea un request · S envía"),
         ]
     };
     frame.render_widget(
