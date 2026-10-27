@@ -26,7 +26,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Min(3), Constraint::Length(2)])
         .split(frame.area());
 
-    if app.json_viewer_active {
+    if app.overlay == Overlay::HttpClient {
+        render_http_client(frame, areas[0], app);
+    } else if app.json_viewer_active {
         render_json_viewer(frame, areas[0], app);
     } else if app.fullscreen == FullscreenPanel::Tree {
         render_tree(frame, areas[0], app);
@@ -44,7 +46,11 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     let s = app.config.strings();
-    let footer = if app.json_viewer_active {
+    let footer = if app.overlay == Overlay::HttpClient {
+        Paragraph::new("Tab panel · ↑↓ navegar · Enter abrir · S enviar · N nuevo · C collection · E env · I importar · M menú · Esc volver")
+            .style(Style::default().fg(Color::Gray))
+            .block(Block::default().borders(Borders::TOP))
+    } else if app.json_viewer_active {
         Paragraph::new(Line::from(Span::styled(
             "JSON VIEWER  F5 procesar  Tab cambiar panel  y copiar  Shift+0 vista limpia  Esc cerrar",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -150,6 +156,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     match app.overlay {
         Overlay::Help => render_help_popup(frame, app),
+        Overlay::Tools => render_tools_popup(frame, app),
         Overlay::MermaidSelect => render_mermaid_select_popup(frame, app),
         Overlay::MermaidOutput => render_mermaid_output_popup(frame, app),
         Overlay::MermaidTerminalView => render_mermaid_terminal_view(frame, app),
@@ -166,6 +173,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Git => render_git_popup(frame, app),
         Overlay::Alert => render_alert_popup(frame, app),
         Overlay::HttpMenu => render_http_menu_popup(frame, app),
+        Overlay::HttpClient => {}
         Overlay::HttpEnv => render_http_env_popup(frame, app),
         Overlay::HttpInput => render_http_input_popup(frame, app),
         Overlay::Rename => {}
@@ -199,6 +207,7 @@ fn render_mode_pill(frame: &mut Frame, area: Rect, app: &App) {
 fn mode_label(app: &App) -> (&'static str, Color) {
     match app.overlay {
         Overlay::CommandPalette => ("COMMAND", Color::Yellow),
+        Overlay::Tools => ("TOOLS", Color::Cyan),
         Overlay::Marks => ("MARKS", Color::Cyan),
         Overlay::Grep => ("GREP", Color::Green),
         Overlay::Find => ("FIND", Color::Magenta),
@@ -214,7 +223,9 @@ fn mode_label(app: &App) -> (&'static str, Color) {
             ("MERMAID", Color::Cyan)
         }
         Overlay::WebLink => ("LINK", Color::Cyan),
-        Overlay::HttpMenu | Overlay::HttpEnv | Overlay::HttpInput => ("HTTP", Color::Green),
+        Overlay::HttpMenu | Overlay::HttpClient | Overlay::HttpEnv | Overlay::HttpInput => {
+            ("HTTP", Color::Green)
+        }
         Overlay::None => {
             if app.json_viewer_active {
                 return ("JSON", Color::Green);
@@ -818,7 +829,8 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bord
 }
 
 fn render_response(frame: &mut Frame, area: Rect, app: &App) {
-    let focused = app.focus == Focus::Preview && app.http.response_focus;
+    let focused = (app.overlay == Overlay::HttpClient && app.http.client_focus == 2)
+        || (app.focus == Focus::Preview && app.http.response_focus);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style(focused));
@@ -1051,6 +1063,173 @@ fn response_tab_lines(app: &App, response: &HttpResponse) -> Vec<Line<'static>> 
     }
 }
 
+fn render_http_client(frame: &mut Frame, area: Rect, app: &App) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(24),
+            Constraint::Percentage(27),
+            Constraint::Percentage(49),
+        ])
+        .split(area);
+    let collection_items: Vec<ListItem> = if app.http.client_collections.is_empty() {
+        vec![ListItem::new("  Sin collections")]
+    } else {
+        app.http
+            .client_collections
+            .iter()
+            .map(|path| {
+                ListItem::new(format!(
+                    "  {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ))
+            })
+            .collect()
+    };
+    let mut collection_state = ListState::default();
+    if !app.http.client_collections.is_empty() {
+        collection_state.select(Some(app.http.client_collection_cursor));
+    }
+    frame.render_stateful_widget(
+        List::new(collection_items)
+            .block(
+                Block::default()
+                    .title(" Collections ")
+                    .borders(Borders::ALL)
+                    .border_style(if app.http.client_focus == 0 {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        border_style(false)
+                    }),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        columns[0],
+        &mut collection_state,
+    );
+
+    let request_items: Vec<ListItem> = if app.http.client_requests.is_empty() {
+        vec![ListItem::new("  N: crear request")]
+    } else {
+        app.http
+            .client_requests
+            .iter()
+            .map(|path| {
+                let label = app
+                    .http
+                    .client_root
+                    .as_ref()
+                    .and_then(|root| path.strip_prefix(root).ok())
+                    .unwrap_or(path)
+                    .with_extension("")
+                    .display()
+                    .to_string();
+                ListItem::new(format!("  {label}"))
+            })
+            .collect()
+    };
+    let mut request_state = ListState::default();
+    if !app.http.client_requests.is_empty() {
+        request_state.select(Some(app.http.client_cursor));
+    }
+    frame.render_stateful_widget(
+        List::new(request_items)
+            .block(
+                Block::default()
+                    .title(" Requests ")
+                    .borders(Borders::ALL)
+                    .border_style(if app.http.client_focus == 1 {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        border_style(false)
+                    }),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        columns[1],
+        &mut request_state,
+    );
+
+    let detail = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .split(columns[2]);
+    render_client_request_detail(frame, detail[0], app);
+    render_response(frame, detail[1], app);
+}
+
+fn render_client_request_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .title(" Request ")
+        .borders(Borders::ALL)
+        .border_style(if app.http.client_focus == 2 {
+            Style::default().fg(Color::Green)
+        } else {
+            border_style(false)
+        });
+    let lines = if let Some(view) = &app.http.view {
+        if let Some(spec) = &view.spec {
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!("{}  ", spec.method),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(spec.url.clone()),
+                ]),
+                Line::from(Span::styled(
+                    format!(
+                        "Collection: {}",
+                        view.collection_root
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    ),
+                    Style::default().fg(Color::Gray),
+                )),
+                Line::from(Span::styled(
+                    format!(
+                        "Environment: {}",
+                        view.environment.as_deref().unwrap_or("ninguno")
+                    ),
+                    Style::default().fg(Color::Gray),
+                )),
+            ];
+            if !spec.headers.is_empty() {
+                lines.push(Line::from(format!("Headers: {}", spec.headers.len())));
+            }
+            if let Some(docs) = &spec.docs {
+                lines.extend(docs.lines().map(Line::from));
+            }
+            lines
+        } else {
+            vec![Line::from("Request inválido o no compatible")]
+        }
+    } else {
+        vec![
+            Line::from("Selecciona o crea un request"),
+            Line::from(""),
+            Line::from("Enter abre · S envía"),
+        ]
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn render_http_menu_popup(frame: &mut Frame, app: &App) {
     let popup_area = centered_rect(60, 45, frame.area());
     frame.render_widget(Clear, popup_area);
@@ -1098,6 +1277,32 @@ fn render_http_menu_popup(frame: &mut Frame, app: &App) {
         ))),
         sections[1],
     );
+}
+
+fn render_tools_popup(frame: &mut Frame, app: &App) {
+    let area = centered_rect(44, 28, frame.area());
+    frame.render_widget(Clear, area);
+    let items = ["JSON Viewer", "HTTP Client"]
+        .into_iter()
+        .map(|label| ListItem::new(label))
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(" Herramientas  ↑↓ elegir · Enter abrir · Esc volver ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+    let mut state = ListState::default();
+    state.select(Some(app.http.menu_cursor.min(1)));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_http_env_popup(frame: &mut Frame, app: &App) {
@@ -1571,7 +1776,7 @@ fn shortcut_groups(s: &'static Strings) -> Vec<ShortcutGroup> {
                 ("[ / ]  h / l", "response tabs"),
                 ("y", "copy the response body"),
                 ("Esc", "abandon the request in flight"),
-                (":http", "send, env, new, init, import"),
+                (":@http", "open HTTP Client"),
                 (":httpenv", "choose the environment"),
             ],
         },
@@ -2320,12 +2525,16 @@ fn render_command_palette(frame: &mut Frame, app: &App) {
     let items: Vec<ListItem> = filtered
         .iter()
         .map(|(name, desc)| {
+            let color = match *name {
+                "@tools" => Color::Cyan,
+                "@commands" => Color::Magenta,
+                "@http" => Color::Green,
+                _ => Color::Yellow,
+            };
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("{:<10}", name),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("  {desc}"), Style::default().fg(Color::Gray)),
             ]))

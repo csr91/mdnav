@@ -94,7 +94,7 @@ El preview muestra la ruta del archivo actual en el titulo y metadata breve en l
 
 Presioná `:` para abrir y escribí el comando. La paleta chica prioriza tus comandos recientes y muestra sugerencias por prefijo mientras tipeás; tambien entiende algunas intenciones (`buscar`, `copiar`, `indice`, `recientes`). Usá `:@commands` para abrir el catálogo grande agrupado por secciones, con todos los comandos y su descripción.
 
-`:q` `:files` `:find` `:grep` `:marks` `:recent` `:create` `:git` `:http` `:httpenv` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
+`:q` `:files` `:find` `:grep` `:marks` `:recent` `:create` `:git` `:@tools` `:@http` `:httpenv` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
 
 `:recent` abre los ultimos archivos visitados. `:marks` abre un popup filtrable con los bookmarks guardados. `:find` mantiene resaltada la ultima busqueda en el preview hasta abrir otro archivo o limpiar la busqueda. `:grep` busca texto en los archivos visibles del arbol y salta al resultado elegido.
 
@@ -135,7 +135,7 @@ Al abrir un request, el preview se parte en dos: el **request** arriba (URL resu
 | `Esc` | abandonar el request en curso |
 | `Shift+E` | editar el YAML del request |
 
-`:http` abre el menú con `send`, `env`, `new` (request nuevo en la carpeta seleccionada), `init` (convierte la carpeta seleccionada en una collection) e `import`. `:httpenv` elige el environment activo de la collection; queda guardado en la config.
+`:@http` abre el cliente HTTP a pantalla completa, dividido en collections, requests y detalle/response. `Tab` cambia de panel; en Collections, `↑`/`↓` cambian de collection; en Requests, `↑`/`↓` seleccionan un request; en el panel derecho, `↑`/`↓` desplazan la response y `[` / `]` cambian de tab. `C` crea una collection en la ruta indicada (relativa al root actual o absoluta); `N` crea un request; `Enter` abre el request seleccionado y `S` lo envía. `E` elige el environment activo e `I` importa el JSON de Postman seleccionado en el árbol. `Esc` vuelve al explorador. `:httpenv` sigue disponible desde el explorador y `:@tools` incluye el acceso al HTTP Client.
 
 Los requests se envían en un thread aparte: la UI no se congela y la response se conserva al volver del editor.
 
@@ -143,7 +143,7 @@ Los requests se envían en un thread aparte: la UI no se congela y la response s
 
 **Auth:** `bearer`, `basic` y `apikey` (header o query). `auth: inherit` toma la del folder más cercano o la de la collection.
 
-**Importar desde Postman:** seleccioná en el árbol un `*.postman_collection.json` (v2.1) y ejecutá `:http` → `import`. Se crea la carpeta de la collection al lado del JSON y nunca se sobrescribe nada. Los `*.postman_environment.json` se importan a `environments/`: sus secretos pasan al `.env` y el YAML solo guarda la referencia. Los scripts `pm.*` quedan como documentación del request, porque no se ejecutan.
+**Importar desde Postman:** seleccioná en el árbol un `*.postman_collection.json` (v2.1), abrí `:@http` y pulsá `I`. Se crea la carpeta de la collection al lado del JSON y nunca se sobrescribe nada. Los `*.postman_environment.json` se importan a `environments/`: sus secretos pasan al `.env` y el YAML solo guarda la referencia. Los scripts `pm.*` quedan como documentación del request, porque no se ejecutan.
 
 **Fuera de alcance por ahora:** scripts y assertions (se avisa cuántos tiene el request), bodies multipart, file y GraphQL nativo, y auth OAuth, AWS, digest y NTLM.
 

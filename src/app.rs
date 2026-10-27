@@ -46,6 +46,7 @@ pub enum MermaidOutputMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Overlay {
     None,
+    Tools,
     Help,
     MermaidSelect,
     MermaidOutput,
@@ -64,6 +65,7 @@ pub enum Overlay {
     DestPicker,
     Alert,
     HttpMenu,
+    HttpClient,
     HttpEnv,
     HttpInput,
 }
@@ -232,6 +234,13 @@ pub struct HttpState {
     /// 0 is "no environment", then `env_options` in order.
     pub env_cursor: usize,
     pub input: String,
+    pub client_root: Option<PathBuf>,
+    pub client_collections: Vec<PathBuf>,
+    pub client_collection_cursor: usize,
+    pub client_requests: Vec<PathBuf>,
+    pub client_cursor: usize,
+    pub client_focus: u8,
+    pub client_creating_collection: bool,
 }
 
 impl Default for HttpState {
@@ -247,6 +256,13 @@ impl Default for HttpState {
             env_options: Vec::new(),
             env_cursor: 0,
             input: String::new(),
+            client_root: None,
+            client_collections: Vec::new(),
+            client_collection_cursor: 0,
+            client_requests: Vec::new(),
+            client_cursor: 0,
+            client_focus: 0,
+            client_creating_collection: false,
         }
     }
 }
@@ -966,6 +982,24 @@ impl App {
                     _ => {}
                 },
             },
+            Overlay::Tools => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("Herramientas cerradas"),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.http.menu_cursor = self.http.menu_cursor.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.http.menu_cursor = (self.http.menu_cursor + 1).min(1)
+                }
+                KeyCode::Enter => {
+                    self.overlay = Overlay::None;
+                    if self.http.menu_cursor == 0 {
+                        self.toggle_json_viewer()?;
+                    } else {
+                        self.open_http_client();
+                    }
+                }
+                _ => {}
+            },
             Overlay::HttpMenu => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("HTTP cerrado"),
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -976,6 +1010,89 @@ impl App {
                         (self.http.menu_cursor + 1).min(HTTP_MENU_ITEMS.len() - 1);
                 }
                 KeyCode::Enter => self.run_http_menu_item()?,
+                _ => {}
+            },
+            Overlay::HttpClient => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("HTTP Client cerrado"),
+                KeyCode::Tab => self.http.client_focus = (self.http.client_focus + 1) % 3,
+                KeyCode::BackTab => self.http.client_focus = (self.http.client_focus + 2) % 3,
+                KeyCode::Left | KeyCode::Char('[') if self.http.client_focus == 0 => {
+                    self.shift_http_collection(-1)
+                }
+                KeyCode::Right | KeyCode::Char(']') if self.http.client_focus == 0 => {
+                    self.shift_http_collection(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') if self.http.client_focus == 0 => {
+                    self.shift_http_collection(-1)
+                }
+                KeyCode::Down | KeyCode::Char('j') if self.http.client_focus == 0 => {
+                    self.shift_http_collection(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') if self.http.client_focus == 1 => {
+                    self.http.client_cursor = self.http.client_cursor.saturating_sub(1);
+                    self.open_client_cursor_request()?;
+                }
+                KeyCode::Down | KeyCode::Char('j') if self.http.client_focus == 1 => {
+                    self.http.client_cursor = (self.http.client_cursor + 1)
+                        .min(self.http.client_requests.len().saturating_sub(1));
+                    self.open_client_cursor_request()?;
+                }
+                KeyCode::Up | KeyCode::Char('k') if self.http.client_focus == 2 => {
+                    self.http.response_scroll = self.http.response_scroll.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') if self.http.client_focus == 2 => {
+                    self.http.response_scroll = self.http.response_scroll.saturating_add(1)
+                }
+                KeyCode::Char('[') | KeyCode::Char('h') if self.http.client_focus == 2 => {
+                    self.move_response_tab(-1)
+                }
+                KeyCode::Char(']') | KeyCode::Char('l') if self.http.client_focus == 2 => {
+                    self.move_response_tab(1)
+                }
+                KeyCode::Enter => {
+                    self.open_client_cursor_request()?;
+                    self.http.client_focus = 2;
+                }
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    if let Some(path) = self
+                        .http
+                        .client_requests
+                        .get(self.http.client_cursor)
+                        .cloned()
+                    {
+                        self.open_file(path)?;
+                        self.send_http_request()?;
+                    } else {
+                        self.status = String::from("Selecciona o abre un request para enviarlo");
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => self.start_client_request_input(),
+                KeyCode::Char('c') | KeyCode::Char('C') => {
+                    self.http.input.clear();
+                    self.http.client_creating_collection = true;
+                    self.overlay = Overlay::HttpInput;
+                    self.status = String::from("Ruta de carpeta nueva para la collection:");
+                }
+                KeyCode::Char('e') => self.open_http_env_picker(),
+                KeyCode::Char('i') | KeyCode::Char('I') => {
+                    self.import_postman_selected()?;
+                    self.http.client_collections = collect_http_collections(&self.root);
+                    if let Some(root) = self.current_collection_root() {
+                        self.http.client_collection_cursor = self
+                            .http
+                            .client_collections
+                            .iter()
+                            .position(|p| p == &root)
+                            .unwrap_or(0);
+                        self.http.client_root = self
+                            .http
+                            .client_collections
+                            .get(self.http.client_collection_cursor)
+                            .cloned();
+                        self.refresh_http_client_requests();
+                    }
+                }
+                KeyCode::Char('m') | KeyCode::Char('M') => self.open_http_menu(),
                 _ => {}
             },
             Overlay::HttpEnv => match key.code {
@@ -994,7 +1111,13 @@ impl App {
                 _ => {}
             },
             Overlay::HttpInput => match key.code {
-                KeyCode::Esc => self.close_overlay("Request nuevo cancelado"),
+                KeyCode::Esc => {
+                    self.http.client_creating_collection = false;
+                    self.close_overlay("Accion HTTP cancelada");
+                }
+                KeyCode::Enter if self.http.client_creating_collection => {
+                    self.create_http_collection_at_input_path()?
+                }
                 KeyCode::Enter => self.confirm_new_request()?,
                 KeyCode::Backspace => {
                     self.http.input.pop();
@@ -2275,6 +2398,8 @@ impl App {
             ("bookmarks", "mostrar/ocultar bookmarks"),
             ("@commands", "ver la lista completa de comandos"),
             ("@jsonviewer", "abrir JSON Viewer"),
+            ("@http", "abrir HTTP Client"),
+            ("@tools", "abrir herramientas integradas"),
             ("copy", "copiar archivo a otro directorio"),
             (
                 "copypath",
@@ -2290,10 +2415,7 @@ impl App {
             ("gitinfo", "mostrar/ocultar info Git en el arbol"),
             ("goto", "cd pendiente al directorio  (Shift+G)"),
             ("grep", "buscar texto en archivos visibles"),
-            (
-                "http",
-                "requests HTTP: enviar, environment, nuevo, init, import",
-            ),
+            ("@http", "abrir HTTP Client"),
             ("httpenv", "elegir environment de la collection"),
             ("json", "abrir JSON Viewer  (@)"),
             ("marks", "abrir bookmarks guardados"),
@@ -2360,6 +2482,7 @@ impl App {
                     ("select", "activar cursor de seleccion  (Shift+Y)"),
                     ("mermaid", "acciones Mermaid  (Shift+M)"),
                     ("@jsonviewer", "abrir JSON Viewer"),
+                    ("@tools", "abrir herramientas integradas"),
                     ("json", "abrir JSON Viewer  (@)"),
                     ("fullscreen", "pantalla completa del panel  (Shift+0)"),
                     ("split1", "proporcion paneles 1  (Shift+1)"),
@@ -2383,10 +2506,7 @@ impl App {
             (
                 "HTTP",
                 vec![
-                    (
-                        "http",
-                        "requests HTTP: enviar, environment, nuevo, init, import",
-                    ),
+                    ("@http", "abrir HTTP Client"),
                     ("httpenv", "elegir environment de la collection"),
                 ],
             ),
@@ -2506,6 +2626,8 @@ impl App {
         self.config.save()?;
 
         match name {
+            "@tools" => self.overlay = Overlay::Tools,
+            "@http" => self.open_http_client(),
             "q" => {
                 self.overlay = Overlay::None;
                 self.running = false;
@@ -2517,7 +2639,6 @@ impl App {
             "marks" => self.open_marks(),
             "create" => self.open_create(),
             "git" => self.open_git(),
-            "http" => self.open_http_menu(),
             "httpenv" => self.open_http_env_picker(),
             "json" => self.toggle_json_viewer()?,
             "@jsonviewer" => self.toggle_json_viewer()?,
@@ -3064,7 +3185,7 @@ impl App {
             ));
         }
         http::is_postman_export(path)
-            .then(|| String::from("Export de Postman · :http → import lo convierte en collection"))
+            .then(|| String::from("Export de Postman · :@http → import lo convierte en collection"))
     }
 
     fn send_http_request(&mut self) -> Result<()> {
@@ -3072,7 +3193,7 @@ impl App {
             self.show_alert(
                 "Shift+S envia el request abierto.
 
-Abri un .yml de una collection (una carpeta con opencollection.yml) o crea una con :http → init.",
+Abri un .yml de una collection (una carpeta con opencollection.yml) o crea una con :@http → init.",
             );
             return Ok(());
         }
@@ -3245,6 +3366,94 @@ Elegi un environment con :httpenv o definilas en la collection.",
         self.status = String::from("HTTP: elegi una accion");
     }
 
+    fn open_http_client(&mut self) {
+        let current = self.current_collection_root().or_else(|| {
+            self.selected_item_path()
+                .and_then(|path| http::find_collection_root(&path))
+        });
+        self.http.client_collections = collect_http_collections(&self.root);
+        if let Some(root) = current {
+            if let Some(index) = self.http.client_collections.iter().position(|p| p == &root) {
+                self.http.client_collection_cursor = index;
+            } else {
+                self.http.client_collections.push(root.clone());
+                self.http.client_collection_cursor = self.http.client_collections.len() - 1;
+            }
+        }
+        self.http.client_root = self
+            .http
+            .client_collections
+            .get(self.http.client_collection_cursor)
+            .cloned();
+        self.refresh_http_client_requests();
+        self.http.client_focus = if self.http.client_requests.is_empty() {
+            0
+        } else {
+            1
+        };
+        let _ = self.open_client_cursor_request();
+        self.overlay = Overlay::HttpClient;
+        self.status = String::from("HTTP Client");
+    }
+
+    fn shift_http_collection(&mut self, delta: isize) {
+        if self.http.client_collections.is_empty() {
+            return;
+        }
+        let len = self.http.client_collections.len() as isize;
+        self.http.client_collection_cursor =
+            (self.http.client_collection_cursor as isize + delta).rem_euclid(len) as usize;
+        self.http.client_root = self
+            .http
+            .client_collections
+            .get(self.http.client_collection_cursor)
+            .cloned();
+        self.http.client_cursor = 0;
+        self.refresh_http_client_requests();
+        let _ = self.open_client_cursor_request();
+    }
+
+    fn open_client_cursor_request(&mut self) -> Result<()> {
+        let Some(path) = self
+            .http
+            .client_requests
+            .get(self.http.client_cursor)
+            .cloned()
+        else {
+            self.http.view = None;
+            return Ok(());
+        };
+        self.open_file(path)?;
+        self.http.response_scroll = 0;
+        Ok(())
+    }
+
+    fn refresh_http_client_requests(&mut self) {
+        let Some(root) = self.http.client_root.clone() else {
+            self.http.client_requests.clear();
+            self.http.client_cursor = 0;
+            return;
+        };
+        let mut requests = collect_http_requests(&root);
+        requests.sort();
+        self.http.client_requests = requests;
+        self.http.client_cursor = self
+            .http
+            .client_cursor
+            .min(self.http.client_requests.len().saturating_sub(1));
+    }
+
+    fn start_client_request_input(&mut self) {
+        if self.http.client_root.is_none() {
+            self.status = String::from("Primero crea una collection con C");
+            return;
+        }
+        self.http.input.clear();
+        self.http.client_creating_collection = false;
+        self.overlay = Overlay::HttpInput;
+        self.status = String::from("Nombre del request nuevo:");
+    }
+
     fn run_http_menu_item(&mut self) -> Result<()> {
         let Some(&(name, _)) = HTTP_MENU_ITEMS.get(self.http.menu_cursor) else {
             return Ok(());
@@ -3265,6 +3474,11 @@ Elegi un environment con :httpenv o definilas en la collection.",
     /// The collection the HTTP actions apply to: the open request's, or the
     /// one containing the selected tree item.
     fn current_collection_root(&self) -> Option<PathBuf> {
+        if self.overlay == Overlay::HttpClient {
+            if let Some(root) = &self.http.client_root {
+                return Some(root.clone());
+            }
+        }
         if let Some(view) = &self.http.view {
             return Some(view.collection_root.clone());
         }
@@ -3274,7 +3488,7 @@ Elegi un environment con :httpenv o definilas en la collection.",
 
     fn open_http_env_picker(&mut self) {
         let Some(root) = self.current_collection_root() else {
-            self.show_alert("No hay collection: abri un request o usa :http → init");
+            self.show_alert("No hay collection: abri un request o usa :@http → init");
             return;
         };
         let (environments, errors) = http::load_environments(&root);
@@ -3333,7 +3547,7 @@ Elegi un environment con :httpenv o definilas en la collection.",
             return;
         };
         if http::find_collection_root(&dir).is_none() {
-            self.show_alert("La carpeta no esta dentro de una collection: usa :http → init");
+            self.show_alert("La carpeta no esta dentro de una collection: usa :@http → init");
             return;
         }
         self.http.input.clear();
@@ -3343,10 +3557,12 @@ Elegi un environment con :httpenv o definilas en la collection.",
 
     fn confirm_new_request(&mut self) -> Result<()> {
         self.overlay = Overlay::None;
-        let Some(dir) = self.current_tree_dir() else {
+        let Some(dir) = self.http.client_root.clone() else {
             return Ok(());
         };
         let path = http::create_request(&dir, &self.http.input)?;
+        self.http.client_root = Some(dir);
+        self.refresh_http_client_requests();
         self.restore_path_focus(&path)?;
         self.status = format!(
             "Request creado: {} · Shift+E para editarlo",
@@ -3370,6 +3586,36 @@ Elegi un environment con :httpenv o definilas en la collection.",
         self.status = format!(
             "Collection creada en {} ({} archivos) · copia .env.sample a .env",
             display_name(&dir),
+            created.len()
+        );
+        Ok(())
+    }
+
+    fn create_http_collection_at_input_path(&mut self) -> Result<()> {
+        let raw = self.http.input.trim();
+        if raw.is_empty() {
+            self.show_alert("Indica la carpeta donde guardar la collection");
+            return Ok(());
+        }
+        let path = PathBuf::from(raw);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.root.join(path)
+        };
+        fs::create_dir_all(&path)?;
+        let created = http::init_collection(&path)?;
+        self.http.client_root = Some(path.clone());
+        self.http.client_collections.push(path.clone());
+        self.http.client_collection_cursor = self.http.client_collections.len() - 1;
+        self.reload_items()?;
+        self.refresh_http_client_requests();
+        self.http.client_focus = 1;
+        self.http.client_creating_collection = false;
+        self.overlay = Overlay::HttpClient;
+        self.status = format!(
+            "Collection creada en {} ({} archivos)",
+            path.display(),
             created.len()
         );
         Ok(())
@@ -3823,6 +4069,56 @@ Elegi un environment con :httpenv o definilas en la collection.",
         self.overlay = Overlay::None;
         self.status = String::from(status);
     }
+}
+
+fn collect_http_requests(root: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut requests = Vec::new();
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name != "environments") {
+                    pending.push(path);
+                }
+            } else if http::request_collection_root(&path).as_deref() == Some(root) {
+                requests.push(path);
+            }
+        }
+    }
+    requests
+}
+
+fn collect_http_collections(root: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut collections = Vec::new();
+    while let Some(dir) = pending.pop() {
+        if http::is_collection_dir(&dir) {
+            collections.push(dir);
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && !path.file_name().is_some_and(|name| {
+                    matches!(
+                        name.to_string_lossy().as_ref(),
+                        ".git" | "target" | "node_modules" | ".venv"
+                    )
+                })
+            {
+                pending.push(path);
+            }
+        }
+    }
+    collections.sort();
+    collections
 }
 
 fn git_status_label(status: GitStatusKind) -> &'static str {
