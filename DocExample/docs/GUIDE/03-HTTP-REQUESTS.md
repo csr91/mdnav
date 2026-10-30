@@ -4,40 +4,31 @@ mdnav envía requests HTTP guardados como archivos YAML, al estilo Postman o Bru
 
 ## Probalo en un minuto
 
-Esta carpeta de ejemplo trae una collection lista en `DocExample/api`. Abrila con mdnav:
+`:@http` no mira la carpeta desde la que abriste mdnav. Podés estar en cualquier lado:
 
 ```powershell
-mdnav DocExample              # con mdnav instalado
-cargo run -- DocExample       # desde el código, parado en la raíz del repo
+mdnav .                       # o mdnav, o mdnav DocExample
 ```
 
 **1. Abrí el estudio**
 
 - `:` abre la palette. Escribí `@http` y `Enter`.
-- A la izquierda está la collection. `j`/`k` eligen el request (★ es el abierto). Bajá hasta `GET y cambiar de metodo`.
+- A la izquierda está tu biblioteca (`~/.config/mdnav/collections`). La primera vez trae `ejemplo`, un GET a httpbin. ★ marca el request abierto.
+- La línea `→` ya muestra `https://httpbin.org/get`. No hace falta elegir environment: si la collection tiene uno solo, queda activo.
 
-Si no hubiera collection, la primera pantalla ofrece crear una de ejemplo con Enter. No hay un menú de init ni de import.
+**2. Enviá**
 
-**2. Elegí el environment** (una sola vez: queda guardado en la config)
-
-- `e` abre la lista. También podés entrar directo con `:@http env`.
-- Bajá hasta `public` con `j` y `Enter`.
-
-En el editor, el título de la collection pasa a `public` y la línea `→` muestra la URL resuelta, `https://httpbin.org/anything/hola`.
-
-**3. Enviá**
-
-- `S`: aparece el spinner y la response llega abajo, con el JSON formateado. El foco pasa a la response.
+- `S`: la response llega abajo con el JSON. El borde grueso pasa a la response.
 - `j`/`k` hacen scroll, `]` cambia a Headers e Info, `y` copia el body.
 
-**4. Cambiá algo y reenviá**
+**3. Cambiá algo sin tocar YAML**
 
-- `Tab` vuelve al editor. `m` pasa el método de GET a POST. El archivo se guarda solo: el título dice `guardado` un momento.
-- `S` de nuevo: en la response, `"method"` ahora dice `"POST"`.
+- `Tab` vuelve al editor. Con la URL enfocada, las letras escriben (no disparan atajos). `m`, fuera de un campo de texto, cambia el método. El título dice `guardado`.
+- `Esc` deja el campo. Otro `Esc` pide confirmación; el segundo sale. Al volver a entrar, la response sigue ahí.
 
-Ese ciclo (editar en el estudio, enviar, mirar la response) es todo el flujo de trabajo. El YAML queda en el repo, pero no hace falta abrirlo. `Shift+E` sigue ahí para el YAML crudo, si alguna vez lo necesitás.
+`c` crea otra collection en esa carpeta, `/` busca, `n` agrega un request. `DocExample/api` sigue siendo una collection de ejemplo en el repo: copiala dentro de la biblioteca si querés esos requests. `Shift+E` abre el YAML crudo.
 
-Para probar secretos, creá `DocExample/api/.env` con `DEMO_TOKEN=lo-que-quieras` y enviá `api/echo/post-json.yml` desde el estudio. httpbin devuelve el header `Authorization` que mandaste, y el token nunca aparece en el YAML.
+Para secretos, el `.env` vive al lado de la collection (en la biblioteca, no en el repo del proyecto).
 
 ## Ejemplos para aprender
 
@@ -109,34 +100,39 @@ Si una variable de la URL no se resuelve, el request no se envía y mdnav te pid
 
 ## Teclas del estudio
 
-El pie dice: `HTTP  j/k · Tab · n nuevo · m método · S enviar · e env · Esc`.
+El pie cambia según el panel. En el editor dice `h/l columnas · [ ] pestañas · letra edita · m método · S enviar`.
 
 | Tecla | Acción |
 |-------|--------|
-| `:@http` | abrir el estudio |
-| `:@http env` | abrir el estudio y elegir environment |
+| `:@http` | abrir el estudio, desde cualquier carpeta |
+| `:@http env` | abrirlo y elegir environment |
 | `j` `k` | moverse |
-| `Tab` | collection → editor → response |
-| `[` `]` / `h` `l` | pestañas del editor; en la response, sus tabs |
-| `m` | cambiar el método |
+| `Tab` | árbol → editor → response |
+| `h` `l` | árbol: entrar o volver. Tabla: cambiar de columna |
+| `[` `]` | pestañas del editor o de la response |
+| `m` | cambiar el método, si no estás escribiendo |
+| letra | con un campo enfocado, editar y escribir |
 | `Enter` | editar el campo |
 | `+` `-` | agregar o quitar una fila |
 | `n` | request nuevo |
-| `r` | renombrar |
+| `c` | collection nueva en la biblioteca |
+| `/` | buscar |
+| `r` | renombrar (sin `.` ni `/`) |
 | `y` | duplicar; en la response, copiar el body |
 | `x` | borrar, con confirmación |
 | `S` | enviar |
 | `e` | elegir environment |
 | `Shift+E` | editar el YAML crudo |
-| `Esc` | salir del campo y después del estudio |
+| `Esc` `Esc` | salir del campo y después confirmar la salida |
 
-En 80×24 la collection, el editor y la response se apilan. Más ancha, la collection queda a la izquierda.
+En 80×24 el árbol, el editor y la response se apilan. Más ancha, el árbol queda a la izquierda.
 
 ## Arrancar una collection propia
 
-- `:@http` en una carpeta sin collection ofrece crear una de ejemplo: environment `local`, `.gitignore` del `.env` y un request.
-- `n` crea otro request en la carpeta del que está abierto. `r` lo renombra, `y` lo duplica y `x` lo borra. Cada una de esas acciones es un archivo del repo.
-- Al dejar un campo (o al enviar) el estudio reescribe el YAML. No hace falta conocer el formato.
+- La biblioteca está en `~/.config/mdnav/collections`. `http_collections_dir` en el config apunta a otra carpeta.
+- `c` crea una collection ahí, con environment `local` en `https://httpbin.org` y un GET de ejemplo.
+- `n` crea un request. `r` lo renombra, `y` lo duplica (el archivo usa guiones, no espacios) y `x` lo borra.
+- Al dejar un campo, o al enviar, el estudio reescribe el YAML OpenCollection.
 
 Importar un export de Postman desde el estudio queda para más adelante.
 

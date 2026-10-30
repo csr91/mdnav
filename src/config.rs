@@ -62,6 +62,10 @@ pub struct AppConfig {
     pub recent_files: Vec<String>,
     /// Active HTTP environment per collection, keyed by the collection root.
     pub http_environments: BTreeMap<String, String>,
+    /// Last collection opened in `:@http`. Empty uses the first one in the library.
+    pub http_last_collection: String,
+    /// Overrides `~/.config/mdnav/collections`. Empty keeps the default.
+    pub http_collections_dir: String,
 }
 
 /// How many recent commands the palette keeps and shows by default.
@@ -82,6 +86,8 @@ impl Default for AppConfig {
             recent_commands: Vec::new(),
             recent_files: Vec::new(),
             http_environments: BTreeMap::new(),
+            http_last_collection: String::new(),
+            http_collections_dir: String::new(),
         }
     }
 }

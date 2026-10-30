@@ -123,26 +123,32 @@ api/
     └── get-user.yml       # un request por archivo
 ```
 
-`:@http` abre el estudio. Si la carpeta no tiene collection, Enter crea una de ejemplo (environment `local`, `.gitignore` del `.env` y un request). No hace falta escribir YAML: el estudio lo guarda solo.
+`:@http` abre el estudio esté donde esté el directorio de trabajo. Las collections viven en `~/.config/mdnav/collections` (o en `http_collections_dir` del config). La primera vez aparece `ejemplo`, un GET contra `https://httpbin.org/get`: `S` funciona sin elegir carpeta ni environment. `c` crea otra collection ahí, `/` filtra el árbol, `n` agrega un request.
 
-El estudio tiene la collection a la izquierda (nombre y método; ★ es el request abierto), el editor a la derecha y la response abajo. En una terminal chica (80×24) los tres paneles se apilan. El editor tiene el método, la URL tal como está escrita y, debajo en gris, la URL ya resuelta. Las pestañas son Params, Headers, Body y Auth: Params y Headers son tablas de clave, valor y on/off.
+El panel izquierdo es el árbol de collections (carpetas y requests; ★ es el abierto). A la derecha está el editor y abajo la response. En 80×24 se apilan. El borde grueso y el `●` marcan el panel con foco, y el pie cambia con ese panel. El editor muestra la URL escrita y, debajo en gris, la URL resuelta. Params y Headers son tablas de clave, valor y on/off.
 
 | Tecla | Acción |
 |-------|--------|
 | `j` / `k` | moverse en el panel activo |
-| `Tab` / `Shift+Tab` | collection → editor → response |
-| `h` / `l` o `[` / `]` | pestañas del editor (en la response, sus tabs) |
-| `m` | cambiar el método |
+| `Tab` / `Shift+Tab` | árbol → editor → response |
+| `h` / `l` | en el árbol, entrar o volver; en la tabla, cambiar de columna |
+| `[` / `]` | pestañas del editor o de la response |
+| `m` | cambiar el método (si no estás escribiendo un campo) |
+| letra | si el campo está enfocado, entra en edición y escribe |
 | `Enter` | editar el campo; `Esc` lo deja y guarda |
 | `+` / `-` | agregar o quitar una fila |
 | `n` | request nuevo |
-| `r` | renombrar |
-| `y` | duplicar (en la response, copiar el body) |
+| `c` | collection nueva |
+| `/` | buscar en el árbol |
+| `r` | renombrar (el nombre no puede llevar `.` ni `/`) |
+| `y` | duplicar (el archivo no lleva espacios; en la response, copiar el body) |
 | `x` | borrar, con confirmación |
 | `S` | enviar |
 | `e` | elegir environment (`:@http env` también) |
-| `Shift+E` | abrir el YAML en el editor, por si hace falta |
-| `Esc` | salir del campo y después del estudio |
+| `Shift+E` | abrir el YAML en el editor |
+| `Esc` `Esc` | salir del estudio; la response queda para la próxima vez |
+
+El environment activo se guarda con la ruta canónica de la collection, así `mdnav .` y `mdnav /ruta` usan la misma clave.
 
 Al dejar un campo, al cambiar el método o al enviar, mdnav escribe el `.yml` OpenCollection. El título muestra `guardado` un momento. Si el disco falla, avisa y no tira lo que escribiste. `n`, `r`, `y` y `x` crean, renombran, copian y borran el archivo.
 

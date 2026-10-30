@@ -111,7 +111,9 @@ fn resolve_command() -> Result<CliCommand> {
 
     match args.as_slice() {
         [] => Ok(CliCommand::Run {
-            docs_root: env::current_dir().context("No se pudo resolver el directorio actual")?,
+            docs_root: canonical_docs_root(
+                env::current_dir().context("No se pudo resolver el directorio actual")?,
+            ),
         }),
         [flag] if flag == "--version" || flag == "-V" => {
             println!("mdnav {}", env!("CARGO_PKG_VERSION"));
@@ -129,7 +131,9 @@ fn resolve_command() -> Result<CliCommand> {
                 } else {
                     env::current_dir()?.join(&docs_root)
                 };
-                Ok(CliCommand::Run { docs_root })
+                Ok(CliCommand::Run {
+                    docs_root: canonical_docs_root(docs_root),
+                })
             } else {
                 Err(anyhow::anyhow!(
                     "La ruta no existe: {}. Pasa una carpeta con Markdown o ejecuta mdnav desde el directorio que quieras explorar.",
@@ -141,6 +145,10 @@ fn resolve_command() -> Result<CliCommand> {
             "Uso: mdnav [ruta] | mdnav --shell-hook <bash|zsh> | {SHARE_USAGE}"
         )),
     }
+}
+
+fn canonical_docs_root(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
 }
 
 fn parse_share_args(args: &[String]) -> Result<CliCommand> {
