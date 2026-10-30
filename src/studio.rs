@@ -1713,25 +1713,31 @@ pub fn http_palette_action(query: &str) -> Option<bool> {
 }
 
 pub fn list_requests(root: &Path) -> Vec<ListedRequest> {
+    // `request_collection_root` returns a canonical path. On Windows that is
+    // the long path (`runneradmin`), while `temp_dir()` is often the 8.3 form
+    // (`RUNNER~1`). Compare and strip against the canonical root.
+    let root = http::canonical_path(root);
     let mut items = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
         let mut children = Vec::new();
         for entry in entries.flatten() {
-            let path = entry.path();
+            let path = http::canonical_path(&entry.path());
             if path.is_dir() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 if name.starts_with('.') || name == "environments" {
                     continue;
                 }
                 children.push(path);
                 continue;
             }
-            if http::request_collection_root(&path).as_deref() != Some(root) {
+            if http::request_collection_root(&path).as_deref() != Some(root.as_path()) {
                 continue;
             }
             let Ok(content) = fs::read_to_string(&path) else {
@@ -1741,7 +1747,7 @@ pub fn list_requests(root: &Path) -> Vec<ListedRequest> {
                 continue;
             };
             let rel = path
-                .strip_prefix(root)
+                .strip_prefix(&root)
                 .unwrap_or(path.as_path())
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -2255,12 +2261,19 @@ docs: No perder.
         http::init_collection(&dir).unwrap();
         http::create_request(&dir, "Otro").unwrap();
         fs::write(dir.join("folder.yml"), "info:\n  name: folder\n").unwrap();
-        let items = list_requests(&dir);
+        let items = list_requests(&dir.join("."));
         let names: Vec<_> = items.iter().map(|item| item.name.as_str()).collect();
         assert!(names.contains(&"Health check"), "{names:?}");
         assert!(names.contains(&"Otro"), "{names:?}");
         assert_eq!(items.len(), 2);
         assert!(items.iter().all(|item| !item.rel.contains("environments")));
+        assert!(
+            items
+                .iter()
+                .all(|item| !item.rel.starts_with('/') && !item.rel.contains(':')),
+            "la ruta relativa no debe quedar absoluta: {names:?} {:?}",
+            items.iter().map(|item| &item.rel).collect::<Vec<_>>()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
