@@ -28,6 +28,21 @@ cargo test --all-targets --all-features
 
 El mismo conjunto se ejecuta en Windows y Linux mediante GitHub Actions.
 
+## Atajos de archivos
+
+Crear, renombrar, duplicar y borrar usan las mismas teclas en el árbol de docs y en el estudio `:@http`:
+
+| Tecla | Acción |
+|-------|--------|
+| `n` | crear |
+| `r` | renombrar |
+| `y` | duplicar |
+| `x` | borrar, con confirmación |
+
+En el árbol de `:@http` actúan sobre el request si el cursor está en un request, y sobre la collection si el cursor está en ella. `c` crea una collection vacía y `C` una con el GET de ejemplo. `Shift+R` y `Shift+X` siguen abriendo renombrar y borrar en el árbol de docs, como alias de `r` y `x`.
+
+En el JSON Viewer no hay un archivo que renombrar o duplicar. `n` y `x` vacían el texto (con confirmación si había algo) y `y` copia el JSON formateado: es la excepción, porque duplicar no aplica. `Shift+S` es enviar en el estudio HTTP; no es la `S` de un atajo de una sola tecla.
+
 ## Generar release
 
 **Windows:**

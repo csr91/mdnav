@@ -129,7 +129,7 @@ El panel izquierdo es el árbol de collections (carpetas y requests; ★ es el a
 
 | Tecla | Acción |
 |-------|--------|
-| `j` / `k` | moverse en el panel activo |
+| `j` / `k` | moverse. Si hay cambios sin guardar, pregunta antes |
 | `Tab` / `Shift+Tab` | árbol → editor → response |
 | `h` / `l` | en el árbol, entrar o volver; en la tabla, cambiar de columna |
 | `[` / `]` | pestañas del editor o de la response |
@@ -138,19 +138,19 @@ El panel izquierdo es el árbol de collections (carpetas y requests; ★ es el a
 | `Enter` | editar el campo; `Esc` lo deja y guarda |
 | `+` / `-` | agregar o quitar una fila |
 | `n` | request nuevo |
-| `c` | collection nueva |
+| `c` / `C` | collection vacía / collection con el GET de ejemplo |
 | `/` | buscar en el árbol |
 | `r` | renombrar (el nombre no puede llevar `.` ni `/`) |
 | `y` | duplicar (el archivo no lleva espacios; en la response, copiar el body) |
 | `x` | borrar, con confirmación |
-| `S` | enviar |
+| `Shift+S` | enviar |
 | `e` | elegir environment (`:@http env` también) |
 | `Shift+E` | abrir el YAML en el editor |
 | `Esc` `Esc` | salir del estudio; la response queda para la próxima vez |
 
 El environment activo se guarda con la ruta canónica de la collection, así `mdnav .` y `mdnav /ruta` usan la misma clave.
 
-Al dejar un campo, al cambiar el método o al enviar, mdnav escribe el `.yml` OpenCollection. El título muestra `guardado` un momento. Si el disco falla, avisa y no tira lo que escribiste. `n`, `r`, `y` y `x` crean, renombran, copian y borran el archivo.
+Salir de un campo con `Esc` o `Enter`, y enviar con `Shift+S`, escriben el `.yml` OpenCollection. El título muestra `guardado` un momento. Si cambiás de panel, te movés en el árbol o salís del estudio con cambios sin guardar, pregunta `g` guardar, `d` descartar o `Esc` cancelar. No hay un guardado automático por tiempo. Si el disco falla, avisa y no tira lo que escribiste. `n`, `r`, `y` y `x` crean, renombran, copian y borran, tanto un request como la collection bajo el cursor.
 
 Los requests salen en un thread aparte: la UI no se congela y `Esc` en la response abandona el que está en curso.
 

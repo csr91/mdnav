@@ -78,7 +78,19 @@ pub enum EditorCursor {
 pub enum StudioPrompt {
     NewRequest,
     NewCollection,
+    NewCollectionExample,
     Rename,
+    RenameCollection,
+}
+
+/// A navigation that must wait until the user saves or discards the editor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StudioLeave {
+    CyclePanel(bool),
+    MoveTree(isize),
+    Close,
+    TreeOpen,
+    TreeParent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -600,6 +612,10 @@ pub struct HttpStudio {
     pub prompt: Option<StudioPrompt>,
     pub prompt_text: String,
     pub confirm_delete: bool,
+    /// True when `x` targets the collection under the tree cursor.
+    pub delete_collection: bool,
+    pub save_prompt: bool,
+    pub pending_leave: Option<StudioLeave>,
     pub starter: bool,
     pub starter_dir: Option<PathBuf>,
     pub load_error: Option<String>,
@@ -628,6 +644,9 @@ impl Default for HttpStudio {
             prompt: None,
             prompt_text: String::new(),
             confirm_delete: false,
+            delete_collection: false,
+            save_prompt: false,
+            pending_leave: None,
             starter: false,
             starter_dir: None,
             load_error: None,
@@ -780,14 +799,30 @@ impl HttpStudio {
             .unwrap_or(false)
     }
 
+    /// Unsaved field text or a dirty draft. Navigation must ask before writing.
+    pub fn needs_save_prompt(&self) -> bool {
+        self.nav.editing || self.dirty
+    }
+
+    /// The timer must not write the file: that would skip the save/discard prompt.
     pub fn autosave_due(&self) -> bool {
-        self.active
-            && self.dirty
-            && !self.nav.editing
-            && self
-                .dirty_at
-                .map(|at| at.elapsed() >= AUTOSAVE_DELAY)
-                .unwrap_or(false)
+        let _ = (
+            self.active,
+            self.dirty,
+            self.nav.editing,
+            self.dirty_at,
+            AUTOSAVE_DELAY,
+        );
+        false
+    }
+
+    pub fn cancel_field_edit(&mut self) {
+        self.nav.editing = false;
+        self.nav.buffer.clear();
+    }
+
+    pub fn tree_on_collection(&self) -> bool {
+        matches!(self.current_node(), Some(TreeNode::Collection(_)))
     }
 
     pub fn mark_dirty(&mut self) {
@@ -808,7 +843,6 @@ impl HttpStudio {
     }
 
     pub fn cycle_panel(&mut self, backward: bool) {
-        let _ = self.commit_edit();
         let index = PANELS
             .iter()
             .position(|panel| *panel == self.panel)
@@ -1329,7 +1363,7 @@ pub fn copy(lang: &str) -> StudioCopy {
             help_tabs: "h/l columns, [ ] tabs",
             help_edit: "edit the field    Esc leaves it",
             help_method: "cycle the method",
-            help_send: "send the request",
+            help_send: "send with Shift+S",
             help_env: "pick the environment",
             help_new: "new    r rename    y duplicate    x delete",
             help_yaml: "edit the raw YAML",
@@ -1378,7 +1412,7 @@ pub fn copy(lang: &str) -> StudioCopy {
             help_tabs: "h/l columnas, [ ] pestañas",
             help_edit: "editar el campo    Esc lo deja",
             help_method: "cambiar el método",
-            help_send: "enviar el request",
+            help_send: "enviar con Shift+S",
             help_env: "elegir environment",
             help_new: "nuevo    r renombrar    y duplicar    x borrar",
             help_yaml: "editar el YAML crudo",
@@ -1389,35 +1423,56 @@ pub fn copy(lang: &str) -> StudioCopy {
     }
 }
 
-pub fn panel_footer(panel: StudioPanel, editing: bool, exit_armed: bool, lang: &str) -> String {
+pub fn panel_footer(
+    panel: StudioPanel,
+    editing: bool,
+    exit_armed: bool,
+    on_collection: bool,
+    save_prompt: bool,
+    lang: &str,
+) -> String {
     let es = lang != "en";
+    if save_prompt {
+        return if es {
+            String::from("GUARDAR  g guardar · d descartar · Esc cancelar")
+        } else {
+            String::from("SAVE  g save · d discard · Esc cancel")
+        };
+    }
     let base = if editing {
         if es {
-            "EDITANDO  Esc guarda el campo · Tab cambia de panel"
+            "EDITANDO  Esc guarda el campo · Shift+S enviar · Tab cambia de panel"
         } else {
-            "EDITING  Esc saves the field · Tab switches panel"
+            "EDITING  Esc saves the field · Shift+S send · Tab switches panel"
         }
     } else {
         match panel {
+            StudioPanel::Collection if on_collection => {
+                if es {
+                    "COLLECTION  j/k · h/l árbol · n request · c vacía · C ejemplo · r renombrar · y duplicar · x borrar · / buscar · Shift+S enviar · Esc"
+                } else {
+                    "COLLECTION  j/k · h/l tree · n request · c empty · C example · r rename · y duplicate · x delete · / search · Shift+S send · Esc"
+                }
+            }
             StudioPanel::Collection => {
                 if es {
-                    "COLECCIONES  j/k · h/l árbol · n request · c nueva · / buscar · Esc"
+                    "REQUEST  j/k · h volver · n nuevo · r renombrar · y duplicar · x borrar · Shift+S enviar · Esc"
                 } else {
-                    "COLLECTIONS  j/k · h/l tree · n request · c new · / search · Esc"
+                    "REQUEST  j/k · h back · n new · r rename · y duplicate · x delete · Shift+S send · Esc"
                 }
             }
             StudioPanel::Editor => {
                 if es {
-                    "EDITOR  h/l columnas · [ ] pestañas · letra edita · m método · S enviar · e env · Esc"
+                    "EDITOR  h/l columnas · [ ] pestañas · letra edita · m método · Shift+S enviar · e env · Esc"
                 } else {
-                    "EDITOR  h/l columns · [ ] tabs · letter edits · m method · S send · e env · Esc"
+                    "EDITOR  h/l columns · [ ] tabs · letter edits · m method · Shift+S send · e env · Esc"
                 }
             }
             StudioPanel::Response => {
                 if es {
-                    "RESPONSE  j/k · [ ] tabs · y copiar · S enviar · Esc"
+                    "RESPONSE  j/k · [ ] tabs · y copiar · Shift+S enviar · Esc"
                 } else {
-                    "RESPONSE  j/k · [ ] tabs · y copy · S send · Esc"
+                    "RESPONSE  j/k · [ ] tabs · y copy · Shift+S send · Esc"
                 }
             }
         }
@@ -1501,7 +1556,7 @@ pub fn ensure_library(dir: &Path) -> Result<Vec<CollectionEntry>> {
     Ok(found)
 }
 
-pub fn create_named_collection(root: &Path, name: &str) -> Result<PathBuf> {
+pub fn create_named_collection(root: &Path, name: &str, with_example: bool) -> Result<PathBuf> {
     validate_entry_name(name)?;
     let folder = name.split_whitespace().collect::<Vec<_>>().join("-");
     let dir = root.join(http::sanitize_file_name(&folder));
@@ -1509,8 +1564,108 @@ pub fn create_named_collection(root: &Path, name: &str) -> Result<PathBuf> {
         bail!("Ya existe {}", dir.display());
     }
     fs::create_dir_all(&dir)?;
-    http::init_collection(&dir)?;
+    http::init_collection_in(&dir, with_example)?;
     Ok(http::canonical_path(&dir))
+}
+
+pub fn rename_collection(path: &Path, new_name: &str) -> Result<PathBuf> {
+    let new_name = new_name.trim();
+    validate_entry_name(new_name)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("La collection no tiene carpeta"))?;
+    let folder = new_name.split_whitespace().collect::<Vec<_>>().join("-");
+    let dest = parent.join(http::sanitize_file_name(&folder));
+    if dest != path && dest.exists() {
+        bail!("Ya existe {}", dest.display());
+    }
+    if dest != path {
+        fs::rename(path, &dest)
+            .with_context(|| format!("No se pudo renombrar {}", path.display()))?;
+    }
+    set_collection_display_name(&dest, new_name)?;
+    Ok(http::canonical_path(&dest))
+}
+
+pub fn duplicate_collection(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("La collection no tiene carpeta"))?;
+    let title = collection_title(path);
+    let copy_label = if title.trim().is_empty() {
+        String::from("copia")
+    } else {
+        format!("{title} copia")
+    };
+    let folder = copy_label.split_whitespace().collect::<Vec<_>>().join("-");
+    let dest = unique_collection_dir(parent, &folder);
+    copy_dir_all(path, &dest)?;
+    set_collection_display_name(&dest, &copy_label)?;
+    Ok(http::canonical_path(&dest))
+}
+
+pub fn delete_collection(path: &Path) -> Result<()> {
+    fs::remove_dir_all(path).with_context(|| format!("No se pudo borrar {}", path.display()))
+}
+
+/// Moves the active-environment entry when a collection directory changes name.
+pub fn retarget_env_key(map: &mut BTreeMap<String, String>, old: &Path, new: &Path) -> bool {
+    let old_key = collection_env_key(old);
+    let new_key = collection_env_key(new);
+    let value = map.iter().find_map(|(key, value)| {
+        (collection_env_key(Path::new(key)) == old_key).then(|| value.clone())
+    });
+    let Some(value) = value else {
+        return false;
+    };
+    map.retain(|key, _| collection_env_key(Path::new(key)) != old_key);
+    map.insert(new_key, value);
+    true
+}
+
+fn unique_collection_dir(parent: &Path, base: &str) -> PathBuf {
+    let mut used = HashSet::new();
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                used.insert(name.to_lowercase());
+            }
+        }
+    }
+    let folder = http::unique_name(&mut used, &http::sanitize_file_name(base), "");
+    parent.join(folder)
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst).with_context(|| format!("No se pudo crear {}", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("No se pudo leer {}", src.display()))? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)
+                .with_context(|| format!("No se pudo copiar {}", from.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn set_collection_display_name(dir: &Path, name: &str) -> Result<()> {
+    let path = dir.join(http::COLLECTION_FILE);
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let mut value: Value =
+        serde_saphyr::from_str(&text).map_err(|err| anyhow!("YAML invalido: {err}"))?;
+    if let Some(info) = value.get_mut("info").and_then(Value::as_object_mut) {
+        info.insert("name".into(), Value::String(name.to_string()));
+    }
+    let mut yaml = http::to_yaml(&value)?;
+    if !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
+    fs::write(&path, yaml).with_context(|| format!("No se pudo escribir {}", path.display()))
 }
 
 pub fn validate_entry_name(name: &str) -> Result<()> {
@@ -1558,25 +1713,31 @@ pub fn http_palette_action(query: &str) -> Option<bool> {
 }
 
 pub fn list_requests(root: &Path) -> Vec<ListedRequest> {
+    // `request_collection_root` returns a canonical path. On Windows that is
+    // the long path (`runneradmin`), while `temp_dir()` is often the 8.3 form
+    // (`RUNNER~1`). Compare and strip against the canonical root.
+    let root = http::canonical_path(root);
     let mut items = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
         let mut children = Vec::new();
         for entry in entries.flatten() {
-            let path = entry.path();
+            let path = http::canonical_path(&entry.path());
             if path.is_dir() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 if name.starts_with('.') || name == "environments" {
                     continue;
                 }
                 children.push(path);
                 continue;
             }
-            if http::request_collection_root(&path).as_deref() != Some(root) {
+            if http::request_collection_root(&path).as_deref() != Some(root.as_path()) {
                 continue;
             }
             let Ok(content) = fs::read_to_string(&path) else {
@@ -1586,7 +1747,7 @@ pub fn list_requests(root: &Path) -> Vec<ListedRequest> {
                 continue;
             };
             let rel = path
-                .strip_prefix(root)
+                .strip_prefix(&root)
                 .unwrap_or(path.as_path())
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -2100,12 +2261,19 @@ docs: No perder.
         http::init_collection(&dir).unwrap();
         http::create_request(&dir, "Otro").unwrap();
         fs::write(dir.join("folder.yml"), "info:\n  name: folder\n").unwrap();
-        let items = list_requests(&dir);
+        let items = list_requests(&dir.join("."));
         let names: Vec<_> = items.iter().map(|item| item.name.as_str()).collect();
         assert!(names.contains(&"Health check"), "{names:?}");
         assert!(names.contains(&"Otro"), "{names:?}");
         assert_eq!(items.len(), 2);
         assert!(items.iter().all(|item| !item.rel.contains("environments")));
+        assert!(
+            items
+                .iter()
+                .all(|item| !item.rel.starts_with('/') && !item.rel.contains(':')),
+            "la ruta relativa no debe quedar absoluta: {names:?} {:?}",
+            items.iter().map(|item| &item.rel).collect::<Vec<_>>()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2184,6 +2352,88 @@ docs: No perder.
         studio.begin_typing('n');
         assert!(studio.nav.editing);
         assert!(studio.nav.buffer.ends_with('n'));
+    }
+
+    #[test]
+    fn footers_say_shift_s_and_list_rename_duplicate_delete() {
+        let editor = panel_footer(StudioPanel::Editor, false, false, false, false, "es");
+        assert!(editor.contains("Shift+S enviar"), "{editor}");
+        assert!(!editor.contains("· S enviar"), "{editor}");
+        let editing = panel_footer(StudioPanel::Editor, true, false, false, false, "es");
+        assert!(editing.contains("Shift+S enviar"), "{editing}");
+        let response = panel_footer(StudioPanel::Response, false, false, false, false, "es");
+        assert!(response.contains("Shift+S enviar"), "{response}");
+        let request = panel_footer(StudioPanel::Collection, false, false, false, false, "es");
+        assert!(request.contains("r renombrar"), "{request}");
+        assert!(
+            request.contains("y duplicar") && request.contains("x borrar"),
+            "{request}"
+        );
+        let collection = panel_footer(StudioPanel::Collection, false, false, true, false, "es");
+        assert!(
+            collection.contains("r renombrar") && collection.contains("c vacía"),
+            "{collection}"
+        );
+        let prompt = panel_footer(StudioPanel::Editor, false, false, false, true, "es");
+        assert!(
+            prompt.contains("g guardar") && prompt.contains("d descartar"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn new_collection_starts_empty_and_can_include_the_example() {
+        let dir = temp_dir("emptycol");
+        let empty = create_named_collection(&dir, "notas", false).unwrap();
+        assert!(empty.join("opencollection.yml").is_file());
+        assert!(list_requests(&empty).is_empty());
+        let example = create_named_collection(&dir, "demo", true).unwrap();
+        assert_eq!(list_requests(&example).len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_and_duplicate_a_collection_and_retarget_its_env_key() {
+        let dir = temp_dir("colops");
+        let original = create_named_collection(&dir, "notas", false).unwrap();
+        let mut envs = BTreeMap::new();
+        envs.insert(collection_env_key(&original), String::from("local"));
+        let renamed = rename_collection(&original, "notas dos").unwrap();
+        assert!(!original.exists());
+        assert!(renamed.join("opencollection.yml").is_file());
+        assert!(!renamed.file_name().unwrap().to_string_lossy().contains(' '));
+        assert_eq!(collection_title(&renamed), "notas dos");
+        assert!(retarget_env_key(&mut envs, &original, &renamed));
+        assert_eq!(env_name_in(&envs, &renamed), Some("local"));
+        assert!(env_name_in(&envs, &original).is_none());
+
+        let copy = duplicate_collection(&renamed).unwrap();
+        assert!(copy.exists());
+        assert!(!copy.file_name().unwrap().to_string_lossy().contains(' '));
+        assert!(collection_title(&copy).contains("copia"));
+        delete_collection(&copy).unwrap();
+        assert!(!copy.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn timer_does_not_autosave_a_dirty_or_open_field() {
+        let mut studio = HttpStudio {
+            active: true,
+            dirty: true,
+            dirty_at: Some(Instant::now() - Duration::from_secs(5)),
+            ..HttpStudio::default()
+        };
+        assert!(studio.needs_save_prompt());
+        assert!(!studio.autosave_due());
+        studio.dirty = false;
+        studio.nav.editing = true;
+        studio.nav.buffer = String::from("https://httpbin.org/getn");
+        assert!(studio.needs_save_prompt());
+        studio.cancel_field_edit();
+        assert!(!studio.nav.editing);
+        assert!(studio.nav.buffer.is_empty());
+        assert!(!studio.needs_save_prompt());
     }
 
     #[test]

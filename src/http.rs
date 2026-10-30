@@ -53,10 +53,18 @@ const MAGENTA: [u8; 3] = [198, 120, 221];
 /// Resolves `.` and `..` and, when the path exists, symlinks. `/path/.` and
 /// `/path` become the same key so an environment saved from `mdnav .` is found
 /// again when the collection is opened without the dot.
+///
+/// Windows `canonicalize` prefixes `\\?\`. Leaving that on makes
+/// `parent == root.join("environments")` fail, so an environment file is
+/// treated as a request. The prefix is stripped before the path is stored.
 pub fn canonical_path(path: &Path) -> PathBuf {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
-    }
+    let canonical = path
+        .canonicalize()
+        .unwrap_or_else(|_| logical_normalize(path));
+    strip_windows_verbatim(&canonical)
+}
+
+fn logical_normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -72,6 +80,18 @@ pub fn canonical_path(path: &Path) -> PathBuf {
     } else {
         normalized
     }
+}
+
+/// `\\?\C:\...` → `C:\...`, `\\?\UNC\server\share` → `\\server\share`.
+fn strip_windows_verbatim(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
 }
 
 pub fn find_collection_root(path: &Path) -> Option<PathBuf> {
@@ -116,10 +136,28 @@ pub fn request_collection_root(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let root = find_collection_root(path)?;
-    if path.parent() == Some(root.join(ENVIRONMENTS_DIR).as_path()) {
+    if is_environment_file(path, &root) {
         return None;
     }
     Some(root)
+}
+
+/// Environment YAML lives in `<collection>/environments`, whatever prefix
+/// `canonicalize` attached. Compare the directory name and the canonical
+/// collection, not the raw `Path` strings.
+fn is_environment_file(path: &Path, root: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Some(name) = parent.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case(ENVIRONMENTS_DIR) {
+        return false;
+    }
+    parent
+        .parent()
+        .is_some_and(|grand| canonical_path(grand) == canonical_path(root))
 }
 
 // ── Request model ────────────────────────────────────────────────────────────
@@ -1798,10 +1836,14 @@ pub(crate) fn unique_name(used: &mut HashSet<String>, base: &str, ext: &str) -> 
     candidate
 }
 
-/// Turns the selected folder into a collection: `opencollection.yml`, a
-/// `local` environment that reads its token from `.env`, a `.env.sample`, a
-/// `.gitignore` entry for `.env` and one example request.
+/// Turns the selected folder into a collection with the httpbin example request.
 pub fn init_collection(dir: &Path) -> Result<Vec<PathBuf>> {
+    init_collection_in(dir, true)
+}
+
+/// Same scaffold as [`init_collection`]. `with_example` adds the Health check
+/// GET; a collection created from the studio with `c` passes `false`.
+pub fn init_collection_in(dir: &Path, with_example: bool) -> Result<Vec<PathBuf>> {
     if let Some(existing) = find_collection_root(dir) {
         bail!(
             "Esta carpeta ya esta dentro de la collection {}",
@@ -1860,10 +1902,12 @@ pub fn init_collection(dir: &Path) -> Result<Vec<PathBuf>> {
     }
     ensure_dotenv_ignored(dir)?;
 
-    let example = request_template("Health check", 1, "{{base_url}}/get");
-    let example_path = dir.join("health.yml");
-    write_new(&example_path, &to_yaml(&example)?)?;
-    created.push(example_path);
+    if with_example {
+        let example = request_template("Health check", 1, "{{base_url}}/get");
+        let example_path = dir.join("health.yml");
+        write_new(&example_path, &to_yaml(&example)?)?;
+        created.push(example_path);
+    }
 
     Ok(created)
 }
@@ -2265,6 +2309,22 @@ docs: Creates a user.
     }
 
     #[test]
+    fn strips_the_windows_verbatim_prefix() {
+        assert_eq!(
+            strip_windows_verbatim(Path::new(r"\\?\C:\temp\mdnav")),
+            PathBuf::from(r"C:\temp\mdnav")
+        );
+        assert_eq!(
+            strip_windows_verbatim(Path::new(r"\\?\UNC\server\share\mdnav")),
+            PathBuf::from(r"\\server\share\mdnav")
+        );
+        assert_eq!(
+            strip_windows_verbatim(Path::new("/tmp/mdnav")),
+            PathBuf::from("/tmp/mdnav")
+        );
+    }
+
+    #[test]
     fn dotted_collection_root_matches_the_clean_path() {
         let temp = TestDir::new("dotted");
         let dotted = temp.path().join(".");
@@ -2317,6 +2377,19 @@ docs: Creates a user.
         assert_eq!(spec.auth, Auth::Inherit);
         let resolved = resolve_request(&dir, &health, &spec, environments.first());
         assert_eq!(resolved.url, "https://httpbin.org/get");
+
+        let bare = temp.path().join("vacia");
+        fs::create_dir(&bare).unwrap();
+        let bare_created = init_collection_in(&bare, false).unwrap();
+        assert!(
+            !bare.join("health.yml").exists(),
+            "sin el request de ejemplo la collection arranca vacia"
+        );
+        assert!(bare_created
+            .iter()
+            .all(|path| path.file_name().unwrap() != "health.yml"));
+        assert!(bare.join(COLLECTION_FILE).is_file());
+        assert!(bare.join("environments").join("local.yml").is_file());
 
         assert!(init_collection(&dir).is_err(), "init never runs twice");
         assert!(
