@@ -35,7 +35,7 @@
 - [x] Configuracion TOML robusta con migracion automatica del formato anterior
 - [x] Operaciones move/copy seguras: sin sobrescritura, rollback y fallback entre filesystems
 - [x] Tests automatizados y CI en Windows/Linux
-- [x] Requests HTTP con collections OpenCollection (compatibles con Bruno): estudio `:@http` (editor, autosave, environments, response) e import desde Postman en el código
+- [x] Requests HTTP con collections OpenCollection: estudio `:@http` independiente del directorio de trabajo, biblioteca en la config del usuario, editor con autosave y response
 
 ## Proximo — v0.2.x
 

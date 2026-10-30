@@ -2976,24 +2976,28 @@ impl App {
     /// The last response of the open request, if it was ever sent.
     pub fn current_http_response(&self) -> Option<&HttpResponse> {
         let view = self.http.view.as_ref()?;
-        self.http.session.responses.get(&view.request_path)
+        let key = Self::response_key(&view.request_path);
+        self.http
+            .session
+            .responses
+            .get(&key)
+            .or_else(|| self.http.session.responses.get(&view.request_path))
     }
 
     /// The request on the wire, when it is the open one.
     pub fn current_request_in_flight(&self) -> Option<&http::InFlight> {
         let view = self.http.view.as_ref()?;
-        self.http
-            .session
-            .in_flight
-            .as_ref()
-            .filter(|in_flight| in_flight.request_path == view.request_path)
+        self.http.session.in_flight.as_ref().filter(|in_flight| {
+            Self::response_key(&in_flight.request_path) == Self::response_key(&view.request_path)
+        })
     }
 
     fn active_environment_name(&self, root: &Path) -> Option<String> {
-        self.config
-            .http_environments
-            .get(&root.display().to_string())
-            .cloned()
+        studio::env_name_in(&self.config.http_environments, root).map(str::to_string)
+    }
+
+    fn response_key(path: &Path) -> PathBuf {
+        http::canonical_path(path)
     }
 
     /// Rebuilds the request pane when the open file is a request of an
@@ -3145,7 +3149,7 @@ Elegi un environment con e en el estudio, o con :@http env.",
         let Some(response) = in_flight.try_finish() else {
             return;
         };
-        let path = in_flight.request_path.clone();
+        let path = Self::response_key(&in_flight.request_path);
         self.http.session.in_flight = None;
         self.status = response_summary(&response);
 
@@ -3153,7 +3157,7 @@ Elegi un environment con e en el estudio, o con :@http env.",
             .http
             .view
             .as_ref()
-            .map(|view| view.request_path == path)
+            .map(|view| Self::response_key(&view.request_path) == path)
             .unwrap_or(false);
         if is_open {
             self.http.response_scroll = 0;
@@ -3245,12 +3249,33 @@ Elegi un environment con e en el estudio, o con :@http env.",
         if self.studio.starter {
             return self.handle_studio_starter_key(key);
         }
+        if self.studio.filtering {
+            return self.handle_studio_filter_key(key);
+        }
         if self.studio.nav.editing {
             return self.handle_studio_edit_key(key);
         }
+        if key.code != KeyCode::Esc {
+            self.studio.exit_armed = false;
+        }
+
+        // A focused text cell takes letters, so typing a URL cannot fire `n`.
+        if let KeyCode::Char(ch) = key.code {
+            if self.editor_accepts_typing(ch) {
+                self.studio.begin_typing(ch);
+                return Ok(());
+            }
+        }
 
         match key.code {
-            KeyCode::Esc => self.close_http_studio()?,
+            KeyCode::Esc => {
+                if self.studio.exit_armed {
+                    self.close_http_studio()?;
+                } else {
+                    self.studio.exit_armed = true;
+                    self.status = String::from("Esc de nuevo para salir del estudio");
+                }
+            }
             KeyCode::Tab => {
                 self.studio_prepare_panel_change()?;
                 self.studio.cycle_panel(false);
@@ -3261,53 +3286,76 @@ Elegi un environment con e en el estudio, o con :@http env.",
             }
             KeyCode::Char('?') => self.toggle_help(),
             KeyCode::Char('S') => self.studio_send()?,
-            KeyCode::Char('e') => self.open_http_env_picker(),
+            KeyCode::Char('e') if !self.typing_in_editor() => self.open_http_env_picker(),
             KeyCode::Char('E') => self.studio_edit_raw()?,
-            KeyCode::Char('n') => self.studio_begin_prompt(StudioPrompt::NewRequest),
-            KeyCode::Char('r') => self.studio_begin_prompt(StudioPrompt::Rename),
+            KeyCode::Char('/') if self.studio.panel == StudioPanel::Collection => {
+                self.studio.filtering = true;
+                self.studio.filter.clear();
+                self.studio.tree_cursor = 0;
+                self.status = String::from("Buscar collection o request");
+            }
+            KeyCode::Char('c') if self.studio.panel == StudioPanel::Collection => {
+                self.studio_begin_prompt(StudioPrompt::NewCollection);
+            }
+            KeyCode::Char('n') if !self.typing_in_editor() => {
+                self.studio_begin_prompt(StudioPrompt::NewRequest);
+            }
+            KeyCode::Char('r') if !self.typing_in_editor() => {
+                self.studio_begin_prompt(StudioPrompt::Rename);
+            }
             KeyCode::Char('y') if self.studio.panel == StudioPanel::Response => {
                 self.copy_response_body()?
             }
-            KeyCode::Char('y') => self.studio_duplicate()?,
-            KeyCode::Char('x') => {
+            KeyCode::Char('y') if !self.typing_in_editor() => self.studio_duplicate()?,
+            KeyCode::Char('x') if !self.typing_in_editor() => {
                 if self.studio.draft.is_some() {
                     self.studio.confirm_delete = true;
                 } else {
                     self.status = String::from("No hay request para borrar");
                 }
             }
-            KeyCode::Char('m') => {
+            KeyCode::Char('m') if !self.typing_in_editor() => {
                 self.studio.cycle_method();
             }
-            KeyCode::Char('+') => {
+            KeyCode::Char('+')
+                if self.studio.panel == StudioPanel::Editor && !self.typing_in_editor() =>
+            {
                 if self.studio.add_row() {
                     self.status = String::from("Fila nueva");
                 } else {
                     self.status = String::from("Esta pestaña no tiene filas");
                 }
             }
-            KeyCode::Char('-') => {
+            KeyCode::Char('-')
+                if self.studio.panel == StudioPanel::Editor && !self.typing_in_editor() =>
+            {
                 if !self.studio.remove_row() {
                     self.status = String::from("Nada que quitar");
                 }
             }
-            KeyCode::Char('h') | KeyCode::Char('[') | KeyCode::Left
-                if self.studio.panel == StudioPanel::Response =>
-            {
-                self.move_response_tab(-1);
+            KeyCode::Char('[') => self.studio_switch_section(-1),
+            KeyCode::Char(']') => self.studio_switch_section(1),
+            KeyCode::Char('h') | KeyCode::Left if self.studio.panel == StudioPanel::Editor => {
+                if self.studio.move_horizontal(-1) {
+                    self.studio.mark_dirty();
+                }
             }
-            KeyCode::Char('l') | KeyCode::Char(']') | KeyCode::Right
-                if self.studio.panel == StudioPanel::Response =>
-            {
-                self.move_response_tab(1);
+            KeyCode::Char('l') | KeyCode::Right if self.studio.panel == StudioPanel::Editor => {
+                if self.studio.move_horizontal(1) {
+                    self.studio.mark_dirty();
+                }
             }
-            KeyCode::Char('h') | KeyCode::Char('[') => self.studio.switch_tab(-1),
-            KeyCode::Char('l') | KeyCode::Char(']') => self.studio.switch_tab(1),
+            KeyCode::Char('h') | KeyCode::Left if self.studio.panel == StudioPanel::Collection => {
+                self.studio_tree_parent();
+            }
+            KeyCode::Char('l') | KeyCode::Right if self.studio.panel == StudioPanel::Collection => {
+                self.studio_tree_open()?;
+            }
             KeyCode::Up | KeyCode::Char('k') if self.studio.panel == StudioPanel::Collection => {
-                self.studio_move_selection(-1)?;
+                self.studio_move_tree(-1)?;
             }
             KeyCode::Down | KeyCode::Char('j') if self.studio.panel == StudioPanel::Collection => {
-                self.studio_move_selection(1)?;
+                self.studio_move_tree(1)?;
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char(',')
                 if self.studio.panel == StudioPanel::Response =>
@@ -3331,18 +3379,8 @@ Elegi un environment con e en el estudio, o con :@http env.",
             KeyCode::Down | KeyCode::Char('j') if self.studio.panel == StudioPanel::Editor => {
                 self.studio.move_vertical(1);
             }
-            KeyCode::Left if self.studio.panel == StudioPanel::Editor => {
-                if self.studio.move_horizontal(-1) {
-                    self.studio.mark_dirty();
-                }
-            }
-            KeyCode::Right if self.studio.panel == StudioPanel::Editor => {
-                if self.studio.move_horizontal(1) {
-                    self.studio.mark_dirty();
-                }
-            }
             KeyCode::Enter if self.studio.panel == StudioPanel::Collection => {
-                self.studio.panel = StudioPanel::Editor;
+                self.studio_tree_open()?;
             }
             KeyCode::Enter if self.studio.panel == StudioPanel::Editor => {
                 if self.studio.activate() {
@@ -3350,6 +3388,50 @@ Elegi un environment con e en el estudio, o con :@http env.",
                 }
             }
             KeyCode::Char('a' | 'A') => {}
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn typing_in_editor(&self) -> bool {
+        self.studio.panel == StudioPanel::Editor && self.studio.cursor_is_text()
+    }
+
+    fn editor_accepts_typing(&self, ch: char) -> bool {
+        // hjkl keep moving; other letters start editing so `n` in a URL is text.
+        self.typing_in_editor()
+            && !matches!(ch, 'h' | 'j' | 'k' | 'l' | '?' | 'S' | 'E')
+            && !ch.is_control()
+    }
+
+    fn studio_switch_section(&mut self, delta: isize) {
+        if self.studio.panel == StudioPanel::Response {
+            self.move_response_tab(delta);
+        } else {
+            self.studio.switch_tab(delta);
+        }
+    }
+
+    fn handle_studio_filter_key(&mut self, key: KeyEvent) -> Result<()> {
+        self.studio.exit_armed = false;
+        match key.code {
+            KeyCode::Esc => {
+                self.studio.filtering = false;
+                self.studio.filter.clear();
+                self.studio.tree_cursor = 0;
+                self.status = String::from("Busqueda cerrada");
+            }
+            KeyCode::Enter => {
+                self.studio.filtering = false;
+            }
+            KeyCode::Backspace => {
+                self.studio.filter.pop();
+                self.studio.tree_cursor = 0;
+            }
+            KeyCode::Char(ch) => {
+                self.studio.filter.push(ch);
+                self.studio.tree_cursor = 0;
+            }
             _ => {}
         }
         Ok(())
@@ -3439,37 +3521,198 @@ Elegi un environment con e en el estudio, o con :@http env.",
 
     fn open_http_studio(&mut self, pick_env: bool) -> Result<()> {
         self.json_viewer_active = false;
-        let hint = self
-            .current_file
-            .clone()
-            .or_else(|| self.selected_item_path());
-        match studio::discover_collection(&self.root, hint.as_deref()) {
-            Some(root) => {
-                self.enter_http_studio(&root)?;
-                if pick_env {
-                    self.open_http_env_picker();
-                } else {
-                    self.status = String::from("Estudio HTTP");
-                }
-            }
-            None => {
-                let dir = self.current_tree_dir().unwrap_or_else(|| self.root.clone());
-                self.studio = studio::HttpStudio::starter(dir);
-                self.status = String::from("Sin collection: Enter crea una de ejemplo");
-            }
+        let dir = studio::collections_dir(&self.config.http_collections_dir)?;
+        let mut collections = studio::ensure_library(&dir)?;
+        if collections.is_empty() {
+            self.show_alert("No se pudo preparar la carpeta de collections");
+            return Ok(());
+        }
+        let preferred = http::canonical_path(Path::new(&self.config.http_last_collection));
+        let index = collections
+            .iter()
+            .position(|collection| collection.path == preferred)
+            .unwrap_or(0);
+        for (cursor, collection) in collections.iter_mut().enumerate() {
+            collection.expanded = cursor == index;
+        }
+        self.studio.active = true;
+        self.studio.starter = false;
+        self.studio.collections_root = Some(dir);
+        self.studio.collections = collections;
+        self.studio.panel = StudioPanel::Editor;
+        self.studio.exit_armed = false;
+        self.studio.filtering = false;
+        self.focus_library_collection(index, None)?;
+        if pick_env {
+            self.open_http_env_picker();
+        } else {
+            self.status = String::from("Estudio HTTP");
         }
         Ok(())
     }
 
     pub fn reopen_http_studio(&mut self, path: &Path) -> Result<()> {
-        let hint = Some(path.to_path_buf());
-        if let Some(root) = studio::discover_collection(&self.root, hint.as_deref()) {
-            self.enter_http_studio(&root)?;
-            if let Some(index) = self.studio.items.iter().position(|item| item.path == path) {
-                self.studio.selected = index;
-                self.load_studio_draft()?;
+        self.open_http_studio(false)?;
+        let wanted = http::canonical_path(path);
+        if let Some(root) = http::find_collection_root(&wanted) {
+            if let Some(index) = self
+                .studio
+                .collections
+                .iter()
+                .position(|collection| collection.path == root)
+            {
+                self.focus_library_collection(index, Some(wanted))?;
             }
-            self.studio.panel = StudioPanel::Editor;
+        }
+        self.studio.panel = StudioPanel::Editor;
+        Ok(())
+    }
+
+    fn focus_library_collection(&mut self, index: usize, request: Option<PathBuf>) -> Result<()> {
+        let Some(collection) = self.studio.collections.get(index) else {
+            return Ok(());
+        };
+        let root = collection.path.clone();
+        let items = collection.requests.clone();
+        let selected = request
+            .as_ref()
+            .and_then(|path| {
+                items
+                    .iter()
+                    .position(|item| http::canonical_path(&item.path) == http::canonical_path(path))
+            })
+            .unwrap_or(0);
+        self.studio.show_collection(root.clone(), items, selected);
+        if request.is_some() {
+            self.studio.focus_tree_on(index, Some(selected));
+        } else {
+            self.studio.focus_tree_on(index, Some(0));
+        }
+        self.activate_sole_environment(&root)?;
+        self.remember_collection(&root)?;
+        self.load_studio_draft()?;
+        Ok(())
+    }
+
+    fn activate_sole_environment(&mut self, root: &Path) -> Result<()> {
+        if studio::env_name_in(&self.config.http_environments, root).is_some() {
+            return Ok(());
+        }
+        let (environments, _) = http::load_environments(root);
+        if environments.len() == 1 {
+            let key = studio::collection_env_key(root);
+            self.config
+                .http_environments
+                .insert(key, environments[0].name.clone());
+            self.config.save()?;
+        }
+        Ok(())
+    }
+
+    fn remember_collection(&mut self, root: &Path) -> Result<()> {
+        let key = studio::collection_env_key(root);
+        if self.config.http_last_collection != key {
+            self.config.http_last_collection = key;
+            self.config.save()?;
+        }
+        Ok(())
+    }
+
+    fn studio_move_tree(&mut self, delta: isize) -> Result<()> {
+        self.studio.commit_edit();
+        self.flush_studio_save()?;
+        let Some(node) = self.studio.move_tree(delta) else {
+            return Ok(());
+        };
+        if let studio::TreeNode::Request {
+            collection,
+            request,
+        } = node
+        {
+            self.open_tree_request(collection, request)?;
+        }
+        Ok(())
+    }
+
+    fn open_tree_request(&mut self, collection: usize, request: usize) -> Result<()> {
+        let Some(entry) = self.studio.collections.get(collection) else {
+            return Ok(());
+        };
+        let root = entry.path.clone();
+        let items = entry.requests.clone();
+        let path = items.get(request).map(|item| item.path.clone());
+        let changed_collection = self.studio.root.as_ref() != Some(&root);
+        self.studio.show_collection(root.clone(), items, request);
+        self.studio.focus_tree_on(collection, Some(request));
+        if changed_collection {
+            self.activate_sole_environment(&root)?;
+            self.remember_collection(&root)?;
+        }
+        if path.is_some() {
+            self.load_studio_draft()?;
+        }
+        Ok(())
+    }
+
+    fn studio_tree_parent(&mut self) {
+        match self.studio.current_node() {
+            Some(studio::TreeNode::Request { collection, .. }) => {
+                self.studio.focus_tree_on(collection, None);
+            }
+            Some(studio::TreeNode::Collection(index))
+                if self
+                    .studio
+                    .collections
+                    .get(index)
+                    .is_some_and(|collection| collection.expanded) =>
+            {
+                self.studio.toggle_collection(index);
+            }
+            Some(studio::TreeNode::Collection(_)) => {}
+            None => {}
+        }
+    }
+
+    fn studio_tree_open(&mut self) -> Result<()> {
+        match self.studio.current_node() {
+            Some(studio::TreeNode::Collection(index)) => {
+                let expanded = self
+                    .studio
+                    .collections
+                    .get(index)
+                    .is_some_and(|collection| collection.expanded);
+                if !expanded {
+                    self.studio.toggle_collection(index);
+                }
+                if let Some(studio::TreeNode::Request { collection, request }) = self
+                    .studio
+                    .visible_nodes()
+                    .into_iter()
+                    .find(|node| {
+                        matches!(node, studio::TreeNode::Request { collection: c, .. } if *c == index)
+                    })
+                {
+                    self.studio.tree_cursor = self
+                        .studio
+                        .visible_nodes()
+                        .iter()
+                        .position(|node| {
+                            matches!(
+                                node,
+                                studio::TreeNode::Request {
+                                    collection: c,
+                                    request: r
+                                } if *c == collection && *r == request
+                            )
+                        })
+                        .unwrap_or(self.studio.tree_cursor);
+                    self.open_tree_request(collection, request)?;
+                }
+            }
+            Some(studio::TreeNode::Request { .. }) => {
+                self.studio.panel = StudioPanel::Editor;
+            }
+            None => {}
         }
         Ok(())
     }
@@ -3513,15 +3756,6 @@ Elegi un environment con e en el estudio, o con :@http env.",
     fn studio_prepare_panel_change(&mut self) -> Result<()> {
         self.studio.commit_edit();
         self.flush_studio_save()
-    }
-
-    fn studio_move_selection(&mut self, delta: isize) -> Result<()> {
-        self.studio.commit_edit();
-        self.flush_studio_save()?;
-        if self.studio.move_list(delta) {
-            self.load_studio_draft()?;
-        }
-        Ok(())
     }
 
     fn flush_studio_save(&mut self) -> Result<()> {
@@ -3608,6 +3842,15 @@ Elegi un environment con e en el estudio, o con :@http env.",
     }
 
     fn studio_begin_prompt(&mut self, kind: StudioPrompt) {
+        if kind == StudioPrompt::NewCollection {
+            if self.studio.collections_root.is_none() {
+                self.status = String::from("No hay carpeta de collections");
+                return;
+            }
+            self.studio.prompt_text.clear();
+            self.studio.prompt = Some(kind);
+            return;
+        }
         if self.studio.root.is_none() {
             self.status = String::from("No hay collection");
             return;
@@ -3633,23 +3876,39 @@ Elegi un environment con e en el estudio, o con :@http env.",
         let name = self.studio.prompt_text.trim().to_string();
         self.studio.prompt = None;
         self.studio.prompt_text.clear();
-        if name.is_empty() {
-            self.status = String::from("El request necesita un nombre");
+        if let Err(err) = studio::validate_entry_name(&name) {
+            self.status = err.to_string();
             return Ok(());
         }
         self.flush_studio_save()?;
         match kind {
+            Some(StudioPrompt::NewCollection) => {
+                let Some(root) = self.studio.collections_root.clone() else {
+                    return Ok(());
+                };
+                let path = studio::create_named_collection(&root, &name)?;
+                self.reload_library_at(&path)?;
+                self.status = format!("Collection creada: {name}");
+            }
             Some(StudioPrompt::NewRequest) => {
-                let dir = self
-                    .studio
-                    .draft
-                    .as_ref()
-                    .and_then(|draft| draft.path.parent().map(Path::to_path_buf))
-                    .or_else(|| self.studio.root.clone());
+                let dir = match self.studio.current_node() {
+                    Some(studio::TreeNode::Collection(index)) => self
+                        .studio
+                        .collections
+                        .get(index)
+                        .map(|collection| collection.path.clone()),
+                    Some(studio::TreeNode::Request { collection, .. }) => self
+                        .studio
+                        .collections
+                        .get(collection)
+                        .map(|entry| entry.path.clone()),
+                    None => self.studio.root.clone(),
+                };
                 let Some(dir) = dir else {
                     return Ok(());
                 };
                 let path = http::create_request(&dir, &name)?;
+                self.studio.root = Some(dir);
                 self.reload_items()?;
                 self.reload_studio_list(&path)?;
                 self.status = format!("Request creado: {}", display_name(&path));
@@ -3726,11 +3985,38 @@ Elegi un environment con e en el estudio, o con :@http env.",
         let items = studio::list_requests(&root);
         let selected = items
             .iter()
-            .position(|item| item.path == select)
+            .position(|item| http::canonical_path(&item.path) == http::canonical_path(select))
             .unwrap_or(0);
+        let collection = self
+            .studio
+            .collections
+            .iter()
+            .position(|entry| entry.path == root);
         self.studio.show_collection(root, items, selected);
+        if let Some(index) = collection {
+            self.studio.focus_tree_on(index, Some(selected));
+        }
         self.studio.panel = StudioPanel::Editor;
         self.load_studio_draft()?;
+        Ok(())
+    }
+
+    fn reload_library_at(&mut self, select: &Path) -> Result<()> {
+        let Some(dir) = self.studio.collections_root.clone() else {
+            return Ok(());
+        };
+        let mut collections = studio::list_collections(&dir);
+        let wanted = http::canonical_path(select);
+        let index = collections
+            .iter()
+            .position(|collection| collection.path == wanted)
+            .unwrap_or(0);
+        for (cursor, collection) in collections.iter_mut().enumerate() {
+            collection.expanded = cursor == index;
+        }
+        self.studio.collections = collections;
+        self.focus_library_collection(index, None)?;
+        self.studio.panel = StudioPanel::Editor;
         Ok(())
     }
 
@@ -3813,20 +4099,18 @@ Elegi un environment con e en el estudio, o con :@http env.",
         let Some(root) = self.http.env_root.take() else {
             return Ok(());
         };
-        let key = root.display().to_string();
+        let key = studio::collection_env_key(&root);
         let choice = self
             .http
             .env_cursor
             .checked_sub(1)
             .and_then(|index| self.http.env_options.get(index))
             .cloned();
-        match &choice {
-            Some(name) => {
-                self.config.http_environments.insert(key, name.clone());
-            }
-            None => {
-                self.config.http_environments.remove(&key);
-            }
+        self.config
+            .http_environments
+            .retain(|existing, _| studio::collection_env_key(Path::new(existing)) != key);
+        if let Some(name) = &choice {
+            self.config.http_environments.insert(key, name.clone());
         }
         self.config.save()?;
         self.refresh_http_view();

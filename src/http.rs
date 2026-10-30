@@ -11,7 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     env, fs,
     io::Read,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
     time::{Duration, Instant},
@@ -50,12 +50,36 @@ const MAGENTA: [u8; 3] = [198, 120, 221];
 
 /// Returns the closest ancestor directory (or `path` itself) that holds an
 /// `opencollection.yml`.
+/// Resolves `.` and `..` and, when the path exists, symlinks. `/path/.` and
+/// `/path` become the same key so an environment saved from `mdnav .` is found
+/// again when the collection is opened without the dot.
+pub fn canonical_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        path.to_path_buf()
+    } else {
+        normalized
+    }
+}
+
 pub fn find_collection_root(path: &Path) -> Option<PathBuf> {
     let start = if path.is_dir() { path } else { path.parent()? };
-    start
+    let found = start
         .ancestors()
-        .find(|dir| dir.join(COLLECTION_FILE).is_file())
-        .map(Path::to_path_buf)
+        .find(|dir| dir.join(COLLECTION_FILE).is_file())?;
+    Some(canonical_path(found))
 }
 
 pub fn is_collection_dir(dir: &Path) -> bool {
@@ -1812,7 +1836,7 @@ pub fn init_collection(dir: &Path) -> Result<Vec<PathBuf>> {
         variables: vec![
             OcEnvVariableOut {
                 name: String::from("base_url"),
-                value: String::from("http://localhost:3000"),
+                value: String::from("https://httpbin.org"),
                 disabled: false,
             },
             OcEnvVariableOut {
@@ -1836,7 +1860,7 @@ pub fn init_collection(dir: &Path) -> Result<Vec<PathBuf>> {
     }
     ensure_dotenv_ignored(dir)?;
 
-    let example = request_template("Health check", 1, "{{base_url}}/health");
+    let example = request_template("Health check", 1, "{{base_url}}/get");
     let example_path = dir.join("health.yml");
     write_new(&example_path, &to_yaml(&example)?)?;
     created.push(example_path);
@@ -1849,6 +1873,9 @@ pub fn create_request(dir: &Path, name: &str) -> Result<PathBuf> {
     let name = name.trim().trim_end_matches(".yml").trim();
     if name.is_empty() {
         bail!("El request necesita un nombre");
+    }
+    if name.contains('.') || name.contains('/') || name.contains('\\') {
+        bail!("El nombre no puede incluir '.' ni '/'");
     }
     let path = dir.join(format!("{}.yml", sanitize_file_name(name)));
     if path.exists() {
@@ -2220,7 +2247,7 @@ docs: Creates a user.
 
         assert_eq!(
             request_collection_root(&request),
-            Some(temp.path().to_path_buf())
+            Some(canonical_path(temp.path()))
         );
         assert_eq!(
             request_collection_root(&temp.path().join(COLLECTION_FILE)),
@@ -2235,6 +2262,18 @@ docs: Creates a user.
             None
         );
         assert_eq!(request_collection_root(&stray), None);
+    }
+
+    #[test]
+    fn dotted_collection_root_matches_the_clean_path() {
+        let temp = TestDir::new("dotted");
+        let dotted = temp.path().join(".");
+        init_collection(&dotted).unwrap();
+        let clean = canonical_path(temp.path());
+        let from_dot = find_collection_root(&dotted).unwrap();
+        let from_clean = find_collection_root(temp.path()).unwrap();
+        assert_eq!(from_dot, clean);
+        assert_eq!(from_clean, clean);
     }
 
     #[test]
@@ -2274,10 +2313,10 @@ docs: Creates a user.
 
         let health = dir.join("health.yml");
         let spec = parse_request(&fs::read_to_string(&health).unwrap()).unwrap();
-        assert_eq!(spec.url, "{{base_url}}/health");
+        assert_eq!(spec.url, "{{base_url}}/get");
         assert_eq!(spec.auth, Auth::Inherit);
         let resolved = resolve_request(&dir, &health, &spec, environments.first());
-        assert_eq!(resolved.url, "http://localhost:3000/health");
+        assert_eq!(resolved.url, "https://httpbin.org/get");
 
         assert!(init_collection(&dir).is_err(), "init never runs twice");
         assert!(

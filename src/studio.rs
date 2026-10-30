@@ -3,7 +3,7 @@
 //! [`AuthKind`] without changing the table or the save path.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -77,6 +77,7 @@ pub enum EditorCursor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StudioPrompt {
     NewRequest,
+    NewCollection,
     Rename,
 }
 
@@ -537,6 +538,20 @@ pub struct ListedRequest {
 }
 
 #[derive(Clone, Debug)]
+pub struct CollectionEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub requests: Vec<ListedRequest>,
+    pub expanded: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TreeNode {
+    Collection(usize),
+    Request { collection: usize, request: usize },
+}
+
+#[derive(Clone, Debug)]
 pub struct EditorNav {
     pub tab: EditorTab,
     pub cursor: EditorCursor,
@@ -588,6 +603,12 @@ pub struct HttpStudio {
     pub starter: bool,
     pub starter_dir: Option<PathBuf>,
     pub load_error: Option<String>,
+    pub collections_root: Option<PathBuf>,
+    pub collections: Vec<CollectionEntry>,
+    pub tree_cursor: usize,
+    pub filter: String,
+    pub filtering: bool,
+    pub exit_armed: bool,
     pub dirty: bool,
     pub dirty_at: Option<Instant>,
     pub saved_at: Option<Instant>,
@@ -610,6 +631,12 @@ impl Default for HttpStudio {
             starter: false,
             starter_dir: None,
             load_error: None,
+            collections_root: None,
+            collections: Vec::new(),
+            tree_cursor: 0,
+            filter: String::new(),
+            filtering: false,
+            exit_armed: false,
             dirty: false,
             dirty_at: None,
             saved_at: None,
@@ -619,29 +646,132 @@ impl Default for HttpStudio {
 }
 
 impl HttpStudio {
-    pub fn starter(dir: PathBuf) -> Self {
-        Self {
-            active: true,
-            starter: true,
-            starter_dir: Some(dir),
-            ..Self::default()
-        }
-    }
-
     pub fn show_collection(&mut self, root: PathBuf, items: Vec<ListedRequest>, selected: usize) {
         let selected = if items.is_empty() {
             0
         } else {
             selected.min(items.len() - 1)
         };
-        *self = Self {
-            active: true,
-            panel: StudioPanel::Collection,
-            root: Some(root),
-            items,
-            selected,
-            ..Self::default()
-        };
+        let root = http::canonical_path(&root);
+        self.active = true;
+        self.starter = false;
+        self.root = Some(root.clone());
+        self.items = items.clone();
+        self.selected = selected;
+        if let Some(collection) = self.collections.iter_mut().find(|entry| entry.path == root) {
+            collection.requests = items;
+            collection.expanded = true;
+        }
+    }
+
+    pub fn cursor_is_text(&self) -> bool {
+        match self.nav.cursor {
+            EditorCursor::Url => true,
+            EditorCursor::BodyKind => self
+                .draft
+                .as_ref()
+                .is_some_and(|draft| draft.body.kind.is_text()),
+            EditorCursor::AuthField(index) => self
+                .draft
+                .as_ref()
+                .is_some_and(|draft| !(draft.auth.kind == AuthKind::ApiKey && index == 2)),
+            EditorCursor::Row(_) => matches!(self.nav.col, CellCol::Name | CellCol::Value),
+            EditorCursor::AuthKind => false,
+        }
+    }
+
+    /// Starts editing the focused text field and appends `ch`, so typing a URL
+    /// never falls through to shortcuts such as `n`.
+    pub fn begin_typing(&mut self, ch: char) {
+        let _ = self.activate();
+        if self.nav.editing {
+            self.nav.buffer.push(ch);
+        }
+    }
+
+    pub fn visible_nodes(&self) -> Vec<TreeNode> {
+        let query = self.filter.to_lowercase();
+        let mut nodes = Vec::new();
+        for (index, collection) in self.collections.iter().enumerate() {
+            let name_matches = query.is_empty() || collection.name.to_lowercase().contains(&query);
+            let requests: Vec<usize> = collection
+                .requests
+                .iter()
+                .enumerate()
+                .filter(|(_, request)| {
+                    query.is_empty()
+                        || request.name.to_lowercase().contains(&query)
+                        || request.method.to_lowercase().contains(&query)
+                })
+                .map(|(request_index, _)| request_index)
+                .collect();
+            if !name_matches && requests.is_empty() {
+                continue;
+            }
+            nodes.push(TreeNode::Collection(index));
+            if collection.expanded || !query.is_empty() {
+                let shown = if query.is_empty() {
+                    (0..collection.requests.len()).collect::<Vec<_>>()
+                } else {
+                    requests
+                };
+                for request in shown {
+                    nodes.push(TreeNode::Request {
+                        collection: index,
+                        request,
+                    });
+                }
+            }
+        }
+        nodes
+    }
+
+    pub fn current_node(&self) -> Option<TreeNode> {
+        self.visible_nodes().get(self.tree_cursor).copied()
+    }
+
+    pub fn move_tree(&mut self, delta: isize) -> Option<TreeNode> {
+        let nodes = self.visible_nodes();
+        if nodes.is_empty() || delta == 0 {
+            return None;
+        }
+        let last = nodes.len() as isize - 1;
+        let next = (self.tree_cursor as isize + delta).clamp(0, last) as usize;
+        if next == self.tree_cursor {
+            return None;
+        }
+        self.tree_cursor = next;
+        Some(nodes[next])
+    }
+
+    pub fn focus_tree_on(&mut self, collection: usize, request: Option<usize>) {
+        let nodes = self.visible_nodes();
+        let found = nodes.iter().position(|node| match (node, request) {
+            (
+                TreeNode::Request {
+                    collection: c,
+                    request: r,
+                },
+                Some(want),
+            ) => *c == collection && *r == want,
+            (TreeNode::Collection(c), None) => *c == collection,
+            _ => false,
+        });
+        if let Some(index) = found {
+            self.tree_cursor = index;
+        }
+    }
+
+    pub fn toggle_collection(&mut self, index: usize) {
+        if let Some(collection) = self.collections.get_mut(index) {
+            collection.expanded = !collection.expanded;
+        }
+        let count = self.visible_nodes().len();
+        if count == 0 {
+            self.tree_cursor = 0;
+        } else if self.tree_cursor >= count {
+            self.tree_cursor = count - 1;
+        }
     }
 
     pub fn saved_recent(&self) -> bool {
@@ -675,19 +805,6 @@ impl HttpStudio {
 
     pub fn selected_item(&self) -> Option<&ListedRequest> {
         self.items.get(self.selected)
-    }
-
-    pub fn move_list(&mut self, delta: isize) -> bool {
-        if self.items.is_empty() || delta == 0 {
-            return false;
-        }
-        let last = self.items.len() as isize - 1;
-        let next = (self.selected as isize + delta).clamp(0, last) as usize;
-        if next == self.selected {
-            return false;
-        }
-        self.selected = next;
-        true
     }
 
     pub fn cycle_panel(&mut self, backward: bool) {
@@ -1122,7 +1239,6 @@ impl HttpStudio {
 }
 
 pub struct StudioCopy {
-    pub footer: &'static str,
     pub saved: &'static str,
     pub collection: &'static str,
     pub request: &'static str,
@@ -1174,7 +1290,6 @@ pub struct StudioCopy {
 pub fn copy(lang: &str) -> StudioCopy {
     if lang == "en" {
         StudioCopy {
-            footer: "HTTP  j/k · Tab · n new · m method · S send · e env · Esc",
             saved: "saved",
             collection: "Collection",
             request: "Request",
@@ -1211,7 +1326,7 @@ pub fn copy(lang: &str) -> StudioCopy {
             welcome_http: "open the HTTP studio",
             help_open: "open the HTTP studio",
             help_panels: "cycle collection, editor, response",
-            help_tabs: "editor tabs (response tabs on that panel)",
+            help_tabs: "h/l columns, [ ] tabs",
             help_edit: "edit the field    Esc leaves it",
             help_method: "cycle the method",
             help_send: "send the request",
@@ -1224,7 +1339,6 @@ pub fn copy(lang: &str) -> StudioCopy {
         }
     } else {
         StudioCopy {
-            footer: "HTTP  j/k · Tab · n nuevo · m método · S enviar · e env · Esc",
             saved: "guardado",
             collection: "Collection",
             request: "Request",
@@ -1253,7 +1367,7 @@ pub fn copy(lang: &str) -> StudioCopy {
             auth_key: "clave",
             auth_value: "valor",
             auth_placement: "ubicacion",
-            empty_table: "Vacio. + agrega una fila.",
+            empty_table: "Vacio · + agrega una fila",
             empty_body: "Sin body. Izq/Der cambia el tipo.",
             load_fail: "No se pudo leer el request",
             welcome_split: "proporcion de paneles 1 a 5",
@@ -1261,9 +1375,9 @@ pub fn copy(lang: &str) -> StudioCopy {
             welcome_http: "abrir el estudio HTTP",
             help_open: "abrir el estudio HTTP",
             help_panels: "ciclar collection, editor y response",
-            help_tabs: "pestañas del editor (en la response, sus tabs)",
+            help_tabs: "h/l columnas, [ ] pestañas",
             help_edit: "editar el campo    Esc lo deja",
-            help_method: "cambiar el metodo",
+            help_method: "cambiar el método",
             help_send: "enviar el request",
             help_env: "elegir environment",
             help_new: "nuevo    r renombrar    y duplicar    x borrar",
@@ -1273,6 +1387,161 @@ pub fn copy(lang: &str) -> StudioCopy {
             unresolved: "sin resolver",
         }
     }
+}
+
+pub fn panel_footer(panel: StudioPanel, editing: bool, exit_armed: bool, lang: &str) -> String {
+    let es = lang != "en";
+    let base = if editing {
+        if es {
+            "EDITANDO  Esc guarda el campo · Tab cambia de panel"
+        } else {
+            "EDITING  Esc saves the field · Tab switches panel"
+        }
+    } else {
+        match panel {
+            StudioPanel::Collection => {
+                if es {
+                    "COLECCIONES  j/k · h/l árbol · n request · c nueva · / buscar · Esc"
+                } else {
+                    "COLLECTIONS  j/k · h/l tree · n request · c new · / search · Esc"
+                }
+            }
+            StudioPanel::Editor => {
+                if es {
+                    "EDITOR  h/l columnas · [ ] pestañas · letra edita · m método · S enviar · e env · Esc"
+                } else {
+                    "EDITOR  h/l columns · [ ] tabs · letter edits · m method · S send · e env · Esc"
+                }
+            }
+            StudioPanel::Response => {
+                if es {
+                    "RESPONSE  j/k · [ ] tabs · y copiar · S enviar · Esc"
+                } else {
+                    "RESPONSE  j/k · [ ] tabs · y copy · S send · Esc"
+                }
+            }
+        }
+    };
+    if exit_armed {
+        if es {
+            format!("{base} · Esc de nuevo para salir")
+        } else {
+            format!("{base} · Esc again to leave")
+        }
+    } else {
+        base.to_string()
+    }
+}
+
+/// The folder that holds every collection, independent of the working directory.
+pub fn collections_dir(custom: &str) -> Result<PathBuf> {
+    let path = if custom.trim().is_empty() {
+        dirs::config_dir()
+            .context("No se pudo resolver la carpeta de config")?
+            .join("mdnav")
+            .join("collections")
+    } else {
+        PathBuf::from(custom.trim())
+    };
+    fs::create_dir_all(&path).with_context(|| format!("No se pudo crear {}", path.display()))?;
+    Ok(http::canonical_path(&path))
+}
+
+pub fn collection_env_key(path: &Path) -> String {
+    http::canonical_path(path).to_string_lossy().into_owned()
+}
+
+/// Looks up the active environment, treating `/path/.` and `/path` as the same
+/// collection even if an older config saved the dotted form.
+pub fn env_name_in<'a>(map: &'a BTreeMap<String, String>, root: &Path) -> Option<&'a str> {
+    let wanted = collection_env_key(root);
+    if let Some(name) = map.get(&wanted) {
+        return Some(name.as_str());
+    }
+    map.iter().find_map(|(key, name)| {
+        (collection_env_key(Path::new(key)) == wanted).then_some(name.as_str())
+    })
+}
+
+pub fn list_collections(root: &Path) -> Vec<CollectionEntry> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = http::canonical_path(&entry.path());
+        if !path.join(http::COLLECTION_FILE).is_file() {
+            continue;
+        }
+        found.push(CollectionEntry {
+            name: collection_title(&path),
+            requests: list_requests(&path),
+            expanded: false,
+            path,
+        });
+    }
+    found.sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
+    found
+}
+
+/// Creates the httpbin example the first time the library is empty, so `:@http`
+/// is usable without visiting a project folder.
+pub fn ensure_library(dir: &Path) -> Result<Vec<CollectionEntry>> {
+    fs::create_dir_all(dir)?;
+    let mut found = list_collections(dir);
+    if found.is_empty() {
+        let example = dir.join("ejemplo");
+        fs::create_dir_all(&example)?;
+        http::init_collection(&example)?;
+        found = list_collections(dir);
+    }
+    if let Some(first) = found.first_mut() {
+        first.expanded = true;
+    }
+    Ok(found)
+}
+
+pub fn create_named_collection(root: &Path, name: &str) -> Result<PathBuf> {
+    validate_entry_name(name)?;
+    let folder = name.split_whitespace().collect::<Vec<_>>().join("-");
+    let dir = root.join(http::sanitize_file_name(&folder));
+    if dir.exists() {
+        bail!("Ya existe {}", dir.display());
+    }
+    fs::create_dir_all(&dir)?;
+    http::init_collection(&dir)?;
+    Ok(http::canonical_path(&dir))
+}
+
+pub fn validate_entry_name(name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("Hace falta un nombre");
+    }
+    if name.contains('.') || name.contains('/') || name.contains('\\') {
+        bail!("El nombre no puede incluir '.' ni '/'");
+    }
+    Ok(())
+}
+
+fn collection_title(dir: &Path) -> String {
+    let fallback = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("collection"));
+    let Ok(text) = fs::read_to_string(dir.join(http::COLLECTION_FILE)) else {
+        return fallback;
+    };
+    let Ok(value) = serde_saphyr::from_str::<Value>(&text) else {
+        return fallback;
+    };
+    value
+        .get("info")
+        .and_then(|info| info.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or(fallback)
 }
 
 /// `: @http` and `: @http env`. `@httpenv` is not this command.
@@ -1286,50 +1555,6 @@ pub fn http_palette_action(query: &str) -> Option<bool> {
         Some("env") if parts.next().is_none() => Some(true),
         _ => None,
     }
-}
-
-pub fn discover_collection(docs_root: &Path, hint: Option<&Path>) -> Option<PathBuf> {
-    for path in [hint, Some(docs_root)].into_iter().flatten() {
-        if let Some(root) = http::find_collection_root(path) {
-            if root.starts_with(docs_root) || docs_root.starts_with(&root) {
-                return Some(root);
-            }
-        }
-    }
-    shallowest_collection(docs_root)
-}
-
-fn shallowest_collection(root: &Path) -> Option<PathBuf> {
-    let mut best: Option<(usize, PathBuf)> = None;
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
-    while let Some((dir, depth)) = stack.pop() {
-        if dir.join(http::COLLECTION_FILE).is_file() {
-            let replace = best
-                .as_ref()
-                .map(|(best_depth, _)| depth < *best_depth)
-                .unwrap_or(true);
-            if replace {
-                best = Some((depth, dir.clone()));
-            }
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with('.') {
-                continue;
-            }
-            stack.push((path, depth + 1));
-        }
-    }
-    best.map(|(_, path)| path)
 }
 
 pub fn list_requests(root: &Path) -> Vec<ListedRequest> {
@@ -1656,9 +1881,7 @@ pub fn unique_request_path(dir: &Path, name: &str) -> PathBuf {
 
 pub fn rename_request(draft: &mut RequestDraft, new_name: &str) -> Result<()> {
     let new_name = new_name.trim();
-    if new_name.is_empty() {
-        bail!("El request necesita un nombre");
-    }
+    validate_entry_name(new_name)?;
     let dir = draft
         .path
         .parent()
@@ -1693,7 +1916,8 @@ pub fn duplicate_request(path: &Path) -> Result<PathBuf> {
     let dir = path
         .parent()
         .ok_or_else(|| anyhow!("El request no tiene carpeta"))?;
-    let dest = unique_request_path(dir, &copy_name);
+    let filename = copy_name.split_whitespace().collect::<Vec<_>>().join("-");
+    let dest = unique_request_path(dir, &filename);
     draft.name = copy_name;
     draft.path = dest.clone();
     save_draft(&mut draft)?;
@@ -1902,10 +2126,64 @@ docs: No perder.
         assert_ne!(copy, draft.path);
         let copied = load_draft(&copy).unwrap();
         assert!(copied.name.contains("copia"));
+        assert!(
+            !copy.file_name().unwrap().to_string_lossy().contains(' '),
+            "el archivo duplicado no lleva espacios"
+        );
+        assert!(rename_request(&mut draft, "a.b").is_err());
+        assert!(rename_request(&mut draft, "a/b").is_err());
 
         delete_request(&copy).unwrap();
         assert!(!copy.exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn env_lookup_treats_a_dotted_root_as_the_same_collection() {
+        let dir = temp_dir("envkey");
+        let dotted = dir.join(".");
+        let mut map = BTreeMap::new();
+        map.insert(dotted.display().to_string(), String::from("httpbin"));
+        assert_eq!(env_name_in(&map, &dir), Some("httpbin"));
+        assert_eq!(collection_env_key(&dotted), collection_env_key(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_library_ships_an_httpbin_example() {
+        let dir = temp_dir("lib");
+        let collections = ensure_library(&dir).unwrap();
+        assert_eq!(collections.len(), 1);
+        assert!(collections[0].expanded);
+        assert!(!collections[0].requests.is_empty());
+        let request = &collections[0].requests[0];
+        let draft = load_draft(&request.path).unwrap();
+        let (environments, errors) = http::load_environments(&collections[0].path);
+        assert!(errors.is_empty(), "{errors:?}");
+        let resolved = http::resolve_request(
+            &collections[0].path,
+            &draft.path,
+            &draft.to_spec(),
+            environments.first(),
+        );
+        assert_eq!(resolved.url, "https://httpbin.org/get");
+        assert!(validate_entry_name("foo/bar").is_err());
+        assert!(validate_entry_name("a.b").is_err());
+        assert!(validate_entry_name("Estado").is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typing_into_the_url_appends_instead_of_leaving_the_field() {
+        let mut studio = HttpStudio {
+            draft: Some(draft_from_yaml(PathBuf::from("crear.yml"), SAMPLE).unwrap()),
+            panel: StudioPanel::Editor,
+            ..HttpStudio::default()
+        };
+        assert!(studio.cursor_is_text());
+        studio.begin_typing('n');
+        assert!(studio.nav.editing);
+        assert!(studio.nav.buffer.ends_with('n'));
     }
 
     #[test]

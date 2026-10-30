@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -48,11 +48,20 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let s = app.config.strings();
     let footer = if app.studio.active {
-        let copy = studio::copy(&app.config.language);
+        let text = studio::panel_footer(
+            app.studio.panel,
+            app.studio.nav.editing,
+            app.studio.exit_armed,
+            &app.config.language,
+        );
         Paragraph::new(Line::from(Span::styled(
-            copy.footer,
+            text,
             Style::default()
-                .fg(Color::Green)
+                .fg(if app.studio.nav.editing {
+                    Color::Yellow
+                } else {
+                    Color::Green
+                })
                 .add_modifier(Modifier::BOLD),
         )))
         .block(Block::default().borders(Borders::TOP))
@@ -859,7 +868,18 @@ fn render_response(frame: &mut Frame, area: Rect, app: &App) {
     let focused = response_panel_focused(app);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style(focused));
+        .border_type(if app.studio.active && focused {
+            BorderType::Thick
+        } else {
+            BorderType::Plain
+        })
+        .border_style(if app.studio.active && focused {
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            border_style(focused)
+        });
 
     if let Some(in_flight) = app.current_request_in_flight() {
         let elapsed = in_flight.started.elapsed();
@@ -1251,32 +1271,32 @@ fn render_studio_collection(frame: &mut Frame, area: Rect, app: &App, copy: &stu
         .as_ref()
         .and_then(|view| view.environment.clone())
         .unwrap_or_else(|| copy.env_none.to_string());
+    let nodes = app.studio.visible_nodes();
     let inner_h = area.height.saturating_sub(2) as usize;
-    let selected = app.studio.selected;
-    let start = selected.saturating_sub(inner_h.saturating_sub(1));
+    let cursor = app.studio.tree_cursor.min(nodes.len().saturating_sub(1));
+    let start = cursor.saturating_sub(inner_h.saturating_sub(1));
     let mut lines = Vec::new();
-    if app.studio.items.is_empty() {
+    if app.studio.filtering || !app.studio.filter.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "/ {}{}",
+                app.studio.filter,
+                if app.studio.filtering { "█" } else { "" }
+            ),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if nodes.is_empty() {
         lines.push(Line::from(Span::styled(
             copy.no_requests,
             Style::default().fg(Color::DarkGray),
         )));
     }
-    for (offset, item) in app
-        .studio
-        .items
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(inner_h.max(1))
-    {
-        let star = if offset == selected { "★" } else { " " };
-        let method = format!("{:<6}", item.method);
-        let folder = item
-            .rel
-            .rsplit_once('/')
-            .map(|(dir, _)| format!("  {dir}"))
-            .unwrap_or_default();
-        let selected_row = offset == selected;
+    let row_budget = inner_h
+        .saturating_sub(if lines.is_empty() { 0 } else { 1 })
+        .max(1);
+    for (offset, node) in nodes.into_iter().enumerate().skip(start).take(row_budget) {
+        let selected_row = offset == cursor;
         let row_style = if selected_row && focused {
             Style::default()
                 .bg(Color::Blue)
@@ -1289,29 +1309,82 @@ fn render_studio_collection(frame: &mut Frame, area: Rect, app: &App, copy: &stu
         } else {
             Style::default()
         };
-        let method_style = if selected_row && focused {
-            row_style
-        } else {
-            Style::default()
-                .fg(method_color(item.method.as_str()))
-                .add_modifier(Modifier::BOLD)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{star} "), row_style.fg(Color::Yellow)),
-            Span::styled(method, method_style),
-            Span::styled(format!(" {}", item.name), row_style),
-            Span::styled(folder, Style::default().fg(Color::DarkGray)),
-        ]));
+        match node {
+            studio::TreeNode::Collection(index) => {
+                let Some(collection) = app.studio.collections.get(index) else {
+                    continue;
+                };
+                let marker = if collection.expanded { "v" } else { ">" };
+                lines.push(Line::from(Span::styled(
+                    format!("{marker} {}", collection.name),
+                    row_style.fg(if selected_row && focused {
+                        Color::Black
+                    } else {
+                        Color::Cyan
+                    }),
+                )));
+            }
+            studio::TreeNode::Request {
+                collection,
+                request,
+            } => {
+                let Some(item) = app
+                    .studio
+                    .collections
+                    .get(collection)
+                    .and_then(|entry| entry.requests.get(request))
+                else {
+                    continue;
+                };
+                let open = app.studio.draft.as_ref().is_some_and(|draft| {
+                    http::canonical_path(&draft.path) == http::canonical_path(&item.path)
+                });
+                let star = if open { "★" } else { " " };
+                let method_style = if selected_row && focused {
+                    row_style
+                } else {
+                    Style::default()
+                        .fg(method_color(item.method.as_str()))
+                        .add_modifier(Modifier::BOLD)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {star} "), row_style.fg(Color::Yellow)),
+                    Span::styled(format!("{:<6}", item.method), method_style),
+                    Span::styled(format!(" {}", item.name), row_style),
+                ]));
+            }
+        }
     }
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .title(format!(" {} · {env} ", copy.collection))
-                .borders(Borders::ALL)
-                .border_style(border_style(focused)),
-        ),
+        Paragraph::new(lines).block(studio_block(
+            format!(" {} · {env} ", copy.collection),
+            focused,
+        )),
         area,
     );
+}
+
+fn studio_block(title: String, focused: bool) -> Block<'static> {
+    let title = if focused {
+        format!("●{title}")
+    } else {
+        title
+    };
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(if focused {
+            BorderType::Thick
+        } else {
+            BorderType::Plain
+        })
+        .border_style(if focused {
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        })
 }
 
 fn render_studio_editor(frame: &mut Frame, area: Rect, app: &App, copy: &studio::StudioCopy) {
@@ -1323,7 +1396,13 @@ fn render_studio_editor(frame: &mut Frame, area: Rect, app: &App, copy: &studio:
         .map(|draft| draft.name.clone())
         .unwrap_or_default();
     let mut title = format!(" {} · {name}", copy.request);
-    if app.studio.saved_recent() {
+    if app.studio.nav.editing {
+        title.push_str(if app.config.language == "en" {
+            " · editing"
+        } else {
+            " · editando"
+        });
+    } else if app.studio.saved_recent() {
         title.push_str(" · ");
         title.push_str(copy.saved);
     }
@@ -1331,12 +1410,7 @@ fn render_studio_editor(frame: &mut Frame, area: Rect, app: &App, copy: &studio:
     let lines = studio_editor_lines(app, copy, area.width.saturating_sub(2) as usize);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(border_style(focused)),
-            )
+            .block(studio_block(title, focused))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -1683,7 +1757,7 @@ fn studio_resolved_url(app: &App) -> String {
         return draft.url.clone();
     };
     let environment = app.http.view.as_ref().and_then(|view| {
-        if view.collection_root != *root {
+        if http::canonical_path(&view.collection_root) != http::canonical_path(root) {
             return None;
         }
         let name = view.environment.as_deref()?;
@@ -1729,6 +1803,13 @@ fn render_studio_confirm(frame: &mut Frame, app: &App, copy: &studio::StudioCopy
 fn render_studio_prompt(frame: &mut Frame, app: &App, copy: &studio::StudioCopy) {
     let title = match app.studio.prompt {
         Some(StudioPrompt::Rename) => copy.rename_title,
+        Some(StudioPrompt::NewCollection) => {
+            if app.config.language == "en" {
+                "New collection"
+            } else {
+                "Collection nueva"
+            }
+        }
         _ => copy.new_title,
     };
     let area = centered_rect(60, 28, frame.area());
