@@ -100,7 +100,7 @@ Si una variable de la URL no se resuelve, el request no se envía y mdnav te pid
 
 ## Teclas del estudio
 
-El pie cambia según el panel. En el editor dice `h/l columnas · [ ] pestañas · letra edita · m método · S enviar`.
+El pie cambia según el panel y siempre nombra el envío como `Shift+S enviar`. En el editor dice `h/l columnas · [ ] pestañas · letra edita · m método · Shift+S enviar`.
 
 | Tecla | Acción |
 |-------|--------|
@@ -115,12 +115,13 @@ El pie cambia según el panel. En el editor dice `h/l columnas · [ ] pestañas 
 | `Enter` | editar el campo |
 | `+` `-` | agregar o quitar una fila |
 | `n` | request nuevo |
-| `c` | collection nueva en la biblioteca |
+| `c` | collection vacía |
+| `C` | collection con el GET de ejemplo a httpbin |
 | `/` | buscar |
 | `r` | renombrar (sin `.` ni `/`) |
 | `y` | duplicar; en la response, copiar el body |
 | `x` | borrar, con confirmación |
-| `S` | enviar |
+| `Shift+S` | enviar |
 | `e` | elegir environment |
 | `Shift+E` | editar el YAML crudo |
 | `Esc` `Esc` | salir del campo y después confirmar la salida |
@@ -130,9 +131,9 @@ En 80×24 el árbol, el editor y la response se apilan. Más ancha, el árbol qu
 ## Arrancar una collection propia
 
 - La biblioteca está en `~/.config/mdnav/collections`. `http_collections_dir` en el config apunta a otra carpeta.
-- `c` crea una collection ahí, con environment `local` en `https://httpbin.org` y un GET de ejemplo.
+- `c` crea una collection vacía (solo el environment `local` en `https://httpbin.org`). `C` agrega además el GET de ejemplo. La biblioteca `ejemplo` de la primera vez sigue trayendo ese GET.
 - `n` crea un request. `r` lo renombra, `y` lo duplica (el archivo usa guiones, no espacios) y `x` lo borra.
-- Al dejar un campo, o al enviar, el estudio reescribe el YAML OpenCollection.
+- Al dejar un campo con `Esc` o `Enter`, o al enviar con `Shift+S`, el estudio reescribe el YAML OpenCollection. Cambiar de panel, moverse en el árbol o salir con cambios sin guardar pregunta si guardar, descartar o cancelar.
 
 Importar un export de Postman desde el estudio queda para más adelante.
 

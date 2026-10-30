@@ -1798,10 +1798,14 @@ pub(crate) fn unique_name(used: &mut HashSet<String>, base: &str, ext: &str) -> 
     candidate
 }
 
-/// Turns the selected folder into a collection: `opencollection.yml`, a
-/// `local` environment that reads its token from `.env`, a `.env.sample`, a
-/// `.gitignore` entry for `.env` and one example request.
+/// Turns the selected folder into a collection with the httpbin example request.
 pub fn init_collection(dir: &Path) -> Result<Vec<PathBuf>> {
+    init_collection_in(dir, true)
+}
+
+/// Same scaffold as [`init_collection`]. `with_example` adds the Health check
+/// GET; a collection created from the studio with `c` passes `false`.
+pub fn init_collection_in(dir: &Path, with_example: bool) -> Result<Vec<PathBuf>> {
     if let Some(existing) = find_collection_root(dir) {
         bail!(
             "Esta carpeta ya esta dentro de la collection {}",
@@ -1860,10 +1864,12 @@ pub fn init_collection(dir: &Path) -> Result<Vec<PathBuf>> {
     }
     ensure_dotenv_ignored(dir)?;
 
-    let example = request_template("Health check", 1, "{{base_url}}/get");
-    let example_path = dir.join("health.yml");
-    write_new(&example_path, &to_yaml(&example)?)?;
-    created.push(example_path);
+    if with_example {
+        let example = request_template("Health check", 1, "{{base_url}}/get");
+        let example_path = dir.join("health.yml");
+        write_new(&example_path, &to_yaml(&example)?)?;
+        created.push(example_path);
+    }
 
     Ok(created)
 }
@@ -2317,6 +2323,19 @@ docs: Creates a user.
         assert_eq!(spec.auth, Auth::Inherit);
         let resolved = resolve_request(&dir, &health, &spec, environments.first());
         assert_eq!(resolved.url, "https://httpbin.org/get");
+
+        let bare = temp.path().join("vacia");
+        fs::create_dir(&bare).unwrap();
+        let bare_created = init_collection_in(&bare, false).unwrap();
+        assert!(
+            !bare.join("health.yml").exists(),
+            "sin el request de ejemplo la collection arranca vacia"
+        );
+        assert!(bare_created
+            .iter()
+            .all(|path| path.file_name().unwrap() != "health.yml"));
+        assert!(bare.join(COLLECTION_FILE).is_file());
+        assert!(bare.join("environments").join("local.yml").is_file());
 
         assert!(init_collection(&dir).is_err(), "init never runs twice");
         assert!(

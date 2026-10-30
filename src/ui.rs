@@ -52,6 +52,8 @@ pub fn render(frame: &mut Frame, app: &App) {
             app.studio.panel,
             app.studio.nav.editing,
             app.studio.exit_armed,
+            app.studio.tree_on_collection(),
+            app.studio.save_prompt,
             &app.config.language,
         );
         Paragraph::new(Line::from(Span::styled(
@@ -67,8 +69,14 @@ pub fn render(frame: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::TOP))
     } else if app.json_viewer_active {
         Paragraph::new(Line::from(Span::styled(
-            "JSON VIEWER  F5 procesar  Tab cambiar panel  y copiar  Shift+0 vista limpia  Esc cerrar",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            if app.json_confirm_clear {
+                "JSON  Descartar el texto? Enter confirma · Esc cancela"
+            } else {
+                "JSON VIEWER  n nuevo · x limpiar · y copiar · F5 procesar · Tab · Esc"
+            },
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )))
         .block(Block::default().borders(Borders::TOP))
     } else if app.overlay == Overlay::Rename {
@@ -285,11 +293,15 @@ fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
     ));
 
     let hint = match app.focus {
-        Focus::Tree => "↑↓/jk move · Enter/l open · h parent · Tab preview · : command · ? help  ",
-        Focus::Preview if app.http_response_focused() => {
-            "↑↓/jk scroll · []/hl tabs · y copiar · S enviar · Tab arbol  "
+        Focus::Tree => {
+            "j/k · n nuevo · r renombrar · y duplicar · x borrar · Enter abrir · Tab · ?  "
         }
-        Focus::Preview if app.http.view.is_some() => "S enviar · :@http estudio · E ver YAML  ",
+        Focus::Preview if app.http_response_focused() => {
+            "↑↓/jk scroll · []/hl tabs · y copiar · Shift+S enviar · Tab arbol  "
+        }
+        Focus::Preview if app.http.view.is_some() => {
+            "Shift+S enviar · :@http estudio · Shift+E ver YAML  "
+        }
         Focus::Preview => "↑↓/jk scroll · [] links · T toc · Y select · Tab tree · : command  ",
     };
     spans.push(Span::styled(hint, Style::default().fg(Color::Gray)));
@@ -918,7 +930,7 @@ fn render_response(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Gray),
             )),
             Line::from(""),
-            shortcut_line("S", "enviar el request"),
+            shortcut_line("Shift+S", "enviar el request"),
             shortcut_line(":@http", "abrir el estudio"),
             shortcut_line("e", "elegir environment"),
             shortcut_line("Shift+E", "editar el YAML"),
@@ -1213,7 +1225,9 @@ fn render_http_studio(frame: &mut Frame, area: Rect, app: &App) {
         render_studio_editor(frame, panes.editor, app, &copy);
         render_response(frame, panes.response, app);
     }
-    if app.studio.confirm_delete {
+    if app.studio.save_prompt {
+        render_studio_save_prompt(frame, app);
+    } else if app.studio.confirm_delete {
         render_studio_confirm(frame, app, &copy);
     } else if app.studio.prompt.is_some() {
         render_studio_prompt(frame, app, &copy);
@@ -1766,13 +1780,64 @@ fn studio_resolved_url(app: &App) -> String {
     http::resolve_request(root, &draft.path, &draft.to_spec(), environment).url
 }
 
+fn render_studio_save_prompt(frame: &mut Frame, _app: &App) {
+    let area = centered_rect(56, 32, frame.area());
+    frame.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Hay cambios sin guardar.",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  g  guardar",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  d  descartar",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  Esc  cancelar",
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Cambios sin guardar ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        ),
+        area,
+    );
+}
+
 fn render_studio_confirm(frame: &mut Frame, app: &App, copy: &studio::StudioCopy) {
-    let name = app
-        .studio
-        .draft
-        .as_ref()
-        .map(|draft| draft.name.clone())
-        .unwrap_or_default();
+    let name = if app.studio.delete_collection {
+        app.studio
+            .current_node()
+            .and_then(|node| match node {
+                studio::TreeNode::Collection(index) => app
+                    .studio
+                    .collections
+                    .get(index)
+                    .map(|collection| collection.name.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| String::from("collection"))
+    } else {
+        app.studio
+            .draft
+            .as_ref()
+            .map(|draft| draft.name.clone())
+            .unwrap_or_default()
+    };
     let area = centered_rect(56, 30, frame.area());
     frame.render_widget(Clear, area);
     let lines = vec![
@@ -1789,10 +1854,19 @@ fn render_studio_confirm(frame: &mut Frame, app: &App, copy: &studio::StudioCopy
             Style::default().fg(Color::Gray),
         )),
     ];
+    let title = if app.studio.delete_collection {
+        if app.config.language == "en" {
+            "Delete collection?"
+        } else {
+            "Eliminar collection?"
+        }
+    } else {
+        copy.delete_title
+    };
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
-                .title(format!(" {} ", copy.delete_title))
+                .title(format!(" {title} "))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Red)),
         ),
@@ -1805,9 +1879,23 @@ fn render_studio_prompt(frame: &mut Frame, app: &App, copy: &studio::StudioCopy)
         Some(StudioPrompt::Rename) => copy.rename_title,
         Some(StudioPrompt::NewCollection) => {
             if app.config.language == "en" {
-                "New collection"
+                "Empty collection"
             } else {
-                "Collection nueva"
+                "Collection vacia"
+            }
+        }
+        Some(StudioPrompt::NewCollectionExample) => {
+            if app.config.language == "en" {
+                "Collection with example"
+            } else {
+                "Collection con ejemplo"
+            }
+        }
+        Some(StudioPrompt::RenameCollection) => {
+            if app.config.language == "en" {
+                "Rename collection"
+            } else {
+                "Renombrar collection"
             }
         }
         _ => copy.new_title,

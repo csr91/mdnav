@@ -250,6 +250,7 @@ pub struct App {
     pub json_viewer_pretty: String,
     pub json_viewer_error: Option<String>,
     pub json_viewer_processed: bool,
+    pub json_confirm_clear: bool,
     pub expanded_dirs: BTreeSet<PathBuf>,
     pub focus: Focus,
     pub fullscreen: FullscreenPanel,
@@ -364,6 +365,7 @@ impl App {
             json_viewer_pretty: String::new(),
             json_viewer_error: None,
             json_viewer_processed: false,
+            json_confirm_clear: false,
             expanded_dirs,
             focus: Focus::Tree,
             fullscreen: FullscreenPanel::None,
@@ -463,8 +465,36 @@ impl App {
         if self.json_viewer_active {
             match key.code {
                 KeyCode::Esc => {
+                    if self.json_confirm_clear {
+                        self.json_confirm_clear = false;
+                        self.status = String::from("JSON sin cambios");
+                        return Ok(());
+                    }
                     self.json_viewer_active = false;
                     self.status = String::from("JSON Viewer cerrado");
+                    return Ok(());
+                }
+                KeyCode::Enter if self.json_confirm_clear => {
+                    self.json_viewer_raw.clear();
+                    self.json_viewer_pretty.clear();
+                    self.json_viewer_error = None;
+                    self.json_viewer_processed = false;
+                    self.json_confirm_clear = false;
+                    self.status = String::from("JSON vacio");
+                    return Ok(());
+                }
+                KeyCode::Char('n' | 'x') if self.focus == Focus::Preview => {
+                    if self.json_viewer_raw.trim().is_empty() {
+                        self.json_viewer_raw.clear();
+                        self.json_viewer_pretty.clear();
+                        self.json_viewer_error = None;
+                        self.json_viewer_processed = false;
+                        self.status = String::from("JSON vacio");
+                    } else {
+                        self.json_confirm_clear = true;
+                        self.status =
+                            String::from("Descartar el JSON? Enter confirma · Esc cancela");
+                    }
                     return Ok(());
                 }
                 KeyCode::Tab | KeyCode::BackTab => {
@@ -631,6 +661,10 @@ impl App {
             KeyCode::Char('[') if self.focus == Focus::Preview => self.move_link_cursor(-1),
             KeyCode::Char('Y') => self.toggle_selection_mode(),
             KeyCode::Char('E') => self.edit_target_in_nano()?,
+            KeyCode::Char('n') if self.focus == Focus::Tree => self.open_create(),
+            KeyCode::Char('r') if self.focus == Focus::Tree => self.open_rename()?,
+            KeyCode::Char('y') if self.focus == Focus::Tree => self.duplicate_selected_item()?,
+            KeyCode::Char('x') if self.focus == Focus::Tree => self.request_delete()?,
             KeyCode::Char('R') => self.open_rename()?,
             KeyCode::Char('B') => self.toggle_bookmark()?,
             KeyCode::Char('X') => self.request_delete()?,
@@ -2043,6 +2077,7 @@ impl App {
         self.json_viewer_pretty.clear();
         self.json_viewer_error = None;
         self.json_viewer_processed = false;
+        self.json_confirm_clear = false;
         self.preview_scroll = 0;
         self.focus = Focus::Tree;
         self.json_viewer_active = true;
@@ -2747,6 +2782,47 @@ impl App {
 
     // ── Create folder/file ────────────────────────────────────────────────────
 
+    fn duplicate_selected_item(&mut self) -> Result<()> {
+        let Some(source) = self.action_target_path() else {
+            self.status = String::from("No hay item para duplicar");
+            return Ok(());
+        };
+        let Some(parent) = source.parent() else {
+            self.status = String::from("No se pudo duplicar");
+            return Ok(());
+        };
+        let stem = source
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().replace(' ', "-"))
+            .unwrap_or_else(|| String::from("copia"));
+        let base = http::sanitize_file_name(&format!("{stem}-copia"));
+        let mut used = std::collections::HashSet::new();
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    used.insert(name.to_lowercase());
+                }
+            }
+        }
+        let filename = if source.is_dir() {
+            http::unique_name(&mut used, &base, "")
+        } else {
+            let ext = source
+                .extension()
+                .map(|ext| format!(".{}", ext.to_string_lossy()))
+                .unwrap_or_default();
+            http::unique_name(&mut used, &base, &ext)
+        };
+        let dest = parent.join(filename);
+        crate::docs::copy_path(&source, &dest)?;
+        self.reload_items()?;
+        if let Some(index) = self.items.iter().position(|item| item.path == dest) {
+            self.selected_index = index;
+        }
+        self.status = format!("Duplicado: {}", display_name(&dest));
+        Ok(())
+    }
+
     fn request_delete(&mut self) -> Result<()> {
         let Some(target) = self.action_target_path() else {
             self.status = String::from("No hay item para eliminar");
@@ -3240,6 +3316,9 @@ Elegi un environment con e en el estudio, o con :@http env.",
     }
 
     fn handle_studio_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.studio.save_prompt {
+            return self.handle_save_prompt_key(key);
+        }
         if self.studio.confirm_delete {
             return self.handle_studio_delete_key(key);
         }
@@ -3270,20 +3349,14 @@ Elegi un environment con e en el estudio, o con :@http env.",
         match key.code {
             KeyCode::Esc => {
                 if self.studio.exit_armed {
-                    self.close_http_studio()?;
+                    self.request_studio_leave(studio::StudioLeave::Close)?;
                 } else {
                     self.studio.exit_armed = true;
                     self.status = String::from("Esc de nuevo para salir del estudio");
                 }
             }
-            KeyCode::Tab => {
-                self.studio_prepare_panel_change()?;
-                self.studio.cycle_panel(false);
-            }
-            KeyCode::BackTab => {
-                self.studio_prepare_panel_change()?;
-                self.studio.cycle_panel(true);
-            }
+            KeyCode::Tab => self.request_studio_leave(studio::StudioLeave::CyclePanel(false))?,
+            KeyCode::BackTab => self.request_studio_leave(studio::StudioLeave::CyclePanel(true))?,
             KeyCode::Char('?') => self.toggle_help(),
             KeyCode::Char('S') => self.studio_send()?,
             KeyCode::Char('e') if !self.typing_in_editor() => self.open_http_env_picker(),
@@ -3297,8 +3370,14 @@ Elegi un environment con e en el estudio, o con :@http env.",
             KeyCode::Char('c') if self.studio.panel == StudioPanel::Collection => {
                 self.studio_begin_prompt(StudioPrompt::NewCollection);
             }
+            KeyCode::Char('C') if self.studio.panel == StudioPanel::Collection => {
+                self.studio_begin_prompt(StudioPrompt::NewCollectionExample);
+            }
             KeyCode::Char('n') if !self.typing_in_editor() => {
                 self.studio_begin_prompt(StudioPrompt::NewRequest);
+            }
+            KeyCode::Char('r') if !self.typing_in_editor() && self.tree_targets_collection() => {
+                self.studio_begin_prompt(StudioPrompt::RenameCollection);
             }
             KeyCode::Char('r') if !self.typing_in_editor() => {
                 self.studio_begin_prompt(StudioPrompt::Rename);
@@ -3306,8 +3385,16 @@ Elegi un environment con e en el estudio, o con :@http env.",
             KeyCode::Char('y') if self.studio.panel == StudioPanel::Response => {
                 self.copy_response_body()?
             }
+            KeyCode::Char('y') if !self.typing_in_editor() && self.tree_targets_collection() => {
+                self.studio_duplicate_collection()?
+            }
             KeyCode::Char('y') if !self.typing_in_editor() => self.studio_duplicate()?,
+            KeyCode::Char('x') if !self.typing_in_editor() && self.tree_targets_collection() => {
+                self.studio.delete_collection = true;
+                self.studio.confirm_delete = true;
+            }
             KeyCode::Char('x') if !self.typing_in_editor() => {
+                self.studio.delete_collection = false;
                 if self.studio.draft.is_some() {
                     self.studio.confirm_delete = true;
                 } else {
@@ -3346,16 +3433,16 @@ Elegi un environment con e en el estudio, o con :@http env.",
                 }
             }
             KeyCode::Char('h') | KeyCode::Left if self.studio.panel == StudioPanel::Collection => {
-                self.studio_tree_parent();
+                self.request_studio_leave(studio::StudioLeave::TreeParent)?;
             }
             KeyCode::Char('l') | KeyCode::Right if self.studio.panel == StudioPanel::Collection => {
-                self.studio_tree_open()?;
+                self.request_studio_leave(studio::StudioLeave::TreeOpen)?;
             }
             KeyCode::Up | KeyCode::Char('k') if self.studio.panel == StudioPanel::Collection => {
-                self.studio_move_tree(-1)?;
+                self.request_studio_leave(studio::StudioLeave::MoveTree(-1))?;
             }
             KeyCode::Down | KeyCode::Char('j') if self.studio.panel == StudioPanel::Collection => {
-                self.studio_move_tree(1)?;
+                self.request_studio_leave(studio::StudioLeave::MoveTree(1))?;
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char(',')
                 if self.studio.panel == StudioPanel::Response =>
@@ -3380,7 +3467,7 @@ Elegi un environment con e en el estudio, o con :@http env.",
                 self.studio.move_vertical(1);
             }
             KeyCode::Enter if self.studio.panel == StudioPanel::Collection => {
-                self.studio_tree_open()?;
+                self.request_studio_leave(studio::StudioLeave::TreeOpen)?;
             }
             KeyCode::Enter if self.studio.panel == StudioPanel::Editor => {
                 if self.studio.activate() {
@@ -3449,16 +3536,9 @@ Elegi un environment con e en el estudio, o con :@http env.",
                 self.flush_studio_save()?;
             }
             KeyCode::Backspace => self.studio.backspace(),
-            KeyCode::Tab => {
-                self.studio.commit_edit();
-                self.flush_studio_save()?;
-                self.studio.cycle_panel(false);
-            }
-            KeyCode::BackTab => {
-                self.studio.commit_edit();
-                self.flush_studio_save()?;
-                self.studio.cycle_panel(true);
-            }
+            KeyCode::Char('S') => self.studio_send()?,
+            KeyCode::Tab => self.request_studio_leave(studio::StudioLeave::CyclePanel(false))?,
+            KeyCode::BackTab => self.request_studio_leave(studio::StudioLeave::CyclePanel(true))?,
             KeyCode::Char(ch)
                 if !key
                     .modifiers
@@ -3497,9 +3577,16 @@ Elegi un environment con e en el estudio, o con :@http env.",
 
     fn handle_studio_delete_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Enter => self.studio_delete_selected()?,
+            KeyCode::Enter => {
+                if self.studio.delete_collection {
+                    self.studio_delete_collection()?;
+                } else {
+                    self.studio_delete_selected()?;
+                }
+            }
             KeyCode::Esc | KeyCode::Char('x') => {
                 self.studio.confirm_delete = false;
+                self.studio.delete_collection = false;
                 self.status = String::from("Borrado cancelado");
             }
             _ => {}
@@ -3618,9 +3705,74 @@ Elegi un environment con e en el estudio, o con :@http env.",
         Ok(())
     }
 
+    fn request_studio_leave(&mut self, leave: studio::StudioLeave) -> Result<()> {
+        if self.studio.needs_save_prompt() {
+            self.studio.save_prompt = true;
+            self.studio.pending_leave = Some(leave);
+            self.studio.exit_armed = false;
+            self.status =
+                String::from("Cambios sin guardar: g guardar · d descartar · Esc cancelar");
+            return Ok(());
+        }
+        self.perform_studio_leave(leave)
+    }
+
+    fn perform_studio_leave(&mut self, leave: studio::StudioLeave) -> Result<()> {
+        self.studio.save_prompt = false;
+        self.studio.pending_leave = None;
+        match leave {
+            studio::StudioLeave::CyclePanel(backward) => self.studio.cycle_panel(backward),
+            studio::StudioLeave::MoveTree(delta) => self.studio_move_tree(delta)?,
+            studio::StudioLeave::Close => self.close_http_studio()?,
+            studio::StudioLeave::TreeOpen => self.studio_tree_open()?,
+            studio::StudioLeave::TreeParent => self.studio_tree_parent(),
+        }
+        Ok(())
+    }
+
+    fn handle_save_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('g' | 'G') => {
+                let leave = self.studio.pending_leave;
+                self.studio.commit_edit();
+                self.flush_studio_save()?;
+                if let Some(leave) = leave {
+                    self.perform_studio_leave(leave)?;
+                }
+                self.status = String::from("Cambios guardados");
+            }
+            KeyCode::Char('d' | 'D') => {
+                let leave = self.studio.pending_leave;
+                self.discard_studio_changes()?;
+                if let Some(leave) = leave {
+                    self.perform_studio_leave(leave)?;
+                }
+                self.status = String::from("Cambios descartados");
+            }
+            KeyCode::Esc => {
+                self.studio.save_prompt = false;
+                self.studio.pending_leave = None;
+                self.status = String::from("Seguis editando");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn discard_studio_changes(&mut self) -> Result<()> {
+        self.studio.cancel_field_edit();
+        let reload = self.studio.dirty;
+        self.studio.dirty = false;
+        self.studio.dirty_at = None;
+        self.studio.save_prompt = false;
+        self.studio.pending_leave = None;
+        if reload {
+            self.load_studio_draft()?;
+        }
+        Ok(())
+    }
+
     fn studio_move_tree(&mut self, delta: isize) -> Result<()> {
-        self.studio.commit_edit();
-        self.flush_studio_save()?;
         let Some(node) = self.studio.move_tree(delta) else {
             return Ok(());
         };
@@ -3753,11 +3905,6 @@ Elegi un environment con e en el estudio, o con :@http env.",
         Ok(())
     }
 
-    fn studio_prepare_panel_change(&mut self) -> Result<()> {
-        self.studio.commit_edit();
-        self.flush_studio_save()
-    }
-
     fn flush_studio_save(&mut self) -> Result<()> {
         if !self.studio.active || !self.studio.dirty || self.studio.nav.editing {
             return Ok(());
@@ -3842,12 +3989,29 @@ Elegi un environment con e en el estudio, o con :@http env.",
     }
 
     fn studio_begin_prompt(&mut self, kind: StudioPrompt) {
-        if kind == StudioPrompt::NewCollection {
+        if matches!(
+            kind,
+            StudioPrompt::NewCollection | StudioPrompt::NewCollectionExample
+        ) {
             if self.studio.collections_root.is_none() {
                 self.status = String::from("No hay carpeta de collections");
                 return;
             }
             self.studio.prompt_text.clear();
+            self.studio.prompt = Some(kind);
+            return;
+        }
+        if kind == StudioPrompt::RenameCollection {
+            let Some(studio::TreeNode::Collection(index)) = self.studio.current_node() else {
+                self.status = String::from("Ponete sobre la collection para renombrarla");
+                return;
+            };
+            self.studio.prompt_text = self
+                .studio
+                .collections
+                .get(index)
+                .map(|collection| collection.name.clone())
+                .unwrap_or_default();
             self.studio.prompt = Some(kind);
             return;
         }
@@ -3882,13 +4046,18 @@ Elegi un environment con e en el estudio, o con :@http env.",
         }
         self.flush_studio_save()?;
         match kind {
-            Some(StudioPrompt::NewCollection) => {
+            Some(StudioPrompt::NewCollection | StudioPrompt::NewCollectionExample) => {
                 let Some(root) = self.studio.collections_root.clone() else {
                     return Ok(());
                 };
-                let path = studio::create_named_collection(&root, &name)?;
+                let with_example = kind == Some(StudioPrompt::NewCollectionExample);
+                let path = studio::create_named_collection(&root, &name, with_example)?;
                 self.reload_library_at(&path)?;
-                self.status = format!("Collection creada: {name}");
+                self.status = if with_example {
+                    format!("Collection creada con el GET de ejemplo: {name}")
+                } else {
+                    format!("Collection vacia creada: {name}")
+                };
             }
             Some(StudioPrompt::NewRequest) => {
                 let dir = match self.studio.current_node() {
@@ -3936,8 +4105,98 @@ Elegi un environment con e en el estudio, o con :@http env.",
                 self.studio.note_saved();
                 self.status = format!("Request renombrado: {name}");
             }
+            Some(StudioPrompt::RenameCollection) => {
+                let Some(studio::TreeNode::Collection(index)) = self.studio.current_node() else {
+                    return Ok(());
+                };
+                let old = self.studio.collections[index].path.clone();
+                let new_path = studio::rename_collection(&old, &name)?;
+                self.retarget_collection_bookkeeping(&old, &new_path)?;
+                self.reload_library_at(&new_path)?;
+                self.status = format!("Collection renombrada: {name}");
+            }
             None => {}
         }
+        Ok(())
+    }
+
+    fn retarget_collection_bookkeeping(&mut self, old: &Path, new: &Path) -> Result<()> {
+        studio::retarget_env_key(&mut self.config.http_environments, old, new);
+        let old_key = studio::collection_env_key(old);
+        let new_key = studio::collection_env_key(new);
+        if studio::collection_env_key(Path::new(&self.config.http_last_collection)) == old_key {
+            self.config.http_last_collection = new_key;
+        }
+        self.retarget_response_paths(old, new);
+        self.config.save()?;
+        Ok(())
+    }
+
+    fn retarget_response_paths(&mut self, old_root: &Path, new_root: &Path) {
+        let old_root = http::canonical_path(old_root);
+        let new_root = http::canonical_path(new_root);
+        let moved = std::mem::take(&mut self.http.session.responses);
+        for (path, response) in moved {
+            let path = http::canonical_path(&path);
+            let path = path
+                .strip_prefix(&old_root)
+                .map_or(path.clone(), |rest| new_root.join(rest));
+            self.http.session.responses.insert(path, response);
+        }
+    }
+
+    fn tree_targets_collection(&self) -> bool {
+        self.studio.panel == StudioPanel::Collection && self.studio.tree_on_collection()
+    }
+
+    fn studio_duplicate_collection(&mut self) -> Result<()> {
+        let Some(studio::TreeNode::Collection(index)) = self.studio.current_node() else {
+            self.status = String::from("Ponete sobre la collection para duplicarla");
+            return Ok(());
+        };
+        let path = self.studio.collections[index].path.clone();
+        let copy = studio::duplicate_collection(&path)?;
+        self.reload_library_at(&copy)?;
+        self.status = format!("Collection duplicada: {}", display_name(&copy));
+        Ok(())
+    }
+
+    fn studio_delete_collection(&mut self) -> Result<()> {
+        self.studio.confirm_delete = false;
+        self.studio.delete_collection = false;
+        let Some(studio::TreeNode::Collection(index)) = self.studio.current_node() else {
+            return Ok(());
+        };
+        let path = self.studio.collections[index].path.clone();
+        studio::delete_collection(&path)?;
+        let key = studio::collection_env_key(&path);
+        self.config
+            .http_environments
+            .retain(|existing, _| studio::collection_env_key(Path::new(existing)) != key);
+        if studio::collection_env_key(Path::new(&self.config.http_last_collection)) == key {
+            self.config.http_last_collection.clear();
+        }
+        self.config.save()?;
+        self.http.session.responses.retain(|response_path, _| {
+            !http::canonical_path(response_path).starts_with(http::canonical_path(&path))
+        });
+        self.studio.dirty = false;
+        self.studio.draft = None;
+        let dir = self.studio.collections_root.clone();
+        if let Some(dir) = dir {
+            let collections = studio::list_collections(&dir);
+            self.studio.collections = collections;
+            if self.studio.collections.is_empty() {
+                self.studio.items.clear();
+                self.studio.root = None;
+                self.status = String::from("Collection borrada");
+                return Ok(());
+            }
+            let index = index.min(self.studio.collections.len() - 1);
+            self.studio.collections[index].expanded = true;
+            self.focus_library_collection(index, None)?;
+        }
+        self.status = format!("Collection borrada: {}", display_name(&path));
         Ok(())
     }
 
