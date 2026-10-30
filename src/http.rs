@@ -1732,6 +1732,59 @@ pub(crate) struct OcEnvironmentFileOut {
     pub variables: Vec<OcEnvVariableOut>,
 }
 
+/// Same Bruno shape as [`OcEnvVariableOut`], but a secret omits `value` and
+/// `disabled` / `secret` are written only when they are set.
+#[derive(Serialize)]
+struct OcEnvVariableFileOut {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    disabled: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    secret: bool,
+}
+
+#[derive(Serialize)]
+struct OcEnvironmentFileWrite {
+    name: String,
+    variables: Vec<OcEnvVariableFileOut>,
+}
+
+/// Rewrites an environment file in the OpenCollection shape Bruno opens.
+pub fn save_environment(environment: &Environment) -> Result<()> {
+    let file = OcEnvironmentFileWrite {
+        name: environment.name.clone(),
+        variables: environment
+            .variables
+            .iter()
+            .map(|variable| OcEnvVariableFileOut {
+                name: variable.name.clone(),
+                value: if variable.secret {
+                    None
+                } else {
+                    Some(variable.value.clone().unwrap_or_default())
+                },
+                disabled: !variable.enabled,
+                secret: variable.secret,
+            })
+            .collect(),
+    };
+    let mut yaml = to_yaml(&file)?;
+    if !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
+    if let Some(parent) = environment.path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("No se pudo crear {}", parent.display()))?;
+    }
+    let tmp = environment.path.with_extension("yml.saving");
+    fs::write(&tmp, yaml).with_context(|| format!("No se pudo escribir {}", tmp.display()))?;
+    fs::rename(&tmp, &environment.path)
+        .with_context(|| format!("No se pudo guardar {}", environment.path.display()))?;
+    Ok(())
+}
+
 pub(crate) fn to_yaml<T: Serialize>(value: &T) -> Result<String> {
     serde_saphyr::to_string(value).map_err(|err| anyhow!("No se pudo generar el YAML: {err}"))
 }
@@ -1781,6 +1834,78 @@ pub(crate) fn append_dotenv(root: &Path, entries: &[(String, String)]) -> Result
     }
     fs::write(&path, content).with_context(|| format!("No se pudo escribir {}", path.display()))?;
     ensure_dotenv_ignored(root)
+}
+
+fn dotenv_key(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let body = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let (key, _) = body.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key)
+    }
+}
+
+/// Replaces `key` in the collection `.env`, or appends it. Creates the file.
+pub(crate) fn upsert_dotenv(root: &Path, key: &str, value: &str) -> Result<()> {
+    if key.is_empty() {
+        return Ok(());
+    }
+    let path = root.join(DOTENV_FILE);
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let escaped = value.replace('"', "\\\"").replace('\n', "\\n");
+    let replacement = format!("{key}=\"{escaped}\"");
+    let mut found = false;
+    let mut lines: Vec<String> = existing
+        .lines()
+        .map(|line| {
+            if dotenv_key(line) == Some(key) {
+                found = true;
+                replacement.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        lines.push(replacement);
+    }
+    let mut content = lines.join("\n");
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    fs::write(&path, content).with_context(|| format!("No se pudo escribir {}", path.display()))?;
+    ensure_dotenv_ignored(root)
+}
+
+pub(crate) fn remove_dotenv_key(root: &Path, key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Ok(());
+    }
+    let path = root.join(DOTENV_FILE);
+    let Ok(existing) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let lines: Vec<&str> = existing
+        .lines()
+        .filter(|line| dotenv_key(line) != Some(key))
+        .collect();
+    let mut content = lines.join("\n");
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    fs::write(&path, content).with_context(|| format!("No se pudo escribir {}", path.display()))
+}
+
+pub(crate) fn read_dotenv(root: &Path) -> HashMap<String, String> {
+    fs::read_to_string(root.join(DOTENV_FILE))
+        .map(|content| parse_dotenv(&content))
+        .unwrap_or_default()
 }
 
 /// Turns a request or folder name into a file name that is valid everywhere
@@ -2171,6 +2296,59 @@ docs: Creates a user.
         assert_eq!(values["D"], "plain");
         assert_eq!(values["E"], "line\nbreak");
         assert_eq!(values.len(), 5);
+    }
+
+    #[test]
+    fn environment_roundtrip_omits_secret_values() {
+        let temp = TestDir::new("env-write");
+        let dir = temp.path().join("api");
+        fs::create_dir(&dir).unwrap();
+        init_collection_in(&dir, false).unwrap();
+        let path = dir.join("environments").join("local.yml");
+        let environment = Environment {
+            name: String::from("local"),
+            path: path.clone(),
+            variables: vec![
+                EnvVariable {
+                    name: String::from("base_url"),
+                    value: Some(String::from("https://httpbin.org")),
+                    secret: false,
+                    enabled: true,
+                },
+                EnvVariable {
+                    name: String::from("token"),
+                    value: None,
+                    secret: true,
+                    enabled: false,
+                },
+            ],
+        };
+        save_environment(&environment).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("name: local"), "{text}");
+        assert!(
+            text.contains("secret: true") || text.contains("secret:true"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("from-dotenv")
+                && !text
+                    .lines()
+                    .any(|line| { line.contains("token") && line.contains("value") }),
+            "{text}"
+        );
+        let parsed = parse_environment(&text, &path).unwrap();
+        assert!(parsed.variables[0].enabled);
+        assert_eq!(parsed.variables[1].value, None);
+        assert!(parsed.variables[1].secret);
+        assert!(!parsed.variables[1].enabled);
+
+        upsert_dotenv(&dir, "token", "s3cret").unwrap();
+        upsert_dotenv(&dir, "token", "rotated").unwrap();
+        let dotenv = fs::read_to_string(dir.join(".env")).unwrap();
+        assert_eq!(dotenv.matches("token=").count(), 1, "{dotenv}");
+        assert!(dotenv.contains("rotated"), "{dotenv}");
+        assert!(!text.contains("rotated"));
     }
 
     /// A collection with defaults at every level, a secret in `.env` and the

@@ -3,7 +3,7 @@
 //! [`AuthKind`] without changing the table or the save path.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -81,6 +81,8 @@ pub enum StudioPrompt {
     NewCollectionExample,
     Rename,
     RenameCollection,
+    NewEnvironment,
+    RenameEnvironment,
 }
 
 /// A navigation that must wait until the user saves or discards the editor.
@@ -91,6 +93,48 @@ pub enum StudioLeave {
     Close,
     TreeOpen,
     TreeParent,
+    OpenEnv,
+    CloseEnv,
+    MoveEnv(isize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum EnvFocus {
+    #[default]
+    List,
+    Vars,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum EnvCol {
+    #[default]
+    Name,
+    Value,
+    Enabled,
+    Secret,
+}
+
+const ENV_COLS: [EnvCol; 4] = [EnvCol::Name, EnvCol::Value, EnvCol::Enabled, EnvCol::Secret];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvVarDraft {
+    pub name: String,
+    pub value: String,
+    pub secret: bool,
+    pub enabled: bool,
+    /// Typed secret. Written to `.env` on save. `None` keeps the current one.
+    pub secret_pending: Option<String>,
+    /// When set, save copies this `.env` key into `name` without removing it.
+    pub secret_source: Option<String>,
+    pub origin_name: String,
+    pub origin_secret: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvDraft {
+    pub name: String,
+    pub path: PathBuf,
+    pub variables: Vec<EnvVarDraft>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -629,6 +673,19 @@ pub struct HttpStudio {
     pub dirty_at: Option<Instant>,
     pub saved_at: Option<Instant>,
     pub save_error: Option<String>,
+    pub env_open: bool,
+    pub env_focus: EnvFocus,
+    pub env_col: EnvCol,
+    /// 0 is "no environment"; real files start at 1.
+    pub env_slot: usize,
+    pub env_row: usize,
+    pub env_files: Vec<http::Environment>,
+    pub env_draft: Option<EnvDraft>,
+    pub env_editing: bool,
+    pub env_buffer: String,
+    pub env_dirty: bool,
+    pub delete_environment: bool,
+    pub delete_variable: bool,
 }
 
 impl Default for HttpStudio {
@@ -660,6 +717,18 @@ impl Default for HttpStudio {
             dirty_at: None,
             saved_at: None,
             save_error: None,
+            env_open: false,
+            env_focus: EnvFocus::List,
+            env_col: EnvCol::Name,
+            env_slot: 0,
+            env_row: 0,
+            env_files: Vec::new(),
+            env_draft: None,
+            env_editing: false,
+            env_buffer: String::new(),
+            env_dirty: false,
+            delete_environment: false,
+            delete_variable: false,
         }
     }
 }
@@ -801,7 +870,11 @@ impl HttpStudio {
 
     /// Unsaved field text or a dirty draft. Navigation must ask before writing.
     pub fn needs_save_prompt(&self) -> bool {
-        self.nav.editing || self.dirty
+        if self.env_open {
+            self.env_editing || self.env_dirty
+        } else {
+            self.nav.editing || self.dirty
+        }
     }
 
     /// The timer must not write the file: that would skip the save/discard prompt.
@@ -819,6 +892,55 @@ impl HttpStudio {
     pub fn cancel_field_edit(&mut self) {
         self.nav.editing = false;
         self.nav.buffer.clear();
+        self.env_editing = false;
+        self.env_buffer.clear();
+    }
+
+    pub fn env_slot_count(&self) -> usize {
+        self.env_files.len() + 1
+    }
+
+    pub fn env_on_none(&self) -> bool {
+        self.env_slot == 0
+    }
+
+    pub fn selected_env(&self) -> Option<&http::Environment> {
+        self.env_files.get(self.env_slot.checked_sub(1)?)
+    }
+
+    /// Moves the environment list. `false` when the cursor stays put.
+    pub fn move_env_slot(&mut self, delta: isize) -> bool {
+        let last = self.env_slot_count().saturating_sub(1) as isize;
+        let next = (self.env_slot as isize + delta).clamp(0, last) as usize;
+        if next == self.env_slot {
+            return false;
+        }
+        self.env_slot = next;
+        true
+    }
+
+    pub fn load_env_draft_from_selection(&mut self) {
+        self.env_editing = false;
+        self.env_buffer.clear();
+        self.env_dirty = false;
+        self.env_row = 0;
+        self.env_col = EnvCol::Name;
+        self.env_draft = self.selected_env().map(EnvDraft::from_environment);
+    }
+
+    /// Left/right on the variable table. `true` when focus returns to the list.
+    pub fn move_env_col(&mut self, delta: isize) -> bool {
+        if delta < 0 && self.env_col == EnvCol::Name {
+            self.env_focus = EnvFocus::List;
+            return true;
+        }
+        let index = ENV_COLS
+            .iter()
+            .position(|col| *col == self.env_col)
+            .unwrap_or(0) as isize;
+        let next = (index + delta).rem_euclid(ENV_COLS.len() as isize) as usize;
+        self.env_col = ENV_COLS[next];
+        false
     }
 
     pub fn tree_on_collection(&self) -> bool {
@@ -1272,6 +1394,132 @@ impl HttpStudio {
     }
 }
 
+impl EnvDraft {
+    fn from_environment(env: &http::Environment) -> Self {
+        Self {
+            name: env.name.clone(),
+            path: env.path.clone(),
+            variables: env
+                .variables
+                .iter()
+                .map(|variable| EnvVarDraft {
+                    name: variable.name.clone(),
+                    value: variable.value.clone().unwrap_or_default(),
+                    secret: variable.secret,
+                    enabled: variable.enabled,
+                    secret_pending: None,
+                    secret_source: None,
+                    origin_name: variable.name.clone(),
+                    origin_secret: variable.secret,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn add_variable(&mut self) -> usize {
+        self.variables.push(EnvVarDraft {
+            name: String::new(),
+            value: String::new(),
+            secret: false,
+            enabled: true,
+            secret_pending: None,
+            secret_source: None,
+            origin_name: String::new(),
+            origin_secret: false,
+        });
+        self.variables.len() - 1
+    }
+
+    pub fn duplicate_variable(&mut self, row: usize) -> Option<usize> {
+        let source = self.variables.get(row)?.clone();
+        let mut copy = source.clone();
+        copy.name = if source.name.trim().is_empty() {
+            String::from("copia")
+        } else {
+            format!("{} copia", source.name.trim())
+        };
+        copy.origin_name.clear();
+        copy.origin_secret = false;
+        copy.secret_source = if source.secret {
+            Some(source.name.clone()).filter(|name| !name.is_empty())
+        } else {
+            None
+        };
+        let insert_at = row + 1;
+        self.variables.insert(insert_at, copy);
+        Some(insert_at)
+    }
+
+    pub fn remove_variable(&mut self, row: usize) -> bool {
+        if row < self.variables.len() {
+            self.variables.remove(row);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn toggle_enabled(&mut self, row: usize) -> bool {
+        let Some(variable) = self.variables.get_mut(row) else {
+            return false;
+        };
+        variable.enabled = !variable.enabled;
+        true
+    }
+
+    pub fn toggle_secret(&mut self, row: usize, dotenv: &HashMap<String, String>) -> bool {
+        let Some(variable) = self.variables.get_mut(row) else {
+            return false;
+        };
+        if variable.secret {
+            variable.value = variable
+                .secret_pending
+                .take()
+                .or_else(|| dotenv.get(&variable.name).cloned())
+                .or_else(|| dotenv.get(&variable.origin_name).cloned())
+                .unwrap_or_default();
+            variable.secret = false;
+            variable.secret_source = None;
+        } else {
+            variable.secret_pending = Some(variable.value.clone());
+            variable.secret = true;
+        }
+        true
+    }
+
+    pub fn set_name(&mut self, row: usize, name: &str) -> bool {
+        let Some(variable) = self.variables.get_mut(row) else {
+            return false;
+        };
+        if variable.name == name {
+            return false;
+        }
+        variable.name = name.to_string();
+        true
+    }
+
+    pub fn set_value(&mut self, row: usize, value: &str) -> bool {
+        let Some(variable) = self.variables.get_mut(row) else {
+            return false;
+        };
+        if variable.secret {
+            if value.is_empty() && variable.secret_pending.is_none() {
+                return false;
+            }
+            if variable.secret_pending.as_deref() == Some(value) {
+                return false;
+            }
+            variable.secret_pending = Some(value.to_string());
+            return true;
+        }
+        if variable.value == value {
+            return false;
+        }
+        variable.value = value.to_string();
+        true
+    }
+}
+
 pub struct StudioCopy {
     pub saved: &'static str,
     pub collection: &'static str,
@@ -1364,7 +1612,7 @@ pub fn copy(lang: &str) -> StudioCopy {
             help_edit: "edit the field    Esc leaves it",
             help_method: "cycle the method",
             help_send: "send with Shift+S",
-            help_env: "pick the environment",
+            help_env: "edit environments",
             help_new: "new    r rename    y duplicate    x delete",
             help_yaml: "edit the raw YAML",
             help_close: "leave the field, then the studio",
@@ -1413,7 +1661,7 @@ pub fn copy(lang: &str) -> StudioCopy {
             help_edit: "editar el campo    Esc lo deja",
             help_method: "cambiar el método",
             help_send: "enviar con Shift+S",
-            help_env: "elegir environment",
+            help_env: "editar environments",
             help_new: "nuevo    r renombrar    y duplicar    x borrar",
             help_yaml: "editar el YAML crudo",
             help_close: "salir del campo y despues del estudio",
@@ -1485,6 +1733,40 @@ pub fn panel_footer(
         }
     } else {
         base.to_string()
+    }
+}
+
+pub fn env_footer(focus: EnvFocus, editing: bool, save_prompt: bool, lang: &str) -> String {
+    let es = lang != "en";
+    if save_prompt {
+        return if es {
+            String::from("GUARDAR  g guardar · d descartar · Esc cancelar")
+        } else {
+            String::from("SAVE  g save · d discard · Esc cancel")
+        };
+    }
+    if editing {
+        return if es {
+            String::from("EDITANDO  Esc guarda el campo · Shift+S enviar")
+        } else {
+            String::from("EDITING  Esc saves the field · Shift+S send")
+        };
+    }
+    match focus {
+        EnvFocus::List => {
+            if es {
+                String::from("ENV  j/k · l variables · n nuevo · r renombrar · y duplicar · x borrar · Enter activar · Esc")
+            } else {
+                String::from("ENV  j/k · l variables · n new · r rename · y duplicate · x delete · Enter activate · Esc")
+            }
+        }
+        EnvFocus::Vars => {
+            if es {
+                String::from("VARS  h/l columnas · n nuevo · r renombrar · y duplicar · x borrar · s secreto · Enter edita · Shift+S enviar · Esc")
+            } else {
+                String::from("VARS  h/l columns · n new · r rename · y duplicate · x delete · s secret · Enter edits · Shift+S send · Esc")
+            }
+        }
     }
 }
 
@@ -1666,6 +1948,184 @@ fn set_collection_display_name(dir: &Path, name: &str) -> Result<()> {
         yaml.push('\n');
     }
     fs::write(&path, yaml).with_context(|| format!("No se pudo escribir {}", path.display()))
+}
+
+fn same_file(left: &Path, right: &Path) -> bool {
+    http::canonical_path(left) == http::canonical_path(right)
+}
+
+pub fn create_environment(root: &Path, name: &str) -> Result<PathBuf> {
+    validate_entry_name(name)?;
+    let name = name.trim();
+    let (existing, _) = http::load_environments(root);
+    if existing
+        .iter()
+        .any(|env| env.name.eq_ignore_ascii_case(name))
+    {
+        bail!("Ya existe un environment con ese nombre");
+    }
+    let dir = root.join("environments");
+    fs::create_dir_all(&dir).with_context(|| format!("No se pudo crear {}", dir.display()))?;
+    let filename = name.split_whitespace().collect::<Vec<_>>().join("-");
+    let path = unique_request_path(&dir, &filename);
+    http::save_environment(&http::Environment {
+        name: name.to_string(),
+        path: path.clone(),
+        variables: Vec::new(),
+    })?;
+    Ok(path)
+}
+
+pub fn rename_environment(root: &Path, path: &Path, new_name: &str) -> Result<(PathBuf, String)> {
+    validate_entry_name(new_name)?;
+    let new_name = new_name.trim().to_string();
+    let (existing, _) = http::load_environments(root);
+    if existing
+        .iter()
+        .any(|env| !same_file(&env.path, path) && env.name.eq_ignore_ascii_case(&new_name))
+    {
+        bail!("Ya existe un environment con ese nombre");
+    }
+    let current = existing
+        .into_iter()
+        .find(|env| same_file(&env.path, path))
+        .ok_or_else(|| anyhow!("No se encontro el environment"))?;
+    let old_name = current.name.clone();
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("El environment no tiene carpeta"))?;
+    let filename = new_name.split_whitespace().collect::<Vec<_>>().join("-");
+    let new_path = dir.join(format!("{}.yml", http::sanitize_file_name(&filename)));
+    if new_path != path && new_path.exists() {
+        bail!("Ya existe {}", new_path.display());
+    }
+    let updated = http::Environment {
+        name: new_name.clone(),
+        path: new_path.clone(),
+        variables: current.variables,
+    };
+    http::save_environment(&updated)?;
+    if new_path != path {
+        fs::remove_file(path).with_context(|| format!("No se pudo quitar {}", path.display()))?;
+    }
+    Ok((new_path, old_name))
+}
+
+pub fn duplicate_environment(root: &Path, path: &Path) -> Result<PathBuf> {
+    let (existing, _) = http::load_environments(root);
+    let current = existing
+        .iter()
+        .find(|env| same_file(&env.path, path))
+        .ok_or_else(|| anyhow!("No se encontro el environment"))?;
+    let copy_label = if current.name.trim().is_empty() {
+        String::from("copia")
+    } else {
+        format!("{} copia", current.name.trim())
+    };
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("El environment no tiene carpeta"))?;
+    let filename = copy_label.split_whitespace().collect::<Vec<_>>().join("-");
+    let dest = unique_request_path(dir, &filename);
+    http::save_environment(&http::Environment {
+        name: copy_label,
+        path: dest.clone(),
+        variables: current.variables.clone(),
+    })?;
+    Ok(dest)
+}
+
+pub fn delete_environment_file(path: &Path) -> Result<()> {
+    fs::remove_file(path).with_context(|| format!("No se pudo borrar {}", path.display()))
+}
+
+/// Points the stored environment of `root` at `new_name` when it was `old_name`.
+pub fn retarget_env_name(
+    map: &mut BTreeMap<String, String>,
+    root: &Path,
+    old_name: &str,
+    new_name: &str,
+) -> bool {
+    let key = collection_env_key(root);
+    let Some(current) = env_name_in(map, root) else {
+        return false;
+    };
+    if current != old_name {
+        return false;
+    }
+    map.retain(|existing, _| collection_env_key(Path::new(existing)) != key);
+    map.insert(key, new_name.to_string());
+    true
+}
+
+/// Drops the stored environment when it names the environment just deleted.
+pub fn clear_env_name(map: &mut BTreeMap<String, String>, root: &Path, name: &str) -> bool {
+    let key = collection_env_key(root);
+    let Some(current) = env_name_in(map, root) else {
+        return false;
+    };
+    if current != name {
+        return false;
+    }
+    map.retain(|existing, _| collection_env_key(Path::new(existing)) != key);
+    true
+}
+
+pub fn save_env_draft(root: &Path, draft: &EnvDraft) -> Result<()> {
+    sync_env_secrets(root, draft)?;
+    let environment = http::Environment {
+        name: draft.name.clone(),
+        path: draft.path.clone(),
+        variables: draft
+            .variables
+            .iter()
+            .filter(|variable| !variable.name.trim().is_empty())
+            .map(|variable| http::EnvVariable {
+                name: variable.name.clone(),
+                value: if variable.secret {
+                    None
+                } else {
+                    Some(variable.value.clone())
+                },
+                secret: variable.secret,
+                enabled: variable.enabled,
+            })
+            .collect(),
+    };
+    http::save_environment(&environment)
+}
+
+fn sync_env_secrets(root: &Path, draft: &EnvDraft) -> Result<()> {
+    let dotenv = http::read_dotenv(root);
+    for variable in &draft.variables {
+        let name = variable.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if variable.secret {
+            if let Some(pending) = &variable.secret_pending {
+                http::upsert_dotenv(root, name, pending)?;
+            } else if let Some(source) = variable
+                .secret_source
+                .as_deref()
+                .filter(|source| !source.is_empty())
+            {
+                if let Some(value) = dotenv.get(source) {
+                    http::upsert_dotenv(root, name, value)?;
+                }
+            } else if !variable.origin_secret {
+                http::upsert_dotenv(root, name, &variable.value)?;
+            } else if variable.origin_name != variable.name && !variable.origin_name.is_empty() {
+                if let Some(value) = dotenv.get(&variable.origin_name) {
+                    http::upsert_dotenv(root, name, value)?;
+                    http::remove_dotenv_key(root, &variable.origin_name)?;
+                }
+            }
+        } else if variable.origin_secret && !variable.origin_name.is_empty() {
+            http::remove_dotenv_key(root, &variable.origin_name)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_entry_name(name: &str) -> Result<()> {
@@ -2379,6 +2839,103 @@ docs: No perder.
             prompt.contains("g guardar") && prompt.contains("d descartar"),
             "{prompt}"
         );
+        let env_list = env_footer(EnvFocus::List, false, false, "es");
+        assert!(
+            env_list.contains("n nuevo")
+                && env_list.contains("r renombrar")
+                && env_list.contains("y duplicar")
+                && env_list.contains("x borrar"),
+            "{env_list}"
+        );
+        let env_vars = env_footer(EnvFocus::Vars, false, false, "es");
+        assert!(env_vars.contains("s secreto"), "{env_vars}");
+        let env_prompt = env_footer(EnvFocus::Vars, false, true, "es");
+        assert!(
+            env_prompt.contains("g guardar") && env_prompt.contains("d descartar"),
+            "{env_prompt}"
+        );
+    }
+
+    #[test]
+    fn environment_rename_updates_the_stored_name() {
+        let dir = temp_dir("envedit");
+        http::init_collection_in(&dir, false).unwrap();
+        let path = dir.join("environments").join("local.yml");
+        let (renamed, old_name) = rename_environment(&dir, &path, "staging").unwrap();
+        assert_eq!(old_name, "local");
+        assert_eq!(renamed.file_name().unwrap(), "staging.yml");
+        assert!(!path.exists());
+        let mut map = BTreeMap::new();
+        map.insert(collection_env_key(&dir), String::from("local"));
+        assert!(retarget_env_name(&mut map, &dir, "local", "staging"));
+        assert_eq!(env_name_in(&map, &dir), Some("staging"));
+        assert!(!clear_env_name(&mut map, &dir, "otro"));
+        assert!(clear_env_name(&mut map, &dir, "staging"));
+        assert!(env_name_in(&map, &dir).is_none());
+
+        let again = dir.join("environments").join("staging.yml");
+        let copy = duplicate_environment(&dir, &again).unwrap();
+        let file_name = copy.file_name().unwrap().to_string_lossy();
+        assert!(file_name.contains("copia"), "{file_name}");
+        assert!(!file_name.contains(' '), "{file_name}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_a_secret_variable_writes_dotenv_not_yaml() {
+        let dir = temp_dir("envsecret");
+        http::init_collection_in(&dir, false).unwrap();
+        let (environments, errors) = http::load_environments(&dir);
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut draft = EnvDraft::from_environment(
+            environments.iter().find(|env| env.name == "local").unwrap(),
+        );
+        let row = draft
+            .variables
+            .iter()
+            .position(|variable| variable.name == "base_url")
+            .unwrap();
+        draft.variables[row].value = String::from("https://example.test");
+        draft.variables[row].enabled = false;
+        assert!(draft.toggle_secret(row, &HashMap::new()));
+        save_env_draft(&dir, &draft).unwrap();
+        let text = fs::read_to_string(&draft.path).unwrap();
+        assert!(
+            text.contains("secret: true") || text.contains("secret:true"),
+            "{text}"
+        );
+        assert!(!text.contains("example.test"), "{text}");
+        let dotenv = fs::read_to_string(dir.join(".env")).unwrap();
+        assert!(dotenv.contains("example.test"), "{dotenv}");
+        let (environments, _) = http::load_environments(&dir);
+        let saved = environments.iter().find(|env| env.name == "local").unwrap();
+        let base = saved
+            .variables
+            .iter()
+            .find(|variable| variable.name == "base_url")
+            .unwrap();
+        assert!(base.secret);
+        assert_eq!(base.value, None);
+        assert!(!base.enabled);
+
+        let clean = HttpStudio {
+            env_open: true,
+            ..HttpStudio::default()
+        };
+        assert!(!clean.needs_save_prompt());
+        let dirty = HttpStudio {
+            env_open: true,
+            env_dirty: true,
+            ..HttpStudio::default()
+        };
+        assert!(dirty.needs_save_prompt());
+        let editing = HttpStudio {
+            env_open: true,
+            env_editing: true,
+            ..HttpStudio::default()
+        };
+        assert!(editing.needs_save_prompt());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

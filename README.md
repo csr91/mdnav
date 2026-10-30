@@ -144,7 +144,7 @@ El panel izquierdo es el árbol de collections (carpetas y requests; ★ es el a
 | `y` | duplicar (el archivo no lleva espacios; en la response, copiar el body) |
 | `x` | borrar, con confirmación |
 | `Shift+S` | enviar |
-| `e` | elegir environment (`:@http env` también) |
+| `e` | editor de environments (`:@http env` también) |
 | `Shift+E` | abrir el YAML en el editor |
 | `Esc` `Esc` | salir del estudio; la response queda para la próxima vez |
 
@@ -154,7 +154,7 @@ Salir de un campo con `Esc` o `Enter`, y enviar con `Shift+S`, escriben el `.yml
 
 Los requests salen en un thread aparte: la UI no se congela y `Esc` en la response abandona el que está en curso.
 
-**Variables:** `{{nombre}}` se resuelve con esta precedencia: variables de la collection < environment < folders. `{{process.env.NOMBRE}}` lee el `.env` de la collection y después el entorno del proceso. Las variables `secret: true` de un environment no guardan valor en el archivo: mdnav las busca por nombre en `.env`.
+**Variables:** `{{nombre}}` se resuelve con esta precedencia: variables de la collection < environment < folders. `{{process.env.NOMBRE}}` lee el `.env` de la collection y después el entorno del proceso. Las variables `secret: true` de un environment no guardan valor en el archivo: mdnav las busca por nombre en `.env`. `e` edita esos environments (crear, renombrar, duplicar, borrar, y las variables) sin tocar el YAML a mano. Un secreto se escribe en `.env` y en pantalla se ve enmascarado.
 
 **Auth:** en la pestaña Auth, `none`, `inherit`, `bearer`, `basic` y `apikey` (header o query). `inherit` toma la del folder más cercano o la de la collection. Los perfiles con nombre vienen después; `a` queda reservada para eso.
 

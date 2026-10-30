@@ -39,7 +39,7 @@ Crear, renombrar, duplicar y borrar usan las mismas teclas en el árbol de docs 
 | `y` | duplicar |
 | `x` | borrar, con confirmación |
 
-En el árbol de `:@http` actúan sobre el request si el cursor está en un request, y sobre la collection si el cursor está en ella. `c` crea una collection vacía y `C` una con el GET de ejemplo. `Shift+R` y `Shift+X` siguen abriendo renombrar y borrar en el árbol de docs, como alias de `r` y `x`.
+En el árbol de `:@http` actúan sobre el request si el cursor está en un request, y sobre la collection si el cursor está en ella. En el editor de environments (`e`) actúan sobre el environment si el foco está en la lista, y sobre la variable si el foco está en la tabla. `s` marca esa variable como secreta. `c` crea una collection vacía y `C` una con el GET de ejemplo. `Shift+R` y `Shift+X` siguen abriendo renombrar y borrar en el árbol de docs, como alias de `r` y `x`.
 
 En el JSON Viewer no hay un archivo que renombrar o duplicar. `n` y `x` vacían el texto (con confirmación si había algo) y `y` copia el JSON formateado: es la excepción, porque duplicar no aplica. `Shift+S` es enviar en el estudio HTTP; no es la `S` de un atajo de una sola tecla.
 
