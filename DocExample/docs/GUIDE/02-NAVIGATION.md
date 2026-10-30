@@ -8,7 +8,7 @@
 
 ## Layout
 
-Proba `Shift+1..5` para cambiar la proporcion entre navegacion y preview.
+Proba `!` `@` `#` `$` `%` para cambiar la proporcion entre navegacion y preview (1 a 5). `:@jsonviewer` abre el visor JSON.
 
 ## Siguiente
 

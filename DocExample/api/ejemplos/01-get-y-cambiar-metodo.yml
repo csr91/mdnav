@@ -9,7 +9,7 @@ http:
   #   GET, POST, PUT, PATCH, DELETE, HEAD u OPTIONS.
   # httpbin /anything acepta cualquiera y te devuelve cual llego en "method".
   method: GET
-  # {{echo_api}} sale del environment activo (:httpenv → public).
+  # {{echo_api}} sale del environment activo (e en :@http, o :@http env → public).
   url: "{{echo_api}}/anything/hola"
 settings:
   encodeUrl: true

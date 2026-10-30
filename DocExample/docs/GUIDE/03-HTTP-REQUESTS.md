@@ -11,37 +11,37 @@ mdnav DocExample              # con mdnav instalado
 cargo run -- DocExample       # desde el código, parado en la raíz del repo
 ```
 
-**1. Abrí un request**
+**1. Abrí el estudio**
 
-- Expandí `api` y después `ejemplos` (`j`/`k` para moverte, `Enter` para expandir).
-- Seleccioná `01-get-y-cambiar-metodo.yml` y `Enter`.
+- `:` abre la palette. Escribí `@http` y `Enter`.
+- A la izquierda está la collection. `j`/`k` eligen el request (★ es el abierto). Bajá hasta `GET y cambiar de metodo`.
 
-El preview se parte en **Request** arriba y **Response** abajo, todavía vacía.
+Si no hubiera collection, la primera pantalla ofrece crear una de ejemplo con Enter. No hay un menú de init ni de import.
 
 **2. Elegí el environment** (una sola vez: queda guardado en la config)
 
-- `:` abre la palette. Escribí `httpenv` y `Enter`.
+- `e` abre la lista. También podés entrar directo con `:@http env`.
 - Bajá hasta `public` con `j` y `Enter`.
 
-En el panel Request, `Env` pasa a `public` y la línea `→` muestra la URL resuelta, `https://httpbin.org/anything/hola`.
+En el editor, el título de la collection pasa a `public` y la línea `→` muestra la URL resuelta, `https://httpbin.org/anything/hola`.
 
 **3. Enviá**
 
-- `Shift+S`: aparece el spinner y la response llega con el JSON formateado. El foco pasa solo a la response.
-- `j`/`k` hacen scroll, `]` cambia a Headers e Info, `y` copia el body y `Tab` vuelve al árbol.
+- `S`: aparece el spinner y la response llega abajo, con el JSON formateado. El foco pasa a la response.
+- `j`/`k` hacen scroll, `]` cambia a Headers e Info, `y` copia el body.
 
 **4. Cambiá algo y reenviá**
 
-- `Shift+E` abre el YAML en tu editor. Cambiá `method: GET` por `method: POST`, guardá y salí.
-- `Shift+S` de nuevo: en la response, `"method"` ahora dice `"POST"`.
+- `Tab` vuelve al editor. `m` pasa el método de GET a POST. El archivo se guarda solo: el título dice `guardado` un momento.
+- `S` de nuevo: en la response, `"method"` ahora dice `"POST"`.
 
-Ese ciclo (editar, enviar, mirar la response) es todo el flujo de trabajo.
+Ese ciclo (editar en el estudio, enviar, mirar la response) es todo el flujo de trabajo. El YAML queda en el repo, pero no hace falta abrirlo. `Shift+E` sigue ahí para el YAML crudo, si alguna vez lo necesitás.
 
-Para probar secretos, creá `DocExample/api/.env` con `DEMO_TOKEN=lo-que-quieras` y enviá `api/echo/post-json.yml`. httpbin devuelve el header `Authorization` que mandaste, y el token nunca aparece en el YAML.
+Para probar secretos, creá `DocExample/api/.env` con `DEMO_TOKEN=lo-que-quieras` y enviá `api/echo/post-json.yml` desde el estudio. httpbin devuelve el header `Authorization` que mandaste, y el token nunca aparece en el YAML.
 
 ## Ejemplos para aprender
 
-`api/ejemplos/` tiene un request por concepto. Todos van contra httpbin, que te devuelve lo que mandaste: cambiá algo con `Shift+E`, enviá con `Shift+S` y mirá el efecto en la response. Cada archivo explica qué tocar en sus comentarios, y su sección **Docs** se ve en el panel Request.
+`api/ejemplos/` tiene un request por concepto. Todos van contra httpbin, que te devuelve lo que mandaste: cambialo en el estudio (`:@http`), enviá con `S` y mirá el efecto en la response. Params, Headers, Body y Auth son pestañas del editor. `Shift+E` abre el YAML si querés ver el archivo.
 
 | Archivo | Qué muestra |
 |---------|-------------|
@@ -76,7 +76,7 @@ flowchart LR
 
 - El resolver junta los defaults heredados (`opencollection.yml` y los `folder.yml`: variables, headers y auth), el environment activo y los secretos del `.env`.
 - El request sale en un thread aparte: la UI no se congela y `Esc` lo abandona.
-- La response queda en memoria por request y sobrevive a `Shift+E` (editar y volver).
+- La response queda en memoria por request y sobrevive a `Shift+E` (el YAML crudo, y al volver se reabre el estudio).
 
 ## El formato: OpenCollection
 
@@ -105,26 +105,40 @@ api/
 | `{{process.env.NOMBRE}}` | `.env` de la collection y después el entorno del proceso |
 | `secret: true` en un environment | se busca por nombre en `.env` |
 
-Una variable sin resolver aparece en **Avisos** dentro del request. Si está en la URL, el request no se envía y mdnav te pide elegir un environment.
+Si una variable de la URL no se resuelve, el request no se envía y mdnav te pide elegir un environment (`e` o `:@http env`).
 
-## Teclas
+## Teclas del estudio
+
+El pie dice: `HTTP  j/k · Tab · n nuevo · m método · S enviar · e env · Esc`.
 
 | Tecla | Acción |
 |-------|--------|
-| `Shift+S` | enviar |
-| `Tab` | árbol → request → response |
-| `[` `]` / `h` `l` | tabs de la response |
-| `y` | copiar el body |
-| `Esc` | abandonar el request en curso |
-| `Shift+E` | editar el YAML |
-| `:http` | send, env, new, init, import |
-| `:httpenv` | elegir environment |
+| `:@http` | abrir el estudio |
+| `:@http env` | abrir el estudio y elegir environment |
+| `j` `k` | moverse |
+| `Tab` | collection → editor → response |
+| `[` `]` / `h` `l` | pestañas del editor; en la response, sus tabs |
+| `m` | cambiar el método |
+| `Enter` | editar el campo |
+| `+` `-` | agregar o quitar una fila |
+| `n` | request nuevo |
+| `r` | renombrar |
+| `y` | duplicar; en la response, copiar el body |
+| `x` | borrar, con confirmación |
+| `S` | enviar |
+| `e` | elegir environment |
+| `Shift+E` | editar el YAML crudo |
+| `Esc` | salir del campo y después del estudio |
+
+En 80×24 la collection, el editor y la response se apilan. Más ancha, la collection queda a la izquierda.
 
 ## Arrancar una collection propia
 
-- `:http` → `init` convierte la carpeta seleccionada en una collection: crea un environment `local`, el `.gitignore` del `.env` y un request de ejemplo.
-- `:http` → `new` crea un request en la carpeta seleccionada.
-- `:http` → `import` convierte un `*.postman_collection.json` (v2.1) en una carpeta nueva al lado del JSON. Los `*.postman_environment.json` van a `environments/`, con sus secretos pasados al `.env`.
+- `:@http` en una carpeta sin collection ofrece crear una de ejemplo: environment `local`, `.gitignore` del `.env` y un request.
+- `n` crea otro request en la carpeta del que está abierto. `r` lo renombra, `y` lo duplica y `x` lo borra. Cada una de esas acciones es un archivo del repo.
+- Al dejar un campo (o al enviar) el estudio reescribe el YAML. No hace falta conocer el formato.
+
+Importar un export de Postman desde el estudio queda para más adelante.
 
 ## Límites actuales
 

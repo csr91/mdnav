@@ -6,6 +6,7 @@ mod markdown;
 mod postman;
 mod share;
 mod strings;
+mod studio;
 mod ui;
 
 use std::{
@@ -280,6 +281,9 @@ fn run(
 
     if let Some(path) = resume_path {
         app.restore_path_focus(&path)?;
+    }
+    if let Some(path) = app.http.session.reopen_studio.take() {
+        app.reopen_http_studio(&path)?;
     }
 
     while app.running {

@@ -11,11 +11,12 @@ use crate::markdown::{PreviewLine, PreviewLineKind};
 use crate::{
     app::{
         App, CreateKind, CreateStep, FileOpKind, Focus, FullscreenPanel, GitState, GitStatusKind,
-        HelpSection, Overlay, PreviewCursor, ResponseTab, HTTP_MENU_ITEMS, RESPONSE_TABS,
+        HelpSection, Overlay, PreviewCursor, ResponseTab, RESPONSE_TABS,
     },
     config::{config_path, TreeInfoMode},
     http::{self, HttpResponse},
     strings::Strings,
+    studio::{self, CellCol, EditorCursor, EditorTab, StudioPanel, StudioPrompt},
 };
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -26,7 +27,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Min(3), Constraint::Length(2)])
         .split(frame.area());
 
-    if app.json_viewer_active {
+    if app.studio.active {
+        render_http_studio(frame, areas[0], app);
+    } else if app.json_viewer_active {
         render_json_viewer(frame, areas[0], app);
     } else if app.fullscreen == FullscreenPanel::Tree {
         render_tree(frame, areas[0], app);
@@ -44,7 +47,16 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     let s = app.config.strings();
-    let footer = if app.json_viewer_active {
+    let footer = if app.studio.active {
+        let copy = studio::copy(&app.config.language);
+        Paragraph::new(Line::from(Span::styled(
+            copy.footer,
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .block(Block::default().borders(Borders::TOP))
+    } else if app.json_viewer_active {
         Paragraph::new(Line::from(Span::styled(
             "JSON VIEWER  F5 procesar  Tab cambiar panel  y copiar  Shift+0 vista limpia  Esc cerrar",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -165,9 +177,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Create => render_create_popup(frame, app),
         Overlay::Git => render_git_popup(frame, app),
         Overlay::Alert => render_alert_popup(frame, app),
-        Overlay::HttpMenu => render_http_menu_popup(frame, app),
         Overlay::HttpEnv => render_http_env_popup(frame, app),
-        Overlay::HttpInput => render_http_input_popup(frame, app),
         Overlay::Rename => {}
         Overlay::None => {}
     }
@@ -214,8 +224,11 @@ fn mode_label(app: &App) -> (&'static str, Color) {
             ("MERMAID", Color::Cyan)
         }
         Overlay::WebLink => ("LINK", Color::Cyan),
-        Overlay::HttpMenu | Overlay::HttpEnv | Overlay::HttpInput => ("HTTP", Color::Green),
+        Overlay::HttpEnv => ("HTTP", Color::Green),
         Overlay::None => {
+            if app.studio.active {
+                return ("HTTP", Color::Green);
+            }
             if app.json_viewer_active {
                 return ("JSON", Color::Green);
             }
@@ -265,11 +278,9 @@ fn context_footer_spans(app: &App, s: &Strings) -> Vec<Span<'static>> {
     let hint = match app.focus {
         Focus::Tree => "↑↓/jk move · Enter/l open · h parent · Tab preview · : command · ? help  ",
         Focus::Preview if app.http_response_focused() => {
-            "↑↓/jk scroll · []/hl tabs · y copy body · S send · Tab tree  "
+            "↑↓/jk scroll · []/hl tabs · y copiar · S enviar · Tab arbol  "
         }
-        Focus::Preview if app.http.view.is_some() => {
-            "S send · Tab response · ↑↓ scroll · E edit · :httpenv env  "
-        }
+        Focus::Preview if app.http.view.is_some() => "S enviar · :@http estudio · E ver YAML  ",
         Focus::Preview => "↑↓/jk scroll · [] links · T toc · Y select · Tab tree · : command  ",
     };
     spans.push(Span::styled(hint, Style::default().fg(Color::Gray)));
@@ -700,6 +711,7 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bord
         .unwrap_or_else(|| base_title.to_string());
 
     let lines = if app.current_file.is_none() && app.http.view.is_none() {
+        let copy = studio::copy(&app.config.language);
         vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -753,12 +765,30 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bord
             ]),
             Line::from(vec![
                 Span::styled(
-                    "  @      ",
+                    "  !@#$%  ",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Abrir JSON Viewer", Style::default().fg(Color::White)),
+                Span::styled(copy.welcome_split, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  :@jsonviewer  ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(copy.welcome_json, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  :@http ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(copy.welcome_http, Style::default().fg(Color::White)),
             ]),
             Line::from(""),
             Line::from(Span::styled(
@@ -817,8 +847,16 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, focused: bool, bord
     }
 }
 
+fn response_panel_focused(app: &App) -> bool {
+    if app.studio.active {
+        app.studio.panel == StudioPanel::Response && !app.studio.nav.editing
+    } else {
+        app.focus == Focus::Preview && app.http.response_focus
+    }
+}
+
 fn render_response(frame: &mut Frame, area: Rect, app: &App) {
-    let focused = app.focus == Focus::Preview && app.http.response_focus;
+    let focused = response_panel_focused(app);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style(focused));
@@ -860,9 +898,9 @@ fn render_response(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Gray),
             )),
             Line::from(""),
-            shortcut_line("Shift+S", "enviar el request"),
-            shortcut_line("Tab", "pasar de request a response"),
-            shortcut_line(":httpenv", "elegir environment"),
+            shortcut_line("S", "enviar el request"),
+            shortcut_line(":@http", "abrir el estudio"),
+            shortcut_line("e", "elegir environment"),
             shortcut_line("Shift+E", "editar el YAML"),
         ];
         if app.http_busy() {
@@ -1051,55 +1089,6 @@ fn response_tab_lines(app: &App, response: &HttpResponse) -> Vec<Line<'static>> 
     }
 }
 
-fn render_http_menu_popup(frame: &mut Frame, app: &App) {
-    let popup_area = centered_rect(60, 45, frame.area());
-    frame.render_widget(Clear, popup_area);
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(2)])
-        .split(popup_area);
-
-    let items: Vec<ListItem> = HTTP_MENU_ITEMS
-        .iter()
-        .map(|(name, description)| {
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{name:<8}"),
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("  {description}"), Style::default().fg(Color::Gray)),
-            ]))
-        })
-        .collect();
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(" HTTP  (↑↓ navigate | Enter run | Esc close) ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Green)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Green)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    let mut state = ListState::default();
-    state.select(Some(app.http.menu_cursor));
-    frame.render_stateful_widget(list, sections[0], &mut state);
-
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "  new/init: carpeta seleccionada · import: JSON seleccionado",
-            Style::default().fg(Color::DarkGray),
-        ))),
-        sections[1],
-    );
-}
-
 fn render_http_env_popup(frame: &mut Frame, app: &App) {
     let popup_area = centered_rect(50, 45, frame.area());
     frame.render_widget(Clear, popup_area);
@@ -1148,31 +1137,621 @@ fn render_http_env_popup(frame: &mut Frame, app: &App) {
     frame.render_stateful_widget(list, popup_area, &mut state);
 }
 
-fn render_http_input_popup(frame: &mut Frame, app: &App) {
-    let popup_area = centered_rect(60, 20, frame.area());
-    frame.render_widget(Clear, popup_area);
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Length(2)])
-        .split(popup_area);
+struct StudioPanes {
+    collection: Rect,
+    editor: Rect,
+    response: Rect,
+}
 
+fn studio_panes(area: Rect) -> StudioPanes {
+    // 80x24 (and any short or narrow terminal) stacks the three panes.
+    let compact = area.width < 100 || area.height < 28;
+    if compact {
+        let collection_h = 5.min(area.height.saturating_sub(8)).max(3);
+        let response_h = (area.height / 3)
+            .max(4)
+            .min(area.height.saturating_sub(collection_h + 4));
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(collection_h),
+                Constraint::Min(4),
+                Constraint::Length(response_h),
+            ])
+            .split(area);
+        StudioPanes {
+            collection: chunks[0],
+            editor: chunks[1],
+            response: chunks[2],
+        }
+    } else {
+        let response_h = (area.height * 2 / 5).clamp(6, area.height.saturating_sub(8));
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Length(response_h)])
+            .split(area);
+        let collection_w = 36.min(area.width / 3).max(22);
+        let horizontal = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(collection_w), Constraint::Min(20)])
+            .split(vertical[0]);
+        StudioPanes {
+            collection: horizontal[0],
+            editor: horizontal[1],
+            response: vertical[1],
+        }
+    }
+}
+
+fn render_http_studio(frame: &mut Frame, area: Rect, app: &App) {
+    let copy = studio::copy(&app.config.language);
+    if app.studio.starter {
+        render_studio_starter(frame, area, app, &copy);
+    } else {
+        let panes = studio_panes(area);
+        render_studio_collection(frame, panes.collection, app, &copy);
+        render_studio_editor(frame, panes.editor, app, &copy);
+        render_response(frame, panes.response, app);
+    }
+    if app.studio.confirm_delete {
+        render_studio_confirm(frame, app, &copy);
+    } else if app.studio.prompt.is_some() {
+        render_studio_prompt(frame, app, &copy);
+    }
+}
+
+fn render_studio_starter(frame: &mut Frame, area: Rect, app: &App, copy: &studio::StudioCopy) {
+    let folder = app
+        .studio
+        .starter_dir
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let mut lines = Vec::new();
+    for line in copy.starter_body.split('\n') {
+        lines.push(Line::from(Span::styled(
+            format!("  {line}"),
+            Style::default().fg(Color::White),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", copy.starter_enter),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", copy.starter_esc),
+        Style::default().fg(Color::Gray),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  {}: {folder}", copy.folder),
+        Style::default().fg(Color::DarkGray),
+    )));
     frame.render_widget(
-        Paragraph::new(format!("{}_", app.http.input))
+        Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title(" Request nuevo  (Enter crear | Esc cancelar) ")
+                    .title(format!(" {} ", copy.starter_title))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Green)),
             )
-            .style(Style::default().fg(Color::White)),
-        sections[0],
+            .wrap(Wrap { trim: false }),
+        area,
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "  Se crea <nombre>.yml en la carpeta seleccionada",
+}
+
+fn render_studio_collection(frame: &mut Frame, area: Rect, app: &App, copy: &studio::StudioCopy) {
+    let focused = app.studio.panel == StudioPanel::Collection;
+    let env = app
+        .http
+        .view
+        .as_ref()
+        .and_then(|view| view.environment.clone())
+        .unwrap_or_else(|| copy.env_none.to_string());
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let selected = app.studio.selected;
+    let start = selected.saturating_sub(inner_h.saturating_sub(1));
+    let mut lines = Vec::new();
+    if app.studio.items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            copy.no_requests,
             Style::default().fg(Color::DarkGray),
-        ))),
-        sections[1],
+        )));
+    }
+    for (offset, item) in app
+        .studio
+        .items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(inner_h.max(1))
+    {
+        let star = if offset == selected { "★" } else { " " };
+        let method = format!("{:<6}", item.method);
+        let folder = item
+            .rel
+            .rsplit_once('/')
+            .map(|(dir, _)| format!("  {dir}"))
+            .unwrap_or_default();
+        let selected_row = offset == selected;
+        let row_style = if selected_row && focused {
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else if selected_row {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let method_style = if selected_row && focused {
+            row_style
+        } else {
+            Style::default()
+                .fg(method_color(item.method.as_str()))
+                .add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{star} "), row_style.fg(Color::Yellow)),
+            Span::styled(method, method_style),
+            Span::styled(format!(" {}", item.name), row_style),
+            Span::styled(folder, Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(format!(" {} · {env} ", copy.collection))
+                .borders(Borders::ALL)
+                .border_style(border_style(focused)),
+        ),
+        area,
+    );
+}
+
+fn render_studio_editor(frame: &mut Frame, area: Rect, app: &App, copy: &studio::StudioCopy) {
+    let focused = app.studio.panel == StudioPanel::Editor;
+    let name = app
+        .studio
+        .draft
+        .as_ref()
+        .map(|draft| draft.name.clone())
+        .unwrap_or_default();
+    let mut title = format!(" {} · {name}", copy.request);
+    if app.studio.saved_recent() {
+        title.push_str(" · ");
+        title.push_str(copy.saved);
+    }
+    title.push(' ');
+    let lines = studio_editor_lines(app, copy, area.width.saturating_sub(2) as usize);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(border_style(focused)),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn studio_editor_lines(app: &App, copy: &studio::StudioCopy, width: usize) -> Vec<Line<'static>> {
+    let Some(draft) = &app.studio.draft else {
+        let message = app
+            .studio
+            .load_error
+            .clone()
+            .unwrap_or_else(|| copy.load_fail.to_string());
+        return vec![Line::from(Span::styled(
+            message,
+            Style::default().fg(Color::Red),
+        ))];
+    };
+    let nav = &app.studio.nav;
+    let mut lines = Vec::new();
+    let url = if let Some(text) = app.studio.editing_text(EditorCursor::Url, CellCol::Name) {
+        format!("{text}█")
+    } else {
+        draft.url.clone()
+    };
+    let url_mark = if nav.cursor == EditorCursor::Url && !nav.editing {
+        ">"
+    } else {
+        " "
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {} ", draft.method),
+            Style::default()
+                .fg(Color::Black)
+                .bg(method_color(draft.method.as_str()))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{url_mark}{url}"),
+            if nav.cursor == EditorCursor::Url {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            },
+        ),
+    ]));
+    let resolved = studio_resolved_url(app);
+    let resolved_style = if resolved.contains("{{") {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let resolved_label = if resolved.is_empty() {
+        copy.unresolved.to_string()
+    } else {
+        resolved
+    };
+    lines.push(Line::from(Span::styled(
+        format!(" → {resolved_label}"),
+        resolved_style,
+    )));
+    lines.push(editor_tabs_line(nav.tab));
+    match nav.tab {
+        EditorTab::Params | EditorTab::Headers => {
+            lines.extend(table_lines(app, copy, nav.tab, width));
+        }
+        EditorTab::Body => lines.extend(body_lines(app, copy, width)),
+        EditorTab::Auth => lines.extend(auth_lines(app, copy)),
+    }
+    lines
+}
+
+fn editor_tabs_line(active: EditorTab) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, tab) in [
+        EditorTab::Params,
+        EditorTab::Headers,
+        EditorTab::Body,
+        EditorTab::Auth,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::styled(" ", Style::default()));
+        }
+        let style = if tab == active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(format!(" {} ", tab.label()), style));
+    }
+    Line::from(spans)
+}
+
+fn table_lines(
+    app: &App,
+    copy: &studio::StudioCopy,
+    tab: EditorTab,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let Some(draft) = &app.studio.draft else {
+        return Vec::new();
+    };
+    let len = draft.table_len(tab);
+    let cols = studio::EditorNav::columns(tab);
+    let kind_w = if cols.contains(&CellCol::Kind) { 6 } else { 0 };
+    let on_w = 4;
+    let key_w = 16.min(width / 3).max(8);
+    let value_w = width.saturating_sub(key_w + kind_w + on_w + 6).max(8);
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "  {:<key_w$} {:<value_w$} {}{}",
+            copy.col_key,
+            copy.col_value,
+            if kind_w > 0 {
+                format!("{:<kind_w$}", copy.col_kind)
+            } else {
+                String::new()
+            },
+            copy.col_on,
+            key_w = key_w,
+            value_w = value_w,
+        ),
+        Style::default().fg(Color::DarkGray),
+    ))];
+    if len == 0 {
+        lines.push(Line::from(Span::styled(
+            copy.empty_table,
+            Style::default().fg(Color::DarkGray),
+        )));
+        return lines;
+    }
+    for row in 0..len {
+        let cursor_here = matches!(app.studio.nav.cursor, EditorCursor::Row(index) if index == row)
+            && app.studio.panel == StudioPanel::Editor;
+        let name = cell_text(app, tab, row, CellCol::Name, &draft.row_name(tab, row));
+        let value = cell_text(app, tab, row, CellCol::Value, &draft.row_value(tab, row));
+        let enabled = if draft.row_enabled(tab, row) {
+            copy.yes
+        } else {
+            copy.no
+        };
+        let marker = if cursor_here { ">" } else { " " };
+        let mut spans = vec![
+            Span::styled(marker, Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!(" {}", fit(&name, key_w)),
+                cell_style(cursor_here, app.studio.nav.col == CellCol::Name),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                fit(&value, value_w),
+                cell_style(cursor_here, app.studio.nav.col == CellCol::Value),
+            ),
+        ];
+        if kind_w > 0 {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                fit(draft.row_kind_label(row), kind_w),
+                cell_style(cursor_here, app.studio.nav.col == CellCol::Kind),
+            ));
+        }
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            fit(enabled, on_w),
+            cell_style(cursor_here, app.studio.nav.col == CellCol::Enabled),
+        ));
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+fn body_lines(app: &App, copy: &studio::StudioCopy, width: usize) -> Vec<Line<'static>> {
+    let Some(draft) = &app.studio.draft else {
+        return Vec::new();
+    };
+    let on_kind = app.studio.nav.cursor == EditorCursor::BodyKind;
+    let kind_style = if on_kind && app.studio.panel == StudioPanel::Editor {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let label = draft
+        .body
+        .unsupported_label
+        .as_deref()
+        .filter(|_| draft.body.kind == studio::BodyKind::Unsupported)
+        .unwrap_or_else(|| draft.body.kind.label());
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("{}: ", copy.body_kind),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(label.to_string(), kind_style),
+    ])];
+    if draft.body.kind == studio::BodyKind::Form {
+        lines.extend(table_lines(app, copy, EditorTab::Body, width));
+        return lines;
+    }
+    if draft.body.kind == studio::BodyKind::None || draft.body.kind == studio::BodyKind::Unsupported
+    {
+        lines.push(Line::from(Span::styled(
+            copy.empty_body,
+            Style::default().fg(Color::DarkGray),
+        )));
+        if let Some(label) = &draft.body.unsupported_label {
+            lines.push(Line::from(Span::styled(
+                label.clone(),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        return lines;
+    }
+    let text = if app.studio.nav.editing && app.studio.nav.cursor == EditorCursor::BodyKind {
+        format!("{}█", app.studio.nav.buffer)
+    } else {
+        draft.body.text.clone()
+    };
+    if text.is_empty() {
+        lines.push(Line::from(Span::styled(
+            copy.empty_body,
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for line in text.lines() {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::White),
+            )));
+        }
+    }
+    lines
+}
+
+fn auth_lines(app: &App, copy: &studio::StudioCopy) -> Vec<Line<'static>> {
+    let Some(draft) = &app.studio.draft else {
+        return Vec::new();
+    };
+    let on_kind = app.studio.nav.cursor == EditorCursor::AuthKind;
+    let kind_style = if on_kind && app.studio.panel == StudioPanel::Editor {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let label = draft
+        .auth
+        .unsupported_label
+        .as_deref()
+        .filter(|_| draft.auth.kind == studio::AuthKind::Unsupported)
+        .unwrap_or_else(|| draft.auth.kind.label());
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("{}: ", copy.auth_kind),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(label.to_string(), kind_style),
+    ])];
+    for index in 0..draft.auth.field_count() {
+        let on_field =
+            matches!(app.studio.nav.cursor, EditorCursor::AuthField(field) if field == index);
+        let value = if on_field && app.studio.nav.editing {
+            format!("{}█", app.studio.nav.buffer)
+        } else {
+            draft.auth.field_value(index)
+        };
+        let style = if on_field && app.studio.panel == StudioPanel::Editor {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<12}", draft.auth.field_label(index, copy)),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(value, style),
+        ]));
+    }
+    lines
+}
+
+fn cell_text(app: &App, tab: EditorTab, row: usize, col: CellCol, fallback: &str) -> String {
+    if app.studio.nav.tab == tab {
+        if let Some(text) = app.studio.editing_text(EditorCursor::Row(row), col) {
+            return format!("{text}█");
+        }
+    }
+    fallback.to_string()
+}
+
+fn cell_style(row_focused: bool, col_focused: bool) -> Style {
+    if row_focused && col_focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if row_focused {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
+fn fit(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if width == 0 {
+        return String::new();
+    }
+    if count <= width {
+        format!("{text}{}", " ".repeat(width - count))
+    } else if width == 1 {
+        String::from("…")
+    } else {
+        let truncated: String = text.chars().take(width - 1).collect();
+        format!("{truncated}…")
+    }
+}
+
+fn method_color(method: &str) -> Color {
+    let [r, g, b] = http::method_color(method);
+    Color::Rgb(r, g, b)
+}
+
+fn studio_resolved_url(app: &App) -> String {
+    let Some(draft) = &app.studio.draft else {
+        return String::new();
+    };
+    let Some(root) = &app.studio.root else {
+        return draft.url.clone();
+    };
+    let environment = app.http.view.as_ref().and_then(|view| {
+        if view.collection_root != *root {
+            return None;
+        }
+        let name = view.environment.as_deref()?;
+        view.environments.iter().find(|env| env.name == name)
+    });
+    http::resolve_request(root, &draft.path, &draft.to_spec(), environment).url
+}
+
+fn render_studio_confirm(frame: &mut Frame, app: &App, copy: &studio::StudioCopy) {
+    let name = app
+        .studio
+        .draft
+        .as_ref()
+        .map(|draft| draft.name.clone())
+        .unwrap_or_default();
+    let area = centered_rect(56, 30, frame.area());
+    frame.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {name}"),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", copy.delete_hint),
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(format!(" {} ", copy.delete_title))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red)),
+        ),
+        area,
+    );
+}
+
+fn render_studio_prompt(frame: &mut Frame, app: &App, copy: &studio::StudioCopy) {
+    let title = match app.studio.prompt {
+        Some(StudioPrompt::Rename) => copy.rename_title,
+        _ => copy.new_title,
+    };
+    let area = centered_rect(60, 28, frame.area());
+    frame.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("{}█", app.studio.prompt_text),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            copy.prompt_hint,
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(format!(" {title} "))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        ),
+        area,
     );
 }
 
@@ -1565,15 +2144,26 @@ fn shortcut_groups(s: &'static Strings) -> Vec<ShortcutGroup> {
         },
         ShortcutGroup {
             title: "HTTP",
-            items: vec![
-                ("Shift+S", "send the open request"),
-                ("Tab", "tree → request → response"),
-                ("[ / ]  h / l", "response tabs"),
-                ("y", "copy the response body"),
-                ("Esc", "abandon the request in flight"),
-                (":http", "send, env, new, init, import"),
-                (":httpenv", "choose the environment"),
-            ],
+            items: {
+                let copy = studio::copy(if s.help_hint.starts_with("== For") {
+                    "en"
+                } else {
+                    "es"
+                });
+                vec![
+                    (":@http", copy.help_open),
+                    (":@http env", copy.help_env),
+                    ("Tab", copy.help_panels),
+                    ("h / l  [ / ]", copy.help_tabs),
+                    ("Enter", copy.help_edit),
+                    ("n r y x", copy.help_new),
+                    ("m", copy.help_method),
+                    ("S", copy.help_send),
+                    ("e", copy.help_env),
+                    ("Shift+E", copy.help_yaml),
+                    ("Esc", copy.help_close),
+                ]
+            },
         },
         ShortcutGroup {
             title: "Help",
