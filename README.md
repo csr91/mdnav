@@ -64,7 +64,7 @@ Opciones: `--title <texto>`, `--ttl <segundos>` (por defecto 3600), `--open` (ab
 | `Shift+X` | eliminar con confirmación |
 | `Shift+B` | marcar/desmarcar bookmark |
 | `Shift+0` | pantalla completa del panel enfocado |
-| `Shift+1..5` | ajustar proporción entre paneles |
+| `!` `@` `#` `$` `%` | proporción entre paneles, del 1 al 5 |
 | `Ctrl+Shift+C` | copiar ruta del archivo seleccionado |
 | `:q` | salir |
 
@@ -94,7 +94,7 @@ El preview muestra la ruta del archivo actual en el titulo y metadata breve en l
 
 Presioná `:` para abrir y escribí el comando. La paleta chica prioriza tus comandos recientes y muestra sugerencias por prefijo mientras tipeás; tambien entiende algunas intenciones (`buscar`, `copiar`, `indice`, `recientes`). Usá `:@commands` para abrir el catálogo grande agrupado por secciones, con todos los comandos y su descripción.
 
-`:q` `:files` `:find` `:grep` `:marks` `:recent` `:create` `:git` `:http` `:httpenv` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
+`:q` `:files` `:find` `:grep` `:marks` `:recent` `:create` `:git` `:@http` `:@jsonviewer` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
 
 `:recent` abre los ultimos archivos visitados. `:marks` abre un popup filtrable con los bookmarks guardados. `:find` mantiene resaltada la ultima busqueda en el preview hasta abrir otro archivo o limpiar la busqueda. `:grep` busca texto en los archivos visibles del arbol y salta al resultado elegido.
 
@@ -123,29 +123,36 @@ api/
     └── get-user.yml       # un request por archivo
 ```
 
-Al abrir un request, el preview se parte en dos: el **request** arriba (URL resuelta, environment, auth, params, headers y body) y la **response** abajo, con los tabs Body, Headers e Info.
+`:@http` abre el estudio. Si la carpeta no tiene collection, Enter crea una de ejemplo (environment `local`, `.gitignore` del `.env` y un request). No hace falta escribir YAML: el estudio lo guarda solo.
+
+El estudio tiene la collection a la izquierda (nombre y método; ★ es el request abierto), el editor a la derecha y la response abajo. En una terminal chica (80×24) los tres paneles se apilan. El editor tiene el método, la URL tal como está escrita y, debajo en gris, la URL ya resuelta. Las pestañas son Params, Headers, Body y Auth: Params y Headers son tablas de clave, valor y on/off.
 
 | Tecla | Acción |
 |-------|--------|
-| `Shift+S` | enviar el request abierto |
-| `Tab` | árbol → request → response |
-| `[` / `]` o `h` / `l` | cambiar de tab en la response |
-| `j` / `k`, `PgUp` / `PgDn` | scroll de la response |
-| `y` | copiar el body de la response |
-| `Esc` | abandonar el request en curso |
-| `Shift+E` | editar el YAML del request |
+| `j` / `k` | moverse en el panel activo |
+| `Tab` / `Shift+Tab` | collection → editor → response |
+| `h` / `l` o `[` / `]` | pestañas del editor (en la response, sus tabs) |
+| `m` | cambiar el método |
+| `Enter` | editar el campo; `Esc` lo deja y guarda |
+| `+` / `-` | agregar o quitar una fila |
+| `n` | request nuevo |
+| `r` | renombrar |
+| `y` | duplicar (en la response, copiar el body) |
+| `x` | borrar, con confirmación |
+| `S` | enviar |
+| `e` | elegir environment (`:@http env` también) |
+| `Shift+E` | abrir el YAML en el editor, por si hace falta |
+| `Esc` | salir del campo y después del estudio |
 
-`:http` abre el menú con `send`, `env`, `new` (request nuevo en la carpeta seleccionada), `init` (convierte la carpeta seleccionada en una collection) e `import`. `:httpenv` elige el environment activo de la collection; queda guardado en la config.
+Al dejar un campo, al cambiar el método o al enviar, mdnav escribe el `.yml` OpenCollection. El título muestra `guardado` un momento. Si el disco falla, avisa y no tira lo que escribiste. `n`, `r`, `y` y `x` crean, renombran, copian y borran el archivo.
 
-Los requests se envían en un thread aparte: la UI no se congela y la response se conserva al volver del editor.
+Los requests salen en un thread aparte: la UI no se congela y `Esc` en la response abandona el que está en curso.
 
 **Variables:** `{{nombre}}` se resuelve con esta precedencia: variables de la collection < environment < folders. `{{process.env.NOMBRE}}` lee el `.env` de la collection y después el entorno del proceso. Las variables `secret: true` de un environment no guardan valor en el archivo: mdnav las busca por nombre en `.env`.
 
-**Auth:** `bearer`, `basic` y `apikey` (header o query). `auth: inherit` toma la del folder más cercano o la de la collection.
+**Auth:** en la pestaña Auth, `none`, `inherit`, `bearer`, `basic` y `apikey` (header o query). `inherit` toma la del folder más cercano o la de la collection. Los perfiles con nombre vienen después; `a` queda reservada para eso.
 
-**Importar desde Postman:** seleccioná en el árbol un `*.postman_collection.json` (v2.1) y ejecutá `:http` → `import`. Se crea la carpeta de la collection al lado del JSON y nunca se sobrescribe nada. Los `*.postman_environment.json` se importan a `environments/`: sus secretos pasan al `.env` y el YAML solo guarda la referencia. Los scripts `pm.*` quedan como documentación del request, porque no se ejecutan.
-
-**Fuera de alcance por ahora:** scripts y assertions (se avisa cuántos tiene el request), bodies multipart, file y GraphQL nativo, y auth OAuth, AWS, digest y NTLM.
+**Fuera de alcance por ahora:** perfiles de auth con nombre, pegar un curl, importar Postman desde el estudio, scripts y assertions (se avisa cuántos tiene el request), bodies multipart, file y GraphQL nativo, y auth OAuth, AWS, digest y NTLM.
 
 Con **Solo Mds** activado, el árbol igual muestra los `.yml` de las collections y los exports de Postman.
 

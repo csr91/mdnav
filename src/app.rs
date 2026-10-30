@@ -21,6 +21,7 @@ use crate::{
         load_preview, mermaid_terminal_canvas, MermaidBlock, MermaidCanvas, PreviewDocument,
     },
     postman,
+    studio::{self, StudioPanel, StudioPrompt},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,9 +64,7 @@ pub enum Overlay {
     Rename,
     DestPicker,
     Alert,
-    HttpMenu,
     HttpEnv,
-    HttpInput,
 }
 
 /// The single reversible file operation kept around for `undo`. Nothing is ever
@@ -191,22 +190,14 @@ pub enum ResponseTab {
 pub const RESPONSE_TABS: [ResponseTab; 3] =
     [ResponseTab::Body, ResponseTab::Headers, ResponseTab::Info];
 
-/// Actions of the `:http` menu.
-pub const HTTP_MENU_ITEMS: &[(&str, &str)] = &[
-    ("send", "enviar el request abierto  (Shift+S)"),
-    ("env", "elegir environment  (:httpenv)"),
-    ("new", "crear un request en la carpeta actual"),
-    ("init", "convertir la carpeta actual en una collection"),
-    ("import", "importar el JSON de Postman seleccionado"),
-    ("copy", "copiar el body de la response  (y)"),
-];
-
 /// HTTP state that outlives a single `App`: Shift+E relaunches the app after
 /// the editor closes, and responses or a request on the wire must survive it.
 #[derive(Default)]
 pub struct HttpSession {
     pub responses: HashMap<PathBuf, HttpResponse>,
     pub in_flight: Option<http::InFlight>,
+    /// Request to reopen in `:@http` after the raw YAML editor relaunches the app.
+    pub reopen_studio: Option<PathBuf>,
 }
 
 /// The open file when it is a request of an OpenCollection.
@@ -226,12 +217,10 @@ pub struct HttpState {
     pub response_focus: bool,
     pub response_tab: ResponseTab,
     pub response_scroll: usize,
-    pub menu_cursor: usize,
     pub env_root: Option<PathBuf>,
     pub env_options: Vec<String>,
     /// 0 is "no environment", then `env_options` in order.
     pub env_cursor: usize,
-    pub input: String,
 }
 
 impl Default for HttpState {
@@ -242,11 +231,9 @@ impl Default for HttpState {
             response_focus: false,
             response_tab: ResponseTab::Body,
             response_scroll: 0,
-            menu_cursor: 0,
             env_root: None,
             env_options: Vec::new(),
             env_cursor: 0,
-            input: String::new(),
         }
     }
 }
@@ -342,6 +329,7 @@ pub struct App {
     pub line_count_cache: HashMap<PathBuf, (SystemTime, usize)>,
     pub git_status_cache: HashMap<PathBuf, GitStatusKind>,
     pub http: HttpState,
+    pub studio: studio::HttpStudio,
 }
 
 impl App {
@@ -446,6 +434,7 @@ impl App {
             line_count_cache: HashMap::new(),
             git_status_cache: HashMap::new(),
             http: HttpState::default(),
+            studio: studio::HttpStudio::default(),
         };
         app.rebuild_tree_info_cache();
         app.refresh_git_status_cache();
@@ -461,6 +450,10 @@ impl App {
 
         if self.overlay != Overlay::None {
             return self.handle_overlay_key(key);
+        }
+
+        if self.studio.active {
+            return self.handle_studio_key(key);
         }
 
         if self.selection.is_some() {
@@ -649,7 +642,7 @@ impl App {
                 self.copy_path_to_clipboard()?;
             }
             KeyCode::Char('!') => self.set_split_level(1),
-            KeyCode::Char('@') => self.toggle_json_viewer()?,
+            KeyCode::Char('@') => self.set_split_level(2),
             KeyCode::Char('#') => self.set_split_level(3),
             KeyCode::Char('$') => self.set_split_level(4),
             KeyCode::Char('%') => self.set_split_level(5),
@@ -966,18 +959,6 @@ impl App {
                     _ => {}
                 },
             },
-            Overlay::HttpMenu => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay("HTTP cerrado"),
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.http.menu_cursor = self.http.menu_cursor.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.http.menu_cursor =
-                        (self.http.menu_cursor + 1).min(HTTP_MENU_ITEMS.len() - 1);
-                }
-                KeyCode::Enter => self.run_http_menu_item()?,
-                _ => {}
-            },
             Overlay::HttpEnv => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     self.http.env_root = None;
@@ -991,15 +972,6 @@ impl App {
                         (self.http.env_cursor + 1).min(self.http.env_options.len());
                 }
                 KeyCode::Enter => self.confirm_http_env()?,
-                _ => {}
-            },
-            Overlay::HttpInput => match key.code {
-                KeyCode::Esc => self.close_overlay("Request nuevo cancelado"),
-                KeyCode::Enter => self.confirm_new_request()?,
-                KeyCode::Backspace => {
-                    self.http.input.pop();
-                }
-                KeyCode::Char(c) => self.http.input.push(c),
                 _ => {}
             },
             Overlay::Rename => match key.code {
@@ -1895,8 +1867,28 @@ impl App {
             let new_mtime = get_file_mtime(&path);
             if new_mtime != self.file_mtime {
                 self.file_mtime = new_mtime;
-                self.preview = load_preview(&path)?;
-                self.refresh_http_view();
+                if self.studio.active {
+                    let clean = !self.studio.dirty && !self.studio.nav.editing;
+                    let same = self
+                        .studio
+                        .draft
+                        .as_ref()
+                        .map(|draft| draft.path == path)
+                        .unwrap_or(false);
+                    if clean && same {
+                        match studio::load_draft(&path) {
+                            Ok(draft) => {
+                                self.studio.draft = Some(draft);
+                                self.studio.load_error = None;
+                            }
+                            Err(err) => self.studio.load_error = Some(format!("{err:#}")),
+                        }
+                    }
+                    self.refresh_http_view();
+                } else {
+                    self.preview = load_preview(&path)?;
+                    self.refresh_http_view();
+                }
             }
         }
 
@@ -2274,6 +2266,7 @@ impl App {
             ("bookmark", "marcar/desmarcar bookmark  (Shift+B)"),
             ("bookmarks", "mostrar/ocultar bookmarks"),
             ("@commands", "ver la lista completa de comandos"),
+            ("@http", "abrir el estudio HTTP"),
             ("@jsonviewer", "abrir JSON Viewer"),
             ("copy", "copiar archivo a otro directorio"),
             (
@@ -2290,12 +2283,6 @@ impl App {
             ("gitinfo", "mostrar/ocultar info Git en el arbol"),
             ("goto", "cd pendiente al directorio  (Shift+G)"),
             ("grep", "buscar texto en archivos visibles"),
-            (
-                "http",
-                "requests HTTP: enviar, environment, nuevo, init, import",
-            ),
-            ("httpenv", "elegir environment de la collection"),
-            ("json", "abrir JSON Viewer  (@)"),
             ("marks", "abrir bookmarks guardados"),
             ("mermaid", "acciones Mermaid  (Shift+M)"),
             ("move", "mover archivo o carpeta a otro directorio"),
@@ -2360,7 +2347,6 @@ impl App {
                     ("select", "activar cursor de seleccion  (Shift+Y)"),
                     ("mermaid", "acciones Mermaid  (Shift+M)"),
                     ("@jsonviewer", "abrir JSON Viewer"),
-                    ("json", "abrir JSON Viewer  (@)"),
                     ("fullscreen", "pantalla completa del panel  (Shift+0)"),
                     ("split1", "proporcion paneles 1  (Shift+1)"),
                     ("split2", "proporcion paneles 2  (Shift+2)"),
@@ -2380,16 +2366,7 @@ impl App {
                 ],
             ),
             ("Git", vec![("git", "ejecutar comandos git")]),
-            (
-                "HTTP",
-                vec![
-                    (
-                        "http",
-                        "requests HTTP: enviar, environment, nuevo, init, import",
-                    ),
-                    ("httpenv", "elegir environment de la collection"),
-                ],
-            ),
+            ("HTTP", vec![("@http", "abrir el estudio HTTP")]),
         ]
     }
 
@@ -2417,6 +2394,15 @@ impl App {
     pub fn palette_filtered(&self) -> Vec<(&'static str, &'static str)> {
         if self.palette_show_all {
             return self.palette_catalog_commands();
+        }
+
+        if let Some(pick_env) = studio::http_palette_action(&self.palette_query) {
+            let description = if pick_env {
+                "abrir el estudio y elegir environment"
+            } else {
+                "abrir el estudio HTTP"
+            };
+            return vec![("@http", description)];
         }
 
         let q = self.palette_query.to_lowercase();
@@ -2502,6 +2488,14 @@ impl App {
             return Ok(true);
         }
 
+        if let Some(pick_env) = studio::http_palette_action(&self.palette_query) {
+            self.config.record_recent_command("@http");
+            self.config.save()?;
+            self.overlay = Overlay::None;
+            self.open_http_studio(pick_env)?;
+            return Ok(false);
+        }
+
         self.config.record_recent_command(name);
         self.config.save()?;
 
@@ -2517,9 +2511,7 @@ impl App {
             "marks" => self.open_marks(),
             "create" => self.open_create(),
             "git" => self.open_git(),
-            "http" => self.open_http_menu(),
-            "httpenv" => self.open_http_env_picker(),
-            "json" => self.toggle_json_viewer()?,
+            "@http" => self.open_http_studio(false)?,
             "@jsonviewer" => self.toggle_json_viewer()?,
             "select" => self.toggle_selection_mode(),
             "edit" => self.edit_target_in_nano()?,
@@ -3060,19 +3052,20 @@ impl App {
         if let Some(view) = &self.http.view {
             let environment = view.environment.as_deref().unwrap_or("sin environment");
             return Some(format!(
-                "Request HTTP · env: {environment} · Shift+S envia · Tab va a la response"
+                "Request HTTP · env: {environment} · :@http abre el estudio"
             ));
         }
-        http::is_postman_export(path)
-            .then(|| String::from("Export de Postman · :http → import lo convierte en collection"))
+        http::is_postman_export(path).then(|| {
+            String::from("Export de Postman. El estudio (:@http) edita collections OpenCollection.")
+        })
     }
 
     fn send_http_request(&mut self) -> Result<()> {
         if self.http.view.is_none() {
             self.show_alert(
-                "Shift+S envia el request abierto.
+                "No hay un request abierto.
 
-Abri un .yml de una collection (una carpeta con opencollection.yml) o crea una con :http → init.",
+Abri el estudio con :@http. Si no hay collection, Enter crea una de ejemplo.",
             );
             return Ok(());
         }
@@ -3111,7 +3104,7 @@ Abri un .yml de una collection (una carpeta con opencollection.yml) o crea una c
             self.show_alert(format!(
                 "La URL tiene variables sin resolver: {}
 
-Elegi un environment con :httpenv o definilas en la collection.",
+Elegi un environment con e en el estudio, o con :@http env.",
                 in_url.join(", ")
             ));
             return Ok(());
@@ -3143,6 +3136,9 @@ Elegi un environment con :httpenv o definilas en la collection.",
     /// Collects the response of the request on the wire once it is done.
     /// Called on every tick of the UI loop.
     pub fn poll_http(&mut self) {
+        if self.studio.autosave_due() {
+            let _ = self.flush_studio_save();
+        }
         let Some(in_flight) = self.http.session.in_flight.as_ref() else {
             return;
         };
@@ -3239,32 +3235,546 @@ Elegi un environment con :httpenv o definilas en la collection.",
         Ok(())
     }
 
-    fn open_http_menu(&mut self) {
-        self.http.menu_cursor = 0;
-        self.overlay = Overlay::HttpMenu;
-        self.status = String::from("HTTP: elegi una accion");
-    }
+    fn handle_studio_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.studio.confirm_delete {
+            return self.handle_studio_delete_key(key);
+        }
+        if self.studio.prompt.is_some() {
+            return self.handle_studio_prompt_key(key);
+        }
+        if self.studio.starter {
+            return self.handle_studio_starter_key(key);
+        }
+        if self.studio.nav.editing {
+            return self.handle_studio_edit_key(key);
+        }
 
-    fn run_http_menu_item(&mut self) -> Result<()> {
-        let Some(&(name, _)) = HTTP_MENU_ITEMS.get(self.http.menu_cursor) else {
-            return Ok(());
-        };
-        self.overlay = Overlay::None;
-        match name {
-            "send" => self.send_http_request()?,
-            "env" => self.open_http_env_picker(),
-            "new" => self.start_new_request_input(),
-            "init" => self.init_http_collection()?,
-            "import" => self.import_postman_selected()?,
-            "copy" => self.copy_response_body()?,
+        match key.code {
+            KeyCode::Esc => self.close_http_studio()?,
+            KeyCode::Tab => {
+                self.studio_prepare_panel_change()?;
+                self.studio.cycle_panel(false);
+            }
+            KeyCode::BackTab => {
+                self.studio_prepare_panel_change()?;
+                self.studio.cycle_panel(true);
+            }
+            KeyCode::Char('?') => self.toggle_help(),
+            KeyCode::Char('S') => self.studio_send()?,
+            KeyCode::Char('e') => self.open_http_env_picker(),
+            KeyCode::Char('E') => self.studio_edit_raw()?,
+            KeyCode::Char('n') => self.studio_begin_prompt(StudioPrompt::NewRequest),
+            KeyCode::Char('r') => self.studio_begin_prompt(StudioPrompt::Rename),
+            KeyCode::Char('y') if self.studio.panel == StudioPanel::Response => {
+                self.copy_response_body()?
+            }
+            KeyCode::Char('y') => self.studio_duplicate()?,
+            KeyCode::Char('x') => {
+                if self.studio.draft.is_some() {
+                    self.studio.confirm_delete = true;
+                } else {
+                    self.status = String::from("No hay request para borrar");
+                }
+            }
+            KeyCode::Char('m') => {
+                self.studio.cycle_method();
+            }
+            KeyCode::Char('+') => {
+                if self.studio.add_row() {
+                    self.status = String::from("Fila nueva");
+                } else {
+                    self.status = String::from("Esta pestaña no tiene filas");
+                }
+            }
+            KeyCode::Char('-') => {
+                if !self.studio.remove_row() {
+                    self.status = String::from("Nada que quitar");
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Char('[') | KeyCode::Left
+                if self.studio.panel == StudioPanel::Response =>
+            {
+                self.move_response_tab(-1);
+            }
+            KeyCode::Char('l') | KeyCode::Char(']') | KeyCode::Right
+                if self.studio.panel == StudioPanel::Response =>
+            {
+                self.move_response_tab(1);
+            }
+            KeyCode::Char('h') | KeyCode::Char('[') => self.studio.switch_tab(-1),
+            KeyCode::Char('l') | KeyCode::Char(']') => self.studio.switch_tab(1),
+            KeyCode::Up | KeyCode::Char('k') if self.studio.panel == StudioPanel::Collection => {
+                self.studio_move_selection(-1)?;
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.studio.panel == StudioPanel::Collection => {
+                self.studio_move_selection(1)?;
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char(',')
+                if self.studio.panel == StudioPanel::Response =>
+            {
+                self.scroll_response(-1);
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('.')
+                if self.studio.panel == StudioPanel::Response =>
+            {
+                self.scroll_response(1);
+            }
+            KeyCode::PageUp if self.studio.panel == StudioPanel::Response => {
+                self.scroll_response(-20);
+            }
+            KeyCode::PageDown if self.studio.panel == StudioPanel::Response => {
+                self.scroll_response(20);
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.studio.panel == StudioPanel::Editor => {
+                self.studio.move_vertical(-1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.studio.panel == StudioPanel::Editor => {
+                self.studio.move_vertical(1);
+            }
+            KeyCode::Left if self.studio.panel == StudioPanel::Editor => {
+                if self.studio.move_horizontal(-1) {
+                    self.studio.mark_dirty();
+                }
+            }
+            KeyCode::Right if self.studio.panel == StudioPanel::Editor => {
+                if self.studio.move_horizontal(1) {
+                    self.studio.mark_dirty();
+                }
+            }
+            KeyCode::Enter if self.studio.panel == StudioPanel::Collection => {
+                self.studio.panel = StudioPanel::Editor;
+            }
+            KeyCode::Enter if self.studio.panel == StudioPanel::Editor => {
+                if self.studio.activate() {
+                    self.studio.mark_dirty();
+                }
+            }
+            KeyCode::Char('a' | 'A') => {}
             _ => {}
         }
         Ok(())
     }
 
-    /// The collection the HTTP actions apply to: the open request's, or the
-    /// one containing the selected tree item.
+    fn handle_studio_edit_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.studio.commit_edit();
+                self.flush_studio_save()?;
+            }
+            KeyCode::Enter if self.studio.is_multiline() => self.studio.push_newline(),
+            KeyCode::Enter => {
+                self.studio.commit_edit();
+                self.flush_studio_save()?;
+            }
+            KeyCode::Backspace => self.studio.backspace(),
+            KeyCode::Tab => {
+                self.studio.commit_edit();
+                self.flush_studio_save()?;
+                self.studio.cycle_panel(false);
+            }
+            KeyCode::BackTab => {
+                self.studio.commit_edit();
+                self.flush_studio_save()?;
+                self.studio.cycle_panel(true);
+            }
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+            {
+                self.studio.push_char(ch);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_studio_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.studio.prompt = None;
+                self.studio.prompt_text.clear();
+                self.status = String::from("Cancelado");
+            }
+            KeyCode::Enter => self.confirm_studio_prompt()?,
+            KeyCode::Backspace => {
+                self.studio.prompt_text.pop();
+            }
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                self.studio.prompt_text.push(ch);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_studio_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Enter => self.studio_delete_selected()?,
+            KeyCode::Esc | KeyCode::Char('x') => {
+                self.studio.confirm_delete = false;
+                self.status = String::from("Borrado cancelado");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_studio_starter_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Enter => self.create_starter_collection()?,
+            KeyCode::Esc => {
+                self.studio = studio::HttpStudio::default();
+                self.status = String::from("Estudio HTTP cerrado");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn open_http_studio(&mut self, pick_env: bool) -> Result<()> {
+        self.json_viewer_active = false;
+        let hint = self
+            .current_file
+            .clone()
+            .or_else(|| self.selected_item_path());
+        match studio::discover_collection(&self.root, hint.as_deref()) {
+            Some(root) => {
+                self.enter_http_studio(&root)?;
+                if pick_env {
+                    self.open_http_env_picker();
+                } else {
+                    self.status = String::from("Estudio HTTP");
+                }
+            }
+            None => {
+                let dir = self.current_tree_dir().unwrap_or_else(|| self.root.clone());
+                self.studio = studio::HttpStudio::starter(dir);
+                self.status = String::from("Sin collection: Enter crea una de ejemplo");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn reopen_http_studio(&mut self, path: &Path) -> Result<()> {
+        let hint = Some(path.to_path_buf());
+        if let Some(root) = studio::discover_collection(&self.root, hint.as_deref()) {
+            self.enter_http_studio(&root)?;
+            if let Some(index) = self.studio.items.iter().position(|item| item.path == path) {
+                self.studio.selected = index;
+                self.load_studio_draft()?;
+            }
+            self.studio.panel = StudioPanel::Editor;
+        }
+        Ok(())
+    }
+
+    fn enter_http_studio(&mut self, root: &Path) -> Result<()> {
+        let items = studio::list_requests(root);
+        let preferred = self.current_file.clone();
+        let selected = preferred
+            .as_ref()
+            .and_then(|path| items.iter().position(|item| &item.path == path))
+            .unwrap_or(0);
+        self.studio
+            .show_collection(root.to_path_buf(), items, selected);
+        self.load_studio_draft()?;
+        Ok(())
+    }
+
+    fn load_studio_draft(&mut self) -> Result<()> {
+        let Some(path) = self.studio.selected_item().map(|item| item.path.clone()) else {
+            self.studio.draft = None;
+            self.studio.load_error = None;
+            return Ok(());
+        };
+        match studio::load_draft(&path) {
+            Ok(draft) => {
+                self.studio.draft = Some(draft);
+                self.studio.load_error = None;
+                self.studio.nav = studio::EditorNav::default();
+                self.current_file = Some(path.clone());
+                self.file_mtime = get_file_mtime(&path);
+                self.refresh_http_view();
+            }
+            Err(err) => {
+                self.studio.draft = None;
+                self.studio.load_error = Some(format!("{err:#}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn studio_prepare_panel_change(&mut self) -> Result<()> {
+        self.studio.commit_edit();
+        self.flush_studio_save()
+    }
+
+    fn studio_move_selection(&mut self, delta: isize) -> Result<()> {
+        self.studio.commit_edit();
+        self.flush_studio_save()?;
+        if self.studio.move_list(delta) {
+            self.load_studio_draft()?;
+        }
+        Ok(())
+    }
+
+    fn flush_studio_save(&mut self) -> Result<()> {
+        if !self.studio.active || !self.studio.dirty || self.studio.nav.editing {
+            return Ok(());
+        }
+        let result = {
+            let Some(draft) = self.studio.draft.as_mut() else {
+                return Ok(());
+            };
+            studio::save_draft(draft)
+        };
+        match result {
+            Ok(()) => {
+                let path = self.studio.draft.as_ref().map(|draft| draft.path.clone());
+                self.studio.note_saved();
+                if let Some(path) = path {
+                    self.file_mtime = get_file_mtime(&path);
+                }
+                self.sync_studio_summary();
+            }
+            Err(err) => {
+                if self.studio.save_error.is_none() {
+                    self.studio.save_error = Some(err.to_string());
+                    self.show_alert(format!(
+                        "No se pudo guardar el request. El cambio sigue en memoria.\n\n{err:#}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_studio_summary(&mut self) {
+        let Some(draft) = &self.studio.draft else {
+            return;
+        };
+        let name = draft.name.clone();
+        let method = draft.method.clone();
+        let path = draft.path.clone();
+        if let Some(item) = self.studio.items.iter_mut().find(|item| item.path == path) {
+            item.name = if name.trim().is_empty() {
+                item.name.clone()
+            } else {
+                name
+            };
+            item.method = method;
+        }
+    }
+
+    fn close_http_studio(&mut self) -> Result<()> {
+        self.studio.commit_edit();
+        self.flush_studio_save()?;
+        self.studio = studio::HttpStudio::default();
+        self.refresh_http_view();
+        self.status = String::from("Estudio HTTP cerrado");
+        Ok(())
+    }
+
+    fn studio_send(&mut self) -> Result<()> {
+        self.studio.commit_edit();
+        self.flush_studio_save()?;
+        if self.studio.draft.is_none() {
+            self.status = String::from("No hay request para enviar");
+            return Ok(());
+        }
+        self.studio.panel = StudioPanel::Response;
+        self.send_http_request()?;
+        Ok(())
+    }
+
+    fn studio_edit_raw(&mut self) -> Result<()> {
+        self.studio.commit_edit();
+        self.flush_studio_save()?;
+        let Some(path) = self.studio.draft.as_ref().map(|draft| draft.path.clone()) else {
+            self.status = String::from("No hay request para editar");
+            return Ok(());
+        };
+        self.http.session.reopen_studio = Some(path.clone());
+        self.pending_external_edit = Some(path);
+        self.running = false;
+        self.status = format!("Relanzando mdnav despues de {}", self.config.editor);
+        Ok(())
+    }
+
+    fn studio_begin_prompt(&mut self, kind: StudioPrompt) {
+        if self.studio.root.is_none() {
+            self.status = String::from("No hay collection");
+            return;
+        }
+        if kind == StudioPrompt::Rename && self.studio.draft.is_none() {
+            self.status = String::from("No hay request para renombrar");
+            return;
+        }
+        self.studio.prompt_text = if kind == StudioPrompt::Rename {
+            self.studio
+                .draft
+                .as_ref()
+                .map(|draft| draft.name.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        self.studio.prompt = Some(kind);
+    }
+
+    fn confirm_studio_prompt(&mut self) -> Result<()> {
+        let kind = self.studio.prompt;
+        let name = self.studio.prompt_text.trim().to_string();
+        self.studio.prompt = None;
+        self.studio.prompt_text.clear();
+        if name.is_empty() {
+            self.status = String::from("El request necesita un nombre");
+            return Ok(());
+        }
+        self.flush_studio_save()?;
+        match kind {
+            Some(StudioPrompt::NewRequest) => {
+                let dir = self
+                    .studio
+                    .draft
+                    .as_ref()
+                    .and_then(|draft| draft.path.parent().map(Path::to_path_buf))
+                    .or_else(|| self.studio.root.clone());
+                let Some(dir) = dir else {
+                    return Ok(());
+                };
+                let path = http::create_request(&dir, &name)?;
+                self.reload_items()?;
+                self.reload_studio_list(&path)?;
+                self.status = format!("Request creado: {}", display_name(&path));
+            }
+            Some(StudioPrompt::Rename) => {
+                let Some(draft) = self.studio.draft.as_mut() else {
+                    return Ok(());
+                };
+                let old = draft.path.clone();
+                studio::rename_request(draft, &name)?;
+                let new_path = self
+                    .studio
+                    .draft
+                    .as_ref()
+                    .map(|draft| draft.path.clone())
+                    .unwrap_or(old.clone());
+                if let Some(response) = self.http.session.responses.remove(&old) {
+                    self.http
+                        .session
+                        .responses
+                        .insert(new_path.clone(), response);
+                }
+                self.reload_items()?;
+                self.reload_studio_list(&new_path)?;
+                self.studio.note_saved();
+                self.status = format!("Request renombrado: {name}");
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn studio_duplicate(&mut self) -> Result<()> {
+        self.flush_studio_save()?;
+        let Some(path) = self.studio.draft.as_ref().map(|draft| draft.path.clone()) else {
+            self.status = String::from("No hay request para duplicar");
+            return Ok(());
+        };
+        let copy = studio::duplicate_request(&path)?;
+        self.reload_items()?;
+        self.reload_studio_list(&copy)?;
+        self.status = format!("Request duplicado: {}", display_name(&copy));
+        Ok(())
+    }
+
+    fn studio_delete_selected(&mut self) -> Result<()> {
+        self.studio.confirm_delete = false;
+        let Some(path) = self.studio.draft.as_ref().map(|draft| draft.path.clone()) else {
+            return Ok(());
+        };
+        studio::delete_request(&path)?;
+        self.http.session.responses.remove(&path);
+        self.studio.dirty = false;
+        self.studio.draft = None;
+        let next = self.studio.selected;
+        self.reload_items()?;
+        let root = self.studio.root.clone();
+        if let Some(root) = root {
+            let items = studio::list_requests(&root);
+            let selected = next.min(items.len().saturating_sub(1));
+            self.studio.show_collection(root, items, selected);
+            // show_collection resets the panel; keep the user in the list.
+            self.studio.panel = StudioPanel::Collection;
+            self.load_studio_draft()?;
+        }
+        self.status = format!("Request borrado: {}", display_name(&path));
+        Ok(())
+    }
+
+    fn reload_studio_list(&mut self, select: &Path) -> Result<()> {
+        let Some(root) = self.studio.root.clone() else {
+            return Ok(());
+        };
+        let items = studio::list_requests(&root);
+        let selected = items
+            .iter()
+            .position(|item| item.path == select)
+            .unwrap_or(0);
+        self.studio.show_collection(root, items, selected);
+        self.studio.panel = StudioPanel::Editor;
+        self.load_studio_draft()?;
+        Ok(())
+    }
+
+    fn create_starter_collection(&mut self) -> Result<()> {
+        let Some(dir) = self.studio.starter_dir.clone() else {
+            self.status = String::from("No se pudo determinar la carpeta");
+            return Ok(());
+        };
+        let created = http::init_collection(&dir)?;
+        self.expanded_dirs.insert(dir.clone());
+        self.expanded_dirs.insert(dir.join("environments"));
+        self.reload_items()?;
+        let example = created
+            .iter()
+            .find(|path| path.file_name().is_some_and(|name| name == "health.yml"))
+            .cloned();
+        self.enter_http_studio(&dir)?;
+        if let Some(example) = example {
+            if let Some(index) = self
+                .studio
+                .items
+                .iter()
+                .position(|item| item.path == example)
+            {
+                self.studio.selected = index;
+                self.load_studio_draft()?;
+            }
+        }
+        self.studio.panel = StudioPanel::Editor;
+        self.status = format!(
+            "Collection de ejemplo en {} · e elige environment · S envia",
+            display_name(&dir)
+        );
+        Ok(())
+    }
+
+    /// The collection the HTTP actions apply to: the studio's, the open
+    /// request's, or the one containing the selected tree item.
     fn current_collection_root(&self) -> Option<PathBuf> {
+        if self.studio.active {
+            if let Some(root) = &self.studio.root {
+                return Some(root.clone());
+            }
+        }
         if let Some(view) = &self.http.view {
             return Some(view.collection_root.clone());
         }
@@ -3274,7 +3784,7 @@ Elegi un environment con :httpenv o definilas en la collection.",
 
     fn open_http_env_picker(&mut self) {
         let Some(root) = self.current_collection_root() else {
-            self.show_alert("No hay collection: abri un request o usa :http → init");
+            self.show_alert("No hay collection. En :@http, Enter crea una de ejemplo.");
             return;
         };
         let (environments, errors) = http::load_environments(&root);
@@ -3327,54 +3837,9 @@ Elegi un environment con :httpenv o definilas en la collection.",
         Ok(())
     }
 
-    fn start_new_request_input(&mut self) {
-        let Some(dir) = self.current_tree_dir() else {
-            self.status = String::from("No se pudo determinar la carpeta");
-            return;
-        };
-        if http::find_collection_root(&dir).is_none() {
-            self.show_alert("La carpeta no esta dentro de una collection: usa :http → init");
-            return;
-        }
-        self.http.input.clear();
-        self.overlay = Overlay::HttpInput;
-        self.status = String::from("Nombre del request nuevo:");
-    }
-
-    fn confirm_new_request(&mut self) -> Result<()> {
-        self.overlay = Overlay::None;
-        let Some(dir) = self.current_tree_dir() else {
-            return Ok(());
-        };
-        let path = http::create_request(&dir, &self.http.input)?;
-        self.restore_path_focus(&path)?;
-        self.status = format!(
-            "Request creado: {} · Shift+E para editarlo",
-            display_name(&path)
-        );
-        Ok(())
-    }
-
-    fn init_http_collection(&mut self) -> Result<()> {
-        let Some(dir) = self.current_tree_dir() else {
-            self.status = String::from("No se pudo determinar la carpeta");
-            return Ok(());
-        };
-        let created = http::init_collection(&dir)?;
-        if let Some(example) = created
-            .iter()
-            .find(|path| path.file_name().is_some_and(|name| name == "health.yml"))
-        {
-            self.restore_path_focus(example)?;
-        }
-        self.status = format!(
-            "Collection creada en {} ({} archivos) · copia .env.sample a .env",
-            display_name(&dir),
-            created.len()
-        );
-        Ok(())
-    }
-
+    /// Postman import stays in the crate for the later hub. Phase 1 does not
+    /// expose it: collections are created and edited from `:@http`.
+    #[allow(dead_code)]
     fn import_postman_selected(&mut self) -> Result<()> {
         let Some(source) = self.action_target_path().filter(|path| path.is_file()) else {
             self.show_alert("Selecciona en el arbol el JSON exportado de Postman");
@@ -3848,9 +4313,8 @@ fn palette_aliases(name: &str) -> &'static [&'static str] {
         "delete" => &["borrar", "eliminar", "remove"],
         "edit" => &["editar", "abrir editor"],
         "git" => &["repo", "version"],
-        "http" => &["postman", "bruno", "api", "request", "rest", "curl"],
-        "httpenv" => &["environment", "entorno", "env"],
-        "json" => &["@j", "@json", "json viewer", "formatear json"],
+        "@http" => &["postman", "bruno", "api", "request", "rest"],
+        "@jsonviewer" => &["visor", "formatear json"],
         "toc" => &["indice", "índice", "headings", "tabla"],
         "recent" => &["recientes", "historial", "ultimos", "últimos"],
         "@commands" => &["ayuda", "comandos", "help"],
