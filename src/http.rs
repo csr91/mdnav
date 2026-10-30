@@ -53,10 +53,18 @@ const MAGENTA: [u8; 3] = [198, 120, 221];
 /// Resolves `.` and `..` and, when the path exists, symlinks. `/path/.` and
 /// `/path` become the same key so an environment saved from `mdnav .` is found
 /// again when the collection is opened without the dot.
+///
+/// Windows `canonicalize` prefixes `\\?\`. Leaving that on makes
+/// `parent == root.join("environments")` fail, so an environment file is
+/// treated as a request. The prefix is stripped before the path is stored.
 pub fn canonical_path(path: &Path) -> PathBuf {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
-    }
+    let canonical = path
+        .canonicalize()
+        .unwrap_or_else(|_| logical_normalize(path));
+    strip_windows_verbatim(&canonical)
+}
+
+fn logical_normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -72,6 +80,18 @@ pub fn canonical_path(path: &Path) -> PathBuf {
     } else {
         normalized
     }
+}
+
+/// `\\?\C:\...` → `C:\...`, `\\?\UNC\server\share` → `\\server\share`.
+fn strip_windows_verbatim(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
 }
 
 pub fn find_collection_root(path: &Path) -> Option<PathBuf> {
@@ -116,10 +136,28 @@ pub fn request_collection_root(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let root = find_collection_root(path)?;
-    if path.parent() == Some(root.join(ENVIRONMENTS_DIR).as_path()) {
+    if is_environment_file(path, &root) {
         return None;
     }
     Some(root)
+}
+
+/// Environment YAML lives in `<collection>/environments`, whatever prefix
+/// `canonicalize` attached. Compare the directory name and the canonical
+/// collection, not the raw `Path` strings.
+fn is_environment_file(path: &Path, root: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Some(name) = parent.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case(ENVIRONMENTS_DIR) {
+        return false;
+    }
+    parent
+        .parent()
+        .is_some_and(|grand| canonical_path(grand) == canonical_path(root))
 }
 
 // ── Request model ────────────────────────────────────────────────────────────
@@ -2268,6 +2306,22 @@ docs: Creates a user.
             None
         );
         assert_eq!(request_collection_root(&stray), None);
+    }
+
+    #[test]
+    fn strips_the_windows_verbatim_prefix() {
+        assert_eq!(
+            strip_windows_verbatim(Path::new(r"\\?\C:\temp\mdnav")),
+            PathBuf::from(r"C:\temp\mdnav")
+        );
+        assert_eq!(
+            strip_windows_verbatim(Path::new(r"\\?\UNC\server\share\mdnav")),
+            PathBuf::from(r"\\server\share\mdnav")
+        );
+        assert_eq!(
+            strip_windows_verbatim(Path::new("/tmp/mdnav")),
+            PathBuf::from("/tmp/mdnav")
+        );
     }
 
     #[test]
