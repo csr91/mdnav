@@ -98,6 +98,27 @@ api/
 
 Si una variable de la URL no se resuelve, el request no se envía y mdnav te pide elegir un environment (`e` o `:@http env`).
 
+## Editor de environments
+
+`e` (o `:@http env`) abre el editor dentro del estudio. A la izquierda están los environments de la collection; `●` marca el activo. A la derecha, las variables del que tenés elegido: nombre, valor, si está prendida y si es secreta.
+
+| Tecla | En la lista | En las variables |
+|-------|-------------|------------------|
+| `n` | environment nuevo | variable nueva |
+| `r` | renombrar (sin `.` ni `/`) | renombrar la variable |
+| `y` | duplicar; el archivo no lleva espacios | duplicar la variable |
+| `x` | borrar, con confirmación | borrar, con confirmación |
+| `Enter` | activar ese environment | editar el campo, o prender/apagar `on` y `secreto` |
+| `s` | | marcar o desmarcar secreto |
+| `h` `l` | `l` pasa a las variables | cambiar de columna; `h` en la primera vuelve a la lista |
+| `Esc` | volver al estudio | |
+
+El pie muestra esas teclas. Renombrar un environment deja el activo apuntando al nombre nuevo: la clave guardada por collection (`http_environments`) se actualiza. Borrar el activo lo deja en "sin environment".
+
+Una variable secreta no guarda el valor en el YAML (`secret: true` y nada más). El valor va al `.env` de la collection, que está en el gitignore. En pantalla se ve `••••••`. Al sacarle el secreto, el valor vuelve al YAML. El archivo sigue siendo OpenCollection: Bruno lo abre igual.
+
+Si te vas con cambios sin guardar (otra environment, `Esc`, `Tab`), pregunta `g` guardar, `d` descartar o `Esc` cancelar. `Esc` o `Enter` dentro de un campo, y `Shift+S`, guardan en el momento.
+
 ## Teclas del estudio
 
 El pie cambia según el panel y siempre nombra el envío como `Shift+S enviar`. En el editor dice `h/l columnas · [ ] pestañas · letra edita · m método · Shift+S enviar`.
@@ -105,7 +126,7 @@ El pie cambia según el panel y siempre nombra el envío como `Shift+S enviar`. 
 | Tecla | Acción |
 |-------|--------|
 | `:@http` | abrir el estudio, desde cualquier carpeta |
-| `:@http env` | abrirlo y elegir environment |
+| `:@http env` | abrirlo en el editor de environments |
 | `j` `k` | moverse |
 | `Tab` | árbol → editor → response |
 | `h` `l` | árbol: entrar o volver. Tabla: cambiar de columna |
@@ -122,7 +143,7 @@ El pie cambia según el panel y siempre nombra el envío como `Shift+S enviar`. 
 | `y` | duplicar; en la response, copiar el body |
 | `x` | borrar, con confirmación |
 | `Shift+S` | enviar |
-| `e` | elegir environment |
+| `e` | editor de environments |
 | `Shift+E` | editar el YAML crudo |
 | `Esc` `Esc` | salir del campo y después confirmar la salida |
 

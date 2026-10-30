@@ -64,7 +64,6 @@ pub enum Overlay {
     Rename,
     DestPicker,
     Alert,
-    HttpEnv,
 }
 
 /// The single reversible file operation kept around for `undo`. Nothing is ever
@@ -217,10 +216,6 @@ pub struct HttpState {
     pub response_focus: bool,
     pub response_tab: ResponseTab,
     pub response_scroll: usize,
-    pub env_root: Option<PathBuf>,
-    pub env_options: Vec<String>,
-    /// 0 is "no environment", then `env_options` in order.
-    pub env_cursor: usize,
 }
 
 impl Default for HttpState {
@@ -231,9 +226,6 @@ impl Default for HttpState {
             response_focus: false,
             response_tab: ResponseTab::Body,
             response_scroll: 0,
-            env_root: None,
-            env_options: Vec::new(),
-            env_cursor: 0,
         }
     }
 }
@@ -992,21 +984,6 @@ impl App {
                     }
                     _ => {}
                 },
-            },
-            Overlay::HttpEnv => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    self.http.env_root = None;
-                    self.close_overlay("Environment sin cambios");
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.http.env_cursor = self.http.env_cursor.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.http.env_cursor =
-                        (self.http.env_cursor + 1).min(self.http.env_options.len());
-                }
-                KeyCode::Enter => self.confirm_http_env()?,
-                _ => {}
             },
             Overlay::Rename => match key.code {
                 KeyCode::Esc => self.close_overlay("Renombrar cancelado"),
@@ -2433,7 +2410,7 @@ impl App {
 
         if let Some(pick_env) = studio::http_palette_action(&self.palette_query) {
             let description = if pick_env {
-                "abrir el estudio y elegir environment"
+                "abrir el estudio en el editor de environments"
             } else {
                 "abrir el estudio HTTP"
             };
@@ -3331,6 +3308,12 @@ Elegi un environment con e en el estudio, o con :@http env.",
         if self.studio.filtering {
             return self.handle_studio_filter_key(key);
         }
+        if self.studio.env_open {
+            if self.studio.env_editing {
+                return self.handle_env_edit_key(key);
+            }
+            return self.handle_env_key(key);
+        }
         if self.studio.nav.editing {
             return self.handle_studio_edit_key(key);
         }
@@ -3359,7 +3342,7 @@ Elegi un environment con e en el estudio, o con :@http env.",
             KeyCode::BackTab => self.request_studio_leave(studio::StudioLeave::CyclePanel(true))?,
             KeyCode::Char('?') => self.toggle_help(),
             KeyCode::Char('S') => self.studio_send()?,
-            KeyCode::Char('e') if !self.typing_in_editor() => self.open_http_env_picker(),
+            KeyCode::Char('e') if !self.studio.nav.editing => self.open_http_env_picker()?,
             KeyCode::Char('E') => self.studio_edit_raw()?,
             KeyCode::Char('/') if self.studio.panel == StudioPanel::Collection => {
                 self.studio.filtering = true;
@@ -3485,9 +3468,10 @@ Elegi un environment con e en el estudio, o con :@http env.",
     }
 
     fn editor_accepts_typing(&self, ch: char) -> bool {
-        // hjkl keep moving; other letters start editing so `n` in a URL is text.
+        // hjkl keep moving. `e` opens the environment editor. Other letters
+        // start editing so `n` in a URL is text.
         self.typing_in_editor()
-            && !matches!(ch, 'h' | 'j' | 'k' | 'l' | '?' | 'S' | 'E')
+            && !matches!(ch, 'h' | 'j' | 'k' | 'l' | '?' | 'e' | 'S' | 'E')
             && !ch.is_control()
     }
 
@@ -3578,7 +3562,11 @@ Elegi un environment con e en el estudio, o con :@http env.",
     fn handle_studio_delete_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Enter => {
-                if self.studio.delete_collection {
+                if self.studio.delete_variable {
+                    self.delete_env_variable()?;
+                } else if self.studio.delete_environment {
+                    self.delete_selected_environment()?;
+                } else if self.studio.delete_collection {
                     self.studio_delete_collection()?;
                 } else {
                     self.studio_delete_selected()?;
@@ -3587,6 +3575,8 @@ Elegi un environment con e en el estudio, o con :@http env.",
             KeyCode::Esc | KeyCode::Char('x') => {
                 self.studio.confirm_delete = false;
                 self.studio.delete_collection = false;
+                self.studio.delete_environment = false;
+                self.studio.delete_variable = false;
                 self.status = String::from("Borrado cancelado");
             }
             _ => {}
@@ -3631,7 +3621,7 @@ Elegi un environment con e en el estudio, o con :@http env.",
         self.studio.filtering = false;
         self.focus_library_collection(index, None)?;
         if pick_env {
-            self.open_http_env_picker();
+            self.open_http_env_picker()?;
         } else {
             self.status = String::from("Estudio HTTP");
         }
@@ -3726,6 +3716,9 @@ Elegi un environment con e en el estudio, o con :@http env.",
             studio::StudioLeave::Close => self.close_http_studio()?,
             studio::StudioLeave::TreeOpen => self.studio_tree_open()?,
             studio::StudioLeave::TreeParent => self.studio_tree_parent(),
+            studio::StudioLeave::OpenEnv => self.open_env_editor()?,
+            studio::StudioLeave::CloseEnv => self.close_env_editor(),
+            studio::StudioLeave::MoveEnv(delta) => self.move_env_selection(delta)?,
         }
         Ok(())
     }
@@ -3734,8 +3727,13 @@ Elegi un environment con e en el estudio, o con :@http env.",
         match key.code {
             KeyCode::Char('g' | 'G') => {
                 let leave = self.studio.pending_leave;
-                self.studio.commit_edit();
-                self.flush_studio_save()?;
+                if self.studio.env_open {
+                    self.commit_env_field();
+                    self.flush_env_save()?;
+                } else {
+                    self.studio.commit_edit();
+                    self.flush_studio_save()?;
+                }
                 if let Some(leave) = leave {
                     self.perform_studio_leave(leave)?;
                 }
@@ -3761,11 +3759,16 @@ Elegi un environment con e en el estudio, o con :@http env.",
 
     fn discard_studio_changes(&mut self) -> Result<()> {
         self.studio.cancel_field_edit();
+        self.studio.save_prompt = false;
+        self.studio.pending_leave = None;
+        if self.studio.env_open {
+            self.studio.env_dirty = false;
+            self.studio.load_env_draft_from_selection();
+            return Ok(());
+        }
         let reload = self.studio.dirty;
         self.studio.dirty = false;
         self.studio.dirty_at = None;
-        self.studio.save_prompt = false;
-        self.studio.pending_leave = None;
         if reload {
             self.load_studio_draft()?;
         }
@@ -4001,6 +4004,24 @@ Elegi un environment con e en el estudio, o con :@http env.",
             self.studio.prompt = Some(kind);
             return;
         }
+        if kind == StudioPrompt::NewEnvironment {
+            if self.studio.root.is_none() {
+                self.status = String::from("No hay collection");
+                return;
+            }
+            self.studio.prompt_text.clear();
+            self.studio.prompt = Some(kind);
+            return;
+        }
+        if kind == StudioPrompt::RenameEnvironment {
+            let Some(name) = self.studio.selected_env().map(|env| env.name.clone()) else {
+                self.status = String::from("Elegí un environment");
+                return;
+            };
+            self.studio.prompt_text = name;
+            self.studio.prompt = Some(kind);
+            return;
+        }
         if kind == StudioPrompt::RenameCollection {
             let Some(studio::TreeNode::Collection(index)) = self.studio.current_node() else {
                 self.status = String::from("Ponete sobre la collection para renombrarla");
@@ -4045,6 +4066,10 @@ Elegi un environment con e en el estudio, o con :@http env.",
             return Ok(());
         }
         self.flush_studio_save()?;
+        if self.studio.env_open {
+            self.commit_env_field();
+            self.flush_env_save()?;
+        }
         match kind {
             Some(StudioPrompt::NewCollection | StudioPrompt::NewCollectionExample) => {
                 let Some(root) = self.studio.collections_root.clone() else {
@@ -4114,6 +4139,37 @@ Elegi un environment con e en el estudio, o con :@http env.",
                 self.retarget_collection_bookkeeping(&old, &new_path)?;
                 self.reload_library_at(&new_path)?;
                 self.status = format!("Collection renombrada: {name}");
+            }
+            Some(StudioPrompt::NewEnvironment) => {
+                let Some(root) = self.studio.root.clone() else {
+                    return Ok(());
+                };
+                let path = studio::create_environment(&root, &name)?;
+                self.reload_env_files();
+                self.focus_env_path(&path);
+                self.studio.env_focus = studio::EnvFocus::Vars;
+                self.status = format!("Environment creado: {name}");
+            }
+            Some(StudioPrompt::RenameEnvironment) => {
+                let Some(root) = self.studio.root.clone() else {
+                    return Ok(());
+                };
+                let Some(path) = self.studio.selected_env().map(|env| env.path.clone()) else {
+                    return Ok(());
+                };
+                let (new_path, old_name) = studio::rename_environment(&root, &path, &name)?;
+                if studio::retarget_env_name(
+                    &mut self.config.http_environments,
+                    &root,
+                    &old_name,
+                    &name,
+                ) {
+                    self.config.save()?;
+                }
+                self.reload_env_files();
+                self.focus_env_path(&new_path);
+                self.refresh_http_view();
+                self.status = format!("Environment renombrado: {name}");
             }
             None => {}
         }
@@ -4327,44 +4383,429 @@ Elegi un environment con e en el estudio, o con :@http env.",
             .and_then(|path| http::find_collection_root(&path))
     }
 
-    fn open_http_env_picker(&mut self) {
-        let Some(root) = self.current_collection_root() else {
+    fn open_http_env_picker(&mut self) -> Result<()> {
+        if self.studio.env_open {
+            return Ok(());
+        }
+        if !self.studio.active {
             self.show_alert("No hay collection. En :@http, Enter crea una de ejemplo.");
-            return;
-        };
-        let (environments, errors) = http::load_environments(&root);
-        let active = self.active_environment_name(&root);
-        self.http.env_options = environments.into_iter().map(|env| env.name).collect();
-        self.http.env_cursor = active
-            .and_then(|name| {
-                self.http
-                    .env_options
-                    .iter()
-                    .position(|option| *option == name)
-            })
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        self.http.env_root = Some(root);
-        self.overlay = Overlay::HttpEnv;
-        self.status = if errors.is_empty() {
-            String::from("Environment: Enter para activarlo")
-        } else {
-            format!("Environment: {}", errors.join(" | "))
-        };
+            return Ok(());
+        }
+        self.request_studio_leave(studio::StudioLeave::OpenEnv)
     }
 
-    fn confirm_http_env(&mut self) -> Result<()> {
-        self.overlay = Overlay::None;
-        let Some(root) = self.http.env_root.take() else {
+    fn open_env_editor(&mut self) -> Result<()> {
+        let Some(root) = self.current_collection_root() else {
+            self.show_alert("No hay collection. En :@http, Enter crea una de ejemplo.");
+            return Ok(());
+        };
+        if self.studio.root.is_none() {
+            self.studio.root = Some(root.clone());
+        }
+        let (environments, errors) = http::load_environments(&root);
+        let active = self.active_environment_name(&root);
+        let slot = active
+            .as_ref()
+            .and_then(|name| environments.iter().position(|env| &env.name == name))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.studio.env_files = environments;
+        self.studio.env_slot = slot;
+        self.studio.env_focus = studio::EnvFocus::List;
+        self.studio.env_open = true;
+        self.studio.exit_armed = false;
+        self.studio.load_env_draft_from_selection();
+        self.refresh_http_view();
+        self.status = if errors.is_empty() {
+            String::from("Environments: n crea, Enter activa")
+        } else {
+            format!("Environments: {}", errors.join(" | "))
+        };
+        Ok(())
+    }
+
+    fn close_env_editor(&mut self) {
+        self.studio.env_open = false;
+        self.studio.env_editing = false;
+        self.studio.env_buffer.clear();
+        self.studio.env_dirty = false;
+        self.studio.delete_environment = false;
+        self.studio.delete_variable = false;
+        self.status = String::from("Editor de environments cerrado");
+    }
+
+    fn move_env_selection(&mut self, delta: isize) -> Result<()> {
+        if !self.studio.move_env_slot(delta) {
+            return Ok(());
+        }
+        self.studio.load_env_draft_from_selection();
+        Ok(())
+    }
+
+    fn handle_env_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.code != KeyCode::Esc {
+            self.studio.exit_armed = false;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {
+                self.request_studio_leave(studio::StudioLeave::CloseEnv)?;
+            }
+            KeyCode::Char('S') => {
+                self.flush_env_save()?;
+                self.studio_send()?;
+            }
+            KeyCode::Char('n') => self.env_create(),
+            KeyCode::Char('r') => self.env_rename(),
+            KeyCode::Char('y') => self.env_duplicate()?,
+            KeyCode::Char('x') => self.env_delete_prompt(),
+            KeyCode::Char('l') | KeyCode::Right
+                if self.studio.env_focus == studio::EnvFocus::List =>
+            {
+                if self.studio.env_draft.is_some() {
+                    self.studio.env_focus = studio::EnvFocus::Vars;
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left
+                if self.studio.env_focus == studio::EnvFocus::Vars =>
+            {
+                self.studio.move_env_col(-1);
+            }
+            KeyCode::Char('l') | KeyCode::Right
+                if self.studio.env_focus == studio::EnvFocus::Vars =>
+            {
+                self.studio.move_env_col(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.studio.env_focus == studio::EnvFocus::List => {
+                self.request_studio_leave(studio::StudioLeave::MoveEnv(-1))?;
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.studio.env_focus == studio::EnvFocus::List =>
+            {
+                self.request_studio_leave(studio::StudioLeave::MoveEnv(1))?;
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.studio.env_focus == studio::EnvFocus::Vars => {
+                self.move_env_row(-1);
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.studio.env_focus == studio::EnvFocus::Vars =>
+            {
+                self.move_env_row(1);
+            }
+            KeyCode::Enter if self.studio.env_focus == studio::EnvFocus::List => {
+                self.activate_selected_environment()?;
+            }
+            KeyCode::Enter if self.studio.env_focus == studio::EnvFocus::Vars => {
+                self.activate_env_cell()?;
+            }
+            KeyCode::Char('s') if self.studio.env_focus == studio::EnvFocus::Vars => {
+                self.toggle_env_secret()?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_env_edit_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                self.commit_env_field();
+                self.flush_env_save()?;
+            }
+            KeyCode::Backspace => {
+                self.studio.env_buffer.pop();
+            }
+            KeyCode::Char('S') => {
+                self.commit_env_field();
+                self.flush_env_save()?;
+                self.studio_send()?;
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.request_studio_leave(studio::StudioLeave::CloseEnv)?;
+            }
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+            {
+                self.studio.env_buffer.push(ch);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn move_env_row(&mut self, delta: isize) {
+        let len = self
+            .studio
+            .env_draft
+            .as_ref()
+            .map(|draft| draft.variables.len())
+            .unwrap_or(0);
+        if len == 0 {
+            return;
+        }
+        let last = len as isize - 1;
+        self.studio.env_row = (self.studio.env_row as isize + delta).clamp(0, last) as usize;
+    }
+
+    fn env_create(&mut self) {
+        if self.studio.env_focus == studio::EnvFocus::Vars {
+            if self.studio.env_draft.is_none() {
+                self.status = String::from("Elegí un environment");
+                return;
+            }
+            if let Some(draft) = self.studio.env_draft.as_mut() {
+                let row = draft.add_variable();
+                self.studio.env_row = row;
+                self.studio.env_col = studio::EnvCol::Name;
+                self.studio.env_buffer.clear();
+                self.studio.env_editing = true;
+                self.studio.env_dirty = true;
+            }
+            return;
+        }
+        self.studio_begin_prompt(StudioPrompt::NewEnvironment);
+    }
+
+    fn env_rename(&mut self) {
+        if self.studio.env_focus == studio::EnvFocus::Vars {
+            let Some(name) = self
+                .studio
+                .env_draft
+                .as_ref()
+                .and_then(|draft| draft.variables.get(self.studio.env_row))
+                .map(|variable| variable.name.clone())
+            else {
+                self.status = String::from("No hay variable para renombrar");
+                return;
+            };
+            self.studio.env_col = studio::EnvCol::Name;
+            self.studio.env_buffer = name;
+            self.studio.env_editing = true;
+            return;
+        }
+        if self.studio.env_on_none() {
+            self.status = String::from("Elegí un environment");
+            return;
+        }
+        self.studio_begin_prompt(StudioPrompt::RenameEnvironment);
+    }
+
+    fn env_duplicate(&mut self) -> Result<()> {
+        if self.studio.env_focus == studio::EnvFocus::Vars {
+            let row = self.studio.env_row;
+            let Some(draft) = self.studio.env_draft.as_mut() else {
+                self.status = String::from("Elegí un environment");
+                return Ok(());
+            };
+            if let Some(index) = draft.duplicate_variable(row) {
+                self.studio.env_row = index;
+                self.studio.env_dirty = true;
+                self.status = String::from("Variable duplicada");
+            } else {
+                self.status = String::from("No hay variable para duplicar");
+            }
+            return Ok(());
+        }
+        if self.studio.env_on_none() {
+            self.status = String::from("Elegí un environment");
+            return Ok(());
+        }
+        self.commit_env_field();
+        self.flush_env_save()?;
+        let Some(path) = self.studio.selected_env().map(|env| env.path.clone()) else {
+            return Ok(());
+        };
+        let Some(root) = self.studio.root.clone() else {
+            return Ok(());
+        };
+        let copy = studio::duplicate_environment(&root, &path)?;
+        self.reload_env_files();
+        self.focus_env_path(&copy);
+        self.status = String::from("Environment duplicado");
+        Ok(())
+    }
+
+    fn env_delete_prompt(&mut self) {
+        if self.studio.env_focus == studio::EnvFocus::Vars {
+            let exists = self
+                .studio
+                .env_draft
+                .as_ref()
+                .is_some_and(|draft| !draft.variables.is_empty());
+            if !exists {
+                self.status = String::from("No hay variable para borrar");
+                return;
+            }
+            self.studio.delete_variable = true;
+            self.studio.delete_environment = false;
+            self.studio.delete_collection = false;
+            self.studio.confirm_delete = true;
+            return;
+        }
+        if self.studio.env_on_none() {
+            self.status = String::from("Elegí un environment");
+            return;
+        }
+        self.studio.delete_environment = true;
+        self.studio.delete_variable = false;
+        self.studio.delete_collection = false;
+        self.studio.confirm_delete = true;
+    }
+
+    fn activate_env_cell(&mut self) -> Result<()> {
+        let Some(draft) = self.studio.env_draft.as_ref() else {
+            return Ok(());
+        };
+        if draft.variables.is_empty() {
+            self.status = String::from("n agrega una variable");
+            return Ok(());
+        }
+        let row = self.studio.env_row.min(draft.variables.len() - 1);
+        self.studio.env_row = row;
+        match self.studio.env_col {
+            studio::EnvCol::Enabled => {
+                if self
+                    .studio
+                    .env_draft
+                    .as_mut()
+                    .is_some_and(|draft| draft.toggle_enabled(row))
+                {
+                    self.studio.env_dirty = true;
+                }
+            }
+            studio::EnvCol::Secret => self.toggle_env_secret()?,
+            studio::EnvCol::Name | studio::EnvCol::Value => {
+                let secret = self.studio.env_col == studio::EnvCol::Value
+                    && draft
+                        .variables
+                        .get(row)
+                        .is_some_and(|variable| variable.secret);
+                let text = if secret {
+                    String::new()
+                } else {
+                    draft
+                        .variables
+                        .get(row)
+                        .map(|variable| {
+                            if self.studio.env_col == studio::EnvCol::Name {
+                                variable.name.clone()
+                            } else {
+                                variable.value.clone()
+                            }
+                        })
+                        .unwrap_or_default()
+                };
+                self.studio.env_buffer = text;
+                self.studio.env_editing = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn toggle_env_secret(&mut self) -> Result<()> {
+        let Some(root) = self.studio.root.clone() else {
+            return Ok(());
+        };
+        let dotenv = http::read_dotenv(&root);
+        let row = self.studio.env_row;
+        if self
+            .studio
+            .env_draft
+            .as_mut()
+            .is_some_and(|draft| draft.toggle_secret(row, &dotenv))
+        {
+            self.studio.env_dirty = true;
+        }
+        Ok(())
+    }
+
+    fn commit_env_field(&mut self) -> bool {
+        if !self.studio.env_editing {
+            return false;
+        }
+        let buffer = std::mem::take(&mut self.studio.env_buffer);
+        let row = self.studio.env_row;
+        let col = self.studio.env_col;
+        self.studio.env_editing = false;
+        let Some(draft) = self.studio.env_draft.as_mut() else {
+            return false;
+        };
+        let changed = match col {
+            studio::EnvCol::Name => draft.set_name(row, &buffer),
+            studio::EnvCol::Value => draft.set_value(row, &buffer),
+            _ => false,
+        };
+        if changed {
+            self.studio.env_dirty = true;
+        }
+        changed
+    }
+
+    fn flush_env_save(&mut self) -> Result<()> {
+        if !self.studio.env_open || !self.studio.env_dirty {
+            return Ok(());
+        }
+        let Some(root) = self.studio.root.clone() else {
+            return Ok(());
+        };
+        let Some(draft) = self.studio.env_draft.clone() else {
+            return Ok(());
+        };
+        if let Err(err) = studio::save_env_draft(&root, &draft) {
+            self.show_alert(format!(
+                "No se pudo guardar el environment. El cambio sigue en memoria.\n\n{err:#}"
+            ));
+            return Ok(());
+        }
+        let path = draft.path.clone();
+        let row = self.studio.env_row;
+        let col = self.studio.env_col;
+        let focus = self.studio.env_focus;
+        self.reload_env_files();
+        self.focus_env_path(&path);
+        let len = self
+            .studio
+            .env_draft
+            .as_ref()
+            .map(|draft| draft.variables.len())
+            .unwrap_or(0);
+        if len > 0 {
+            self.studio.env_row = row.min(len - 1);
+        }
+        self.studio.env_col = col;
+        self.studio.env_focus = focus;
+        self.refresh_http_view();
+        Ok(())
+    }
+
+    fn reload_env_files(&mut self) {
+        let Some(root) = self.studio.root.clone() else {
+            return;
+        };
+        let (environments, _) = http::load_environments(&root);
+        self.studio.env_files = environments;
+    }
+
+    fn focus_env_path(&mut self, path: &Path) {
+        if let Some(index) = self
+            .studio
+            .env_files
+            .iter()
+            .position(|env| http::canonical_path(&env.path) == http::canonical_path(path))
+        {
+            self.studio.env_slot = index + 1;
+        }
+        self.studio.load_env_draft_from_selection();
+    }
+
+    fn activate_selected_environment(&mut self) -> Result<()> {
+        let Some(root) = self.studio.root.clone() else {
             return Ok(());
         };
         let key = studio::collection_env_key(&root);
-        let choice = self
-            .http
-            .env_cursor
-            .checked_sub(1)
-            .and_then(|index| self.http.env_options.get(index))
-            .cloned();
+        let choice = self.studio.selected_env().map(|env| env.name.clone());
         self.config
             .http_environments
             .retain(|existing, _| studio::collection_env_key(Path::new(existing)) != key);
@@ -4377,6 +4818,56 @@ Elegi un environment con e en el estudio, o con :@http env.",
             Some(name) => format!("Environment activo: {name}"),
             None => String::from("Sin environment"),
         };
+        Ok(())
+    }
+
+    fn delete_env_variable(&mut self) -> Result<()> {
+        self.studio.confirm_delete = false;
+        self.studio.delete_variable = false;
+        let row = self.studio.env_row;
+        let removed = self
+            .studio
+            .env_draft
+            .as_mut()
+            .is_some_and(|draft| draft.remove_variable(row));
+        if !removed {
+            self.status = String::from("No hay variable para borrar");
+            return Ok(());
+        }
+        let len = self
+            .studio
+            .env_draft
+            .as_ref()
+            .map(|draft| draft.variables.len())
+            .unwrap_or(0);
+        if len > 0 && self.studio.env_row >= len {
+            self.studio.env_row = len - 1;
+        }
+        self.studio.env_dirty = true;
+        self.flush_env_save()?;
+        self.status = String::from("Variable borrada");
+        Ok(())
+    }
+
+    fn delete_selected_environment(&mut self) -> Result<()> {
+        self.studio.confirm_delete = false;
+        self.studio.delete_environment = false;
+        let Some(env) = self.studio.selected_env().cloned() else {
+            return Ok(());
+        };
+        studio::delete_environment_file(&env.path)?;
+        if let Some(root) = self.studio.root.clone() {
+            if studio::clear_env_name(&mut self.config.http_environments, &root, &env.name) {
+                self.config.save()?;
+            }
+        }
+        self.reload_env_files();
+        if self.studio.env_slot >= self.studio.env_slot_count() {
+            self.studio.env_slot = self.studio.env_slot_count().saturating_sub(1);
+        }
+        self.studio.load_env_draft_from_selection();
+        self.refresh_http_view();
+        self.status = format!("Environment borrado: {}", env.name);
         Ok(())
     }
 

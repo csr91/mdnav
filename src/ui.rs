@@ -48,18 +48,27 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let s = app.config.strings();
     let footer = if app.studio.active {
-        let text = studio::panel_footer(
-            app.studio.panel,
-            app.studio.nav.editing,
-            app.studio.exit_armed,
-            app.studio.tree_on_collection(),
-            app.studio.save_prompt,
-            &app.config.language,
-        );
+        let text = if app.studio.env_open {
+            studio::env_footer(
+                app.studio.env_focus,
+                app.studio.env_editing,
+                app.studio.save_prompt,
+                &app.config.language,
+            )
+        } else {
+            studio::panel_footer(
+                app.studio.panel,
+                app.studio.nav.editing,
+                app.studio.exit_armed,
+                app.studio.tree_on_collection(),
+                app.studio.save_prompt,
+                &app.config.language,
+            )
+        };
         Paragraph::new(Line::from(Span::styled(
             text,
             Style::default()
-                .fg(if app.studio.nav.editing {
+                .fg(if app.studio.nav.editing || app.studio.env_editing {
                     Color::Yellow
                 } else {
                     Color::Green
@@ -194,7 +203,6 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Create => render_create_popup(frame, app),
         Overlay::Git => render_git_popup(frame, app),
         Overlay::Alert => render_alert_popup(frame, app),
-        Overlay::HttpEnv => render_http_env_popup(frame, app),
         Overlay::Rename => {}
         Overlay::None => {}
     }
@@ -241,7 +249,6 @@ fn mode_label(app: &App) -> (&'static str, Color) {
             ("MERMAID", Color::Cyan)
         }
         Overlay::WebLink => ("LINK", Color::Cyan),
-        Overlay::HttpEnv => ("HTTP", Color::Green),
         Overlay::None => {
             if app.studio.active {
                 return ("HTTP", Color::Green);
@@ -932,7 +939,7 @@ fn render_response(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(""),
             shortcut_line("Shift+S", "enviar el request"),
             shortcut_line(":@http", "abrir el estudio"),
-            shortcut_line("e", "elegir environment"),
+            shortcut_line("e", "editar environments"),
             shortcut_line("Shift+E", "editar el YAML"),
         ];
         if app.http_busy() {
@@ -1121,54 +1128,6 @@ fn response_tab_lines(app: &App, response: &HttpResponse) -> Vec<Line<'static>> 
     }
 }
 
-fn render_http_env_popup(frame: &mut Frame, app: &App) {
-    let popup_area = centered_rect(50, 45, frame.area());
-    frame.render_widget(Clear, popup_area);
-
-    let active = app.http.env_root.as_ref().and_then(|root| {
-        app.config
-            .http_environments
-            .get(&root.display().to_string())
-    });
-    let mut items = vec![ListItem::new(Line::from(Span::styled(
-        format!(
-            "{} (sin environment)",
-            if active.is_none() { "●" } else { " " }
-        ),
-        Style::default().fg(Color::Gray),
-    )))];
-    items.extend(app.http.env_options.iter().map(|name| {
-        let marker = if active == Some(name) { "●" } else { " " };
-        ListItem::new(Line::from(Span::styled(
-            format!("{marker} {name}"),
-            Style::default().fg(Color::White),
-        )))
-    }));
-
-    let title = if app.http.env_options.is_empty() {
-        " Environment · no hay environments/*.yml "
-    } else {
-        " Environment  (Enter activar | Esc cerrar) "
-    };
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Green)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Green)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    let mut state = ListState::default();
-    state.select(Some(app.http.env_cursor));
-    frame.render_stateful_widget(list, popup_area, &mut state);
-}
-
 struct StudioPanes {
     collection: Rect,
     editor: Rect,
@@ -1217,7 +1176,9 @@ fn studio_panes(area: Rect) -> StudioPanes {
 
 fn render_http_studio(frame: &mut Frame, area: Rect, app: &App) {
     let copy = studio::copy(&app.config.language);
-    if app.studio.starter {
+    if app.studio.env_open {
+        render_env_editor(frame, area, app, &copy);
+    } else if app.studio.starter {
         render_studio_starter(frame, area, app, &copy);
     } else {
         let panes = studio_panes(area);
@@ -1780,6 +1741,208 @@ fn studio_resolved_url(app: &App) -> String {
     http::resolve_request(root, &draft.path, &draft.to_spec(), environment).url
 }
 
+fn render_env_editor(frame: &mut Frame, area: Rect, app: &App, copy: &studio::StudioCopy) {
+    let es = app.config.language != "en";
+    let compact = area.width < 100 || area.height < 28;
+    let chunks = if compact {
+        let list_h = 6.min(area.height.saturating_sub(6)).max(3);
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(list_h), Constraint::Min(4)])
+            .split(area)
+    } else {
+        let list_w = 32.min(area.width / 3).max(20);
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(list_w), Constraint::Min(24)])
+            .split(area)
+    };
+    render_env_list(frame, chunks[0], app, es);
+    render_env_variables(frame, chunks[1], app, copy, es);
+}
+
+fn render_env_list(frame: &mut Frame, area: Rect, app: &App, es: bool) {
+    let focused = app.studio.env_focus == studio::EnvFocus::List;
+    let root = app.studio.root.as_deref();
+    let active = root.and_then(|root| {
+        studio::env_name_in(&app.config.http_environments, root).map(str::to_string)
+    });
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let slot = app.studio.env_slot;
+    let start = slot.saturating_sub(inner_h.saturating_sub(1));
+    let mut lines = Vec::new();
+    let none_label = if es {
+        "(sin environment)"
+    } else {
+        "(no environment)"
+    };
+    let slots = app.studio.env_slot_count();
+    for index in start..slots.min(start + inner_h.max(1)) {
+        let selected = index == slot;
+        let (marker, label) = if index == 0 {
+            let mark = if active.is_none() { "●" } else { " " };
+            (mark, none_label.to_string())
+        } else {
+            let env = &app.studio.env_files[index - 1];
+            let mark = if active.as_deref() == Some(env.name.as_str()) {
+                "●"
+            } else {
+                " "
+            };
+            (mark, env.name.clone())
+        };
+        let row_style = if selected && focused {
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else if selected {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} {label}"),
+            row_style,
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(studio_block(String::from(" Environments "), focused)),
+        area,
+    );
+}
+
+fn render_env_variables(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    copy: &studio::StudioCopy,
+    es: bool,
+) {
+    let focused = app.studio.env_focus == studio::EnvFocus::Vars;
+    let title_name = app
+        .studio
+        .env_draft
+        .as_ref()
+        .map(|draft| draft.name.clone())
+        .unwrap_or_else(|| {
+            if es {
+                "sin environment".to_string()
+            } else {
+                "no environment".to_string()
+            }
+        });
+    let mut title = format!(" Variables · {title_name}");
+    if app.studio.env_editing {
+        title.push_str(if es { " · editando" } else { " · editing" });
+    } else if app.studio.env_dirty {
+        title.push_str(if es { " · sin guardar" } else { " · unsaved" });
+    }
+    title.push(' ');
+    let lines = env_variable_lines(app, copy, es, area.width.saturating_sub(2) as usize);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(studio_block(title, focused))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn env_variable_lines(
+    app: &App,
+    copy: &studio::StudioCopy,
+    es: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let Some(draft) = &app.studio.env_draft else {
+        let message = if es {
+            "Elegí un environment o n para crear uno."
+        } else {
+            "Pick an environment, or n to create one."
+        };
+        return vec![Line::from(Span::styled(
+            message,
+            Style::default().fg(Color::DarkGray),
+        ))];
+    };
+    let secret_header = if es { "secreto" } else { "secret" };
+    let on_w = 4;
+    let secret_w = 8;
+    let key_w = 16.min(width / 4).max(8);
+    let value_w = width.saturating_sub(key_w + on_w + secret_w + 8).max(8);
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "  {:<key_w$} {:<value_w$} {:<on_w$} {secret_header}",
+            copy.col_key,
+            copy.col_value,
+            copy.col_on,
+            key_w = key_w,
+            value_w = value_w,
+            on_w = on_w,
+        ),
+        Style::default().fg(Color::DarkGray),
+    ))];
+    if draft.variables.is_empty() {
+        let empty = if es {
+            "Vacio · n agrega una variable"
+        } else {
+            "Empty · n adds a variable"
+        };
+        lines.push(Line::from(Span::styled(
+            empty,
+            Style::default().fg(Color::DarkGray),
+        )));
+        return lines;
+    }
+    let focused = app.studio.env_focus == studio::EnvFocus::Vars;
+    for (row, variable) in draft.variables.iter().enumerate() {
+        let cursor_here = focused && app.studio.env_row == row;
+        let name = env_cell_text(app, row, studio::EnvCol::Name, &variable.name);
+        let raw_value = if variable.secret {
+            "••••••".to_string()
+        } else {
+            variable.value.clone()
+        };
+        let value = env_cell_text(app, row, studio::EnvCol::Value, &raw_value);
+        let enabled = if variable.enabled { copy.yes } else { copy.no };
+        let secret = if variable.secret { copy.yes } else { copy.no };
+        let marker = if cursor_here { ">" } else { " " };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!(" {}", fit(&name, key_w)),
+                cell_style(cursor_here, app.studio.env_col == studio::EnvCol::Name),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                fit(&value, value_w),
+                cell_style(cursor_here, app.studio.env_col == studio::EnvCol::Value),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                fit(enabled, on_w),
+                cell_style(cursor_here, app.studio.env_col == studio::EnvCol::Enabled),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                fit(secret, secret_w),
+                cell_style(cursor_here, app.studio.env_col == studio::EnvCol::Secret),
+            ),
+        ]));
+    }
+    lines
+}
+
+fn env_cell_text(app: &App, row: usize, col: studio::EnvCol, fallback: &str) -> String {
+    if app.studio.env_editing && app.studio.env_row == row && app.studio.env_col == col {
+        format!("{}█", app.studio.env_buffer)
+    } else {
+        fallback.to_string()
+    }
+}
+
 fn render_studio_save_prompt(frame: &mut Frame, _app: &App) {
     let area = centered_rect(56, 32, frame.area());
     frame.render_widget(Clear, area);
@@ -1819,8 +1982,37 @@ fn render_studio_save_prompt(frame: &mut Frame, _app: &App) {
 }
 
 fn render_studio_confirm(frame: &mut Frame, app: &App, copy: &studio::StudioCopy) {
-    let name = if app.studio.delete_collection {
-        app.studio
+    let es = app.config.language != "en";
+    let (title, name) = if app.studio.delete_variable {
+        let name = app
+            .studio
+            .env_draft
+            .as_ref()
+            .and_then(|draft| draft.variables.get(app.studio.env_row))
+            .map(|variable| variable.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| String::from("variable"));
+        let title = if es {
+            "Eliminar variable?"
+        } else {
+            "Delete variable?"
+        };
+        (title, name)
+    } else if app.studio.delete_environment {
+        let name = app
+            .studio
+            .selected_env()
+            .map(|env| env.name.clone())
+            .unwrap_or_else(|| String::from("environment"));
+        let title = if es {
+            "Eliminar environment?"
+        } else {
+            "Delete environment?"
+        };
+        (title, name)
+    } else if app.studio.delete_collection {
+        let name = app
+            .studio
             .current_node()
             .and_then(|node| match node {
                 studio::TreeNode::Collection(index) => app
@@ -1830,13 +2022,22 @@ fn render_studio_confirm(frame: &mut Frame, app: &App, copy: &studio::StudioCopy
                     .map(|collection| collection.name.clone()),
                 _ => None,
             })
-            .unwrap_or_else(|| String::from("collection"))
+            .unwrap_or_else(|| String::from("collection"));
+        let title = if es {
+            "Eliminar collection?"
+        } else {
+            "Delete collection?"
+        };
+        (title, name)
     } else {
-        app.studio
-            .draft
-            .as_ref()
-            .map(|draft| draft.name.clone())
-            .unwrap_or_default()
+        (
+            copy.delete_title,
+            app.studio
+                .draft
+                .as_ref()
+                .map(|draft| draft.name.clone())
+                .unwrap_or_default(),
+        )
     };
     let area = centered_rect(56, 30, frame.area());
     frame.render_widget(Clear, area);
@@ -1854,15 +2055,6 @@ fn render_studio_confirm(frame: &mut Frame, app: &App, copy: &studio::StudioCopy
             Style::default().fg(Color::Gray),
         )),
     ];
-    let title = if app.studio.delete_collection {
-        if app.config.language == "en" {
-            "Delete collection?"
-        } else {
-            "Eliminar collection?"
-        }
-    } else {
-        copy.delete_title
-    };
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
@@ -1896,6 +2088,20 @@ fn render_studio_prompt(frame: &mut Frame, app: &App, copy: &studio::StudioCopy)
                 "Rename collection"
             } else {
                 "Renombrar collection"
+            }
+        }
+        Some(StudioPrompt::NewEnvironment) => {
+            if app.config.language == "en" {
+                "New environment"
+            } else {
+                "Environment nuevo"
+            }
+        }
+        Some(StudioPrompt::RenameEnvironment) => {
+            if app.config.language == "en" {
+                "Rename environment"
+            } else {
+                "Renombrar environment"
             }
         }
         _ => copy.new_title,
