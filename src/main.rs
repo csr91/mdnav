@@ -5,6 +5,8 @@ mod http;
 mod markdown;
 mod postman;
 mod share;
+mod sql;
+mod sql_studio;
 mod strings;
 mod studio;
 mod ui;
@@ -296,11 +298,12 @@ fn run(
 
     while app.running {
         app.poll_http();
+        app.poll_sql();
         terminal.draw(|frame| ui::render(frame, &app))?;
 
         // Tick faster while a request is on the wire so the spinner moves and
         // the response shows up as soon as it lands.
-        let tick = if app.http_busy() {
+        let tick = if app.http_busy() || app.sql_busy() {
             Duration::from_millis(100)
         } else {
             Duration::from_millis(500)

@@ -66,6 +66,10 @@ pub struct AppConfig {
     pub http_last_collection: String,
     /// Overrides `~/.config/mdnav/collections`. Empty keeps the default.
     pub http_collections_dir: String,
+    /// Overrides `~/.config/mdnav/sql`. Empty keeps the default.
+    pub sql_connections_dir: String,
+    /// Active SQL environment per connection, keyed by the connection root.
+    pub sql_environments: BTreeMap<String, String>,
 }
 
 /// How many recent commands the palette keeps and shows by default.
@@ -88,6 +92,8 @@ impl Default for AppConfig {
             http_environments: BTreeMap::new(),
             http_last_collection: String::new(),
             http_collections_dir: String::new(),
+            sql_connections_dir: String::new(),
+            sql_environments: BTreeMap::new(),
         }
     }
 }

@@ -20,7 +20,8 @@ use crate::{
     markdown::{
         load_preview, mermaid_terminal_canvas, MermaidBlock, MermaidCanvas, PreviewDocument,
     },
-    postman,
+    postman, sql,
+    sql_studio::{self, SqlFocus, SqlPrompt, SqlPromptKind, SqlRow, SqlStudio},
     studio::{self, StudioPanel, StudioPrompt},
 };
 
@@ -323,6 +324,7 @@ pub struct App {
     pub git_status_cache: HashMap<PathBuf, GitStatusKind>,
     pub http: HttpState,
     pub studio: studio::HttpStudio,
+    pub sql: SqlStudio,
 }
 
 impl App {
@@ -429,6 +431,7 @@ impl App {
             git_status_cache: HashMap::new(),
             http: HttpState::default(),
             studio: studio::HttpStudio::default(),
+            sql: SqlStudio::default(),
         };
         app.rebuild_tree_info_cache();
         app.refresh_git_status_cache();
@@ -448,6 +451,10 @@ impl App {
 
         if self.studio.active {
             return self.handle_studio_key(key);
+        }
+
+        if self.sql.active {
+            return self.handle_sql_key(key);
         }
 
         if self.selection.is_some() {
@@ -2280,6 +2287,7 @@ impl App {
             ("@commands", "ver la lista completa de comandos"),
             ("@http", "abrir el estudio HTTP"),
             ("@jsonviewer", "abrir JSON Viewer"),
+            ("@sql", "abrir el estudio SQL"),
             ("copy", "copiar archivo a otro directorio"),
             (
                 "copypath",
@@ -2379,6 +2387,7 @@ impl App {
             ),
             ("Git", vec![("git", "ejecutar comandos git")]),
             ("HTTP", vec![("@http", "abrir el estudio HTTP")]),
+            ("SQL", vec![("@sql", "abrir el estudio SQL")]),
         ]
     }
 
@@ -2525,6 +2534,7 @@ impl App {
             "git" => self.open_git(),
             "@http" => self.open_http_studio(false)?,
             "@jsonviewer" => self.toggle_json_viewer()?,
+            "@sql" => self.open_sql_studio()?,
             "select" => self.toggle_selection_mode(),
             "edit" => self.edit_target_in_nano()?,
             "rename" => self.open_rename()?,
@@ -3223,6 +3233,788 @@ Elegi un environment con e en el estudio, o con :@http env.",
             }
         }
         self.http.session.responses.insert(path, response);
+    }
+
+    // ── SQL studio (phase 3: environments with secrets + exit confirm) ─────────
+
+    fn open_sql_studio(&mut self) -> Result<()> {
+        let dir = sql_studio::connections_dir(&self.config.sql_connections_dir)?;
+        let connections = sql_studio::ensure_library(&dir)?;
+        self.sql.connections_root = Some(dir);
+        self.sql.connections = connections;
+        self.sql.active = true;
+        self.sql.focus = SqlFocus::Tree;
+        self.sql.cursor = 0;
+        self.sql.active_connection = None;
+        self.sql.loaded_query = None;
+        self.sql.loaded_query_snapshot = String::new();
+        self.sql.query_input.clear();
+        self.sql.result = None;
+        self.sql.last_run_query.clear();
+        self.sql.last_run_db_path.clear();
+        self.sql.row_offset = 0;
+        self.sql.col_offset = 0;
+        self.activate_sole_sql_environments()?;
+        self.status = String::from("Estudio SQL");
+        Ok(())
+    }
+
+    /// Auto-picks the only environment of any connection that has exactly
+    /// one and none chosen yet — same nicety `:@http` does for collections
+    /// with a single environment.
+    fn activate_sole_sql_environments(&mut self) -> Result<()> {
+        let mut changed = false;
+        for connection in &self.sql.connections {
+            if connection.environments.len() != 1 {
+                continue;
+            }
+            if studio::env_name_in(&self.config.sql_environments, &connection.path).is_some() {
+                continue;
+            }
+            let key = studio::collection_env_key(&connection.path);
+            self.config
+                .sql_environments
+                .insert(key, connection.environments[0].name.clone());
+            changed = true;
+        }
+        if changed {
+            self.config.save()?;
+        }
+        Ok(())
+    }
+
+    /// Re-scans the library from disk after a CRUD op, keeping the tree
+    /// expansion state and clamping the cursor to the new row count.
+    fn refresh_sql_library(&mut self) {
+        let Some(root) = self.sql.connections_root.clone() else {
+            return;
+        };
+        self.sql.connections = sql_studio::refresh(&root, &self.sql.connections);
+        self.sql.clamp_cursor();
+    }
+
+    fn open_sql_prompt(&mut self, kind: SqlPromptKind, title: &str) {
+        self.sql.prompt = Some(SqlPrompt {
+            kind,
+            title: title.to_string(),
+            input: String::new(),
+        });
+    }
+
+    fn open_sql_prompt_prefilled(&mut self, kind: SqlPromptKind, title: &str, input: String) {
+        self.sql.prompt = Some(SqlPrompt {
+            kind,
+            title: title.to_string(),
+            input,
+        });
+    }
+
+    fn handle_sql_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.sql.exit_prompt {
+            return self.handle_sql_exit_prompt_key(key);
+        }
+        if self.sql.prompt.is_some() {
+            return self.handle_sql_prompt_key(key);
+        }
+        match self.sql.focus {
+            SqlFocus::Tree => self.handle_sql_tree_key(key),
+            SqlFocus::Query => self.handle_sql_query_key(key),
+            SqlFocus::Results => {
+                self.handle_sql_results_key(key);
+                Ok(())
+            }
+        }
+    }
+
+    /// Closes the studio, but asks first if the query editor has text that
+    /// has not been saved or run since the last edit.
+    fn try_close_sql(&mut self) {
+        if self.sql.is_query_dirty() {
+            self.sql.exit_prompt = true;
+            self.status = String::from(
+                "Cambios sin guardar. g guarda y sale · d descarta · Esc sigue editando",
+            );
+        } else {
+            self.sql.close();
+            self.status = String::from("SQL cerrado");
+        }
+    }
+
+    fn handle_sql_exit_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('g' | 'G') => {
+                if let Some(loaded) = self.sql.loaded_query.clone() {
+                    if let Err(err) = sql_studio::write_query(&loaded, &self.sql.query_input) {
+                        self.sql.exit_prompt = false;
+                        self.status = format!("No se pudo guardar la query: {err}");
+                        return Ok(());
+                    }
+                    self.sql.loaded_query_snapshot = self.sql.query_input.clone();
+                    self.sql.exit_prompt = false;
+                    self.sql.close();
+                    self.status = String::from("Cambios guardados");
+                } else {
+                    // Ad-hoc text with nothing backing it on disk: ask for a
+                    // name instead of silently dropping it.
+                    self.sql.exit_prompt = false;
+                    self.start_new_sql_query();
+                }
+            }
+            KeyCode::Char('d' | 'D') => {
+                self.sql.exit_prompt = false;
+                self.sql.close();
+                self.status = String::from("Cambios descartados");
+            }
+            KeyCode::Esc => {
+                self.sql.exit_prompt = false;
+                self.status = String::from("Seguis editando");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_sql_tree_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => self.try_close_sql(),
+            KeyCode::Tab => self.sql.cycle_focus(),
+            KeyCode::Up | KeyCode::Char('k') => self.sql.move_cursor(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.sql.move_cursor(1),
+            KeyCode::Enter => self.activate_sql_row()?,
+            KeyCode::Char('c') => {
+                self.open_sql_prompt(SqlPromptKind::NewConnectionName, "Nombre de la conexion")
+            }
+            KeyCode::Char('E') => self.start_new_sql_environment(),
+            KeyCode::Char('n') => self.start_new_sql_query(),
+            KeyCode::Char('r') => self.start_rename_sql_row(),
+            KeyCode::Char('y') => self.duplicate_sql_row(),
+            KeyCode::Char('x') => self.start_delete_sql_row(),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_sql_query_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => self.try_close_sql(),
+            KeyCode::Tab => self.sql.cycle_focus(),
+            KeyCode::Enter => self.run_sql_query(),
+            KeyCode::Backspace => {
+                self.sql.query_input.pop();
+            }
+            KeyCode::Char(c) => self.sql.query_input.push(c),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_sql_results_key(&mut self, key: KeyEvent) {
+        if self.sql.in_flight.is_some() {
+            match key.code {
+                KeyCode::Esc => self.try_close_sql(),
+                KeyCode::Char('x') => self.cancel_sql_query(),
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => self.try_close_sql(),
+            KeyCode::Tab => self.sql.cycle_focus(),
+            KeyCode::Up | KeyCode::Char('k') => self.sql.scroll_rows(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.sql.scroll_rows(1),
+            KeyCode::Left | KeyCode::Char('h') => self.sql.scroll_columns(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.sql.scroll_columns(1),
+            KeyCode::PageDown => {
+                if self
+                    .sql
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result.has_more)
+                {
+                    let next =
+                        self.sql.result.as_ref().map(|r| r.offset).unwrap_or(0) + sql::PAGE_SIZE;
+                    self.fetch_sql_page(next);
+                }
+            }
+            KeyCode::PageUp => {
+                let current = self.sql.result.as_ref().map(|r| r.offset).unwrap_or(0);
+                if current > 0 {
+                    self.fetch_sql_page(current.saturating_sub(sql::PAGE_SIZE));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn cancel_sql_query(&mut self) {
+        if let Some(in_flight) = self.sql.in_flight.as_ref() {
+            in_flight.cancel();
+            self.status = String::from("Cancelando consulta...");
+        }
+    }
+
+    fn fetch_sql_page(&mut self, offset: usize) {
+        if self.sql.in_flight.is_some() || self.sql.last_run_query.is_empty() {
+            return;
+        }
+        self.status = format!("Cargando desde la fila {}...", offset + 1);
+        self.sql.in_flight = Some(sql::spawn_query(
+            self.sql.last_run_db_path.clone(),
+            self.sql.last_run_query.clone(),
+            offset,
+        ));
+    }
+
+    fn activate_sql_row(&mut self) -> Result<()> {
+        match self.sql.selected_row() {
+            Some(SqlRow::Connection(ci)) => {
+                self.sql.toggle_expanded(ci);
+                self.sql.active_connection = Some(self.sql.connections[ci].path.clone());
+                self.status = format!("Conexion activa: {}", self.sql.connections[ci].name);
+            }
+            Some(SqlRow::Environment(ci, ei)) => {
+                let connection = &self.sql.connections[ci];
+                let env_name = connection.environments[ei].name.clone();
+                let key = studio::collection_env_key(&connection.path);
+                self.sql.active_connection = Some(connection.path.clone());
+                self.config.sql_environments.insert(key, env_name.clone());
+                self.config.save()?;
+                self.status = format!("Entorno activo: {env_name}");
+            }
+            Some(SqlRow::Query(ci, qi)) => {
+                let path = self.sql.connections[ci].queries[qi].path.clone();
+                self.open_sql_query(path)?;
+            }
+            None => self.status = String::from("No hay conexiones. c crea una nueva"),
+        }
+        Ok(())
+    }
+
+    fn open_sql_query(&mut self, path: PathBuf) -> Result<()> {
+        match sql_studio::read_query(&path) {
+            Ok(contents) => {
+                self.sql.loaded_query_snapshot = contents.clone();
+                self.sql.query_input = contents;
+                self.sql.loaded_query = Some(path.clone());
+                self.sql.focus_query(&path);
+                self.sql.focus = SqlFocus::Query;
+                self.status = String::from("Query cargada");
+            }
+            Err(err) => self.status = format!("No se pudo abrir la query: {err}"),
+        }
+        Ok(())
+    }
+
+    fn start_new_sql_query(&mut self) {
+        let Some(connection_dir) = self.sql.selected_connection_dir() else {
+            self.status = String::from("Primero crea una conexion con c");
+            return;
+        };
+        self.open_sql_prompt(
+            SqlPromptKind::NewQueryName { connection_dir },
+            "Nombre de la query nueva",
+        );
+    }
+
+    fn start_new_sql_environment(&mut self) {
+        let Some(connection_dir) = self.sql.selected_connection_dir() else {
+            self.status = String::from("Primero crea una conexion con c");
+            return;
+        };
+        self.open_sql_prompt(
+            SqlPromptKind::NewEnvironmentName { connection_dir },
+            "Nombre del entorno (dev, staging, prod...)",
+        );
+    }
+
+    fn start_rename_sql_row(&mut self) {
+        match self.sql.selected_row() {
+            Some(SqlRow::Connection(ci)) => {
+                let connection = &self.sql.connections[ci];
+                let path = connection.path.clone();
+                let name = connection.name.clone();
+                self.open_sql_prompt_prefilled(
+                    SqlPromptKind::RenameConnection { path },
+                    "Nuevo nombre de la conexion",
+                    name,
+                );
+            }
+            Some(SqlRow::Environment(ci, ei)) => {
+                let connection_dir = self.sql.connections[ci].path.clone();
+                let old_name = self.sql.connections[ci].environments[ei].name.clone();
+                self.open_sql_prompt_prefilled(
+                    SqlPromptKind::RenameEnvironment {
+                        connection_dir,
+                        old_name: old_name.clone(),
+                    },
+                    "Nuevo nombre del entorno",
+                    old_name,
+                );
+            }
+            Some(SqlRow::Query(ci, qi)) => {
+                let query = &self.sql.connections[ci].queries[qi];
+                let path = query.path.clone();
+                let name = query.name.clone();
+                self.open_sql_prompt_prefilled(
+                    SqlPromptKind::RenameQuery { path },
+                    "Nuevo nombre de la query",
+                    name,
+                );
+            }
+            None => self.status = String::from("Nada para renombrar"),
+        }
+    }
+
+    fn duplicate_sql_row(&mut self) {
+        match self.sql.selected_row() {
+            Some(SqlRow::Connection(ci)) => {
+                let path = self.sql.connections[ci].path.clone();
+                match sql_studio::duplicate_connection(&path) {
+                    Ok(new_path) => {
+                        self.refresh_sql_library();
+                        self.sql.focus_connection(&new_path);
+                        self.status = String::from("Conexion duplicada");
+                    }
+                    Err(err) => self.status = format!("No se pudo duplicar: {err}"),
+                }
+            }
+            Some(SqlRow::Environment(ci, ei)) => {
+                let connection_dir = self.sql.connections[ci].path.clone();
+                let name = self.sql.connections[ci].environments[ei].name.clone();
+                match sql_studio::duplicate_environment(&connection_dir, &name) {
+                    Ok(_new_name) => {
+                        self.refresh_sql_library();
+                        self.sql.focus_connection(&connection_dir);
+                        self.status = String::from("Entorno duplicado");
+                    }
+                    Err(err) => self.status = format!("No se pudo duplicar: {err}"),
+                }
+            }
+            Some(SqlRow::Query(ci, qi)) => {
+                let path = self.sql.connections[ci].queries[qi].path.clone();
+                match sql_studio::duplicate_query(&path) {
+                    Ok(new_path) => {
+                        self.refresh_sql_library();
+                        self.sql.focus_query(&new_path);
+                        self.status = String::from("Query duplicada");
+                    }
+                    Err(err) => self.status = format!("No se pudo duplicar: {err}"),
+                }
+            }
+            None => self.status = String::from("Nada para duplicar"),
+        }
+    }
+
+    fn start_delete_sql_row(&mut self) {
+        match self.sql.selected_row() {
+            Some(SqlRow::Connection(ci)) => {
+                let connection = &self.sql.connections[ci];
+                let path = connection.path.clone();
+                let label = format!("la conexion \"{}\" y sus queries", connection.name);
+                let title = format!("Borrar {label}? Enter confirma / Esc cancela");
+                self.open_sql_prompt(
+                    SqlPromptKind::ConfirmDeleteConnection { path, label },
+                    &title,
+                );
+            }
+            Some(SqlRow::Environment(ci, ei)) => {
+                let connection_dir = self.sql.connections[ci].path.clone();
+                let name = self.sql.connections[ci].environments[ei].name.clone();
+                let label = format!("el entorno \"{name}\"");
+                let title = format!("Borrar {label}? Enter confirma / Esc cancela");
+                self.open_sql_prompt(
+                    SqlPromptKind::ConfirmDeleteEnvironment {
+                        connection_dir,
+                        name,
+                        label,
+                    },
+                    &title,
+                );
+            }
+            Some(SqlRow::Query(ci, qi)) => {
+                let query = &self.sql.connections[ci].queries[qi];
+                let path = query.path.clone();
+                let label = format!("la query \"{}\"", query.name);
+                let title = format!("Borrar {label}? Enter confirma / Esc cancela");
+                self.open_sql_prompt(SqlPromptKind::ConfirmDeleteQuery { path, label }, &title);
+            }
+            None => self.status = String::from("Nada para borrar"),
+        }
+    }
+
+    fn handle_sql_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(prompt) = self.sql.prompt.as_ref() else {
+            return Ok(());
+        };
+        if matches!(prompt.kind, SqlPromptKind::NewEnvironmentSecret { .. }) {
+            return self.handle_sql_secret_prompt_key(key);
+        }
+        let is_confirm = matches!(
+            prompt.kind,
+            SqlPromptKind::ConfirmDeleteConnection { .. }
+                | SqlPromptKind::ConfirmDeleteQuery { .. }
+                | SqlPromptKind::ConfirmDeleteEnvironment { .. }
+        );
+        let Some(prompt) = self.sql.prompt.as_mut() else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.sql.prompt = None;
+                self.status = String::from("Cancelado");
+            }
+            KeyCode::Enter => self.confirm_sql_prompt()?,
+            KeyCode::Backspace if !is_confirm => {
+                prompt.input.pop();
+            }
+            KeyCode::Char(c) if !is_confirm => prompt.input.push(c),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// "Es un valor secreto?" step of creating an environment: y/n, not
+    /// free text, so it gets its own small key handler.
+    fn handle_sql_secret_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y' | 'Y') => self.finish_new_sql_environment(true)?,
+            KeyCode::Char('n' | 'N') => self.finish_new_sql_environment(false)?,
+            KeyCode::Esc => {
+                self.sql.prompt = None;
+                self.status = String::from("Cancelado");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn finish_new_sql_environment(&mut self, secret: bool) -> Result<()> {
+        let Some(prompt) = self.sql.prompt.take() else {
+            return Ok(());
+        };
+        let SqlPromptKind::NewEnvironmentSecret {
+            connection_dir,
+            name,
+            value,
+        } = prompt.kind
+        else {
+            return Ok(());
+        };
+        match sql_studio::create_environment(&connection_dir, &name, &value, secret) {
+            Ok(()) => {
+                self.refresh_sql_library();
+                self.sql.focus_connection(&connection_dir);
+                self.activate_sole_sql_environments()?;
+                self.status = format!("Entorno \"{name}\" creado");
+            }
+            Err(err) => self.status = format!("No se pudo crear el entorno: {err}"),
+        }
+        Ok(())
+    }
+
+    fn confirm_sql_prompt(&mut self) -> Result<()> {
+        let Some(prompt) = self.sql.prompt.take() else {
+            return Ok(());
+        };
+        let SqlPrompt { kind, input, .. } = prompt;
+        match kind {
+            SqlPromptKind::NewConnectionName => {
+                let name = input.trim().to_string();
+                if name.is_empty() {
+                    self.status = String::from("Hace falta un nombre");
+                    return Ok(());
+                }
+                self.open_sql_prompt(
+                    SqlPromptKind::NewConnectionPath { name },
+                    "Ruta del archivo sqlite",
+                );
+            }
+            SqlPromptKind::NewConnectionPath { name } => {
+                let db_path = input.trim().to_string();
+                let Some(root) = self.sql.connections_root.clone() else {
+                    return Ok(());
+                };
+                match sql_studio::create_connection(&root, &name, &db_path) {
+                    Ok(path) => {
+                        self.refresh_sql_library();
+                        self.sql.focus_connection(&path);
+                        self.status = format!("Conexion \"{name}\" creada");
+                    }
+                    Err(err) => self.status = format!("No se pudo crear la conexion: {err}"),
+                }
+            }
+            SqlPromptKind::RenameConnection { path } => {
+                let new_name = input.trim().to_string();
+                match sql_studio::rename_connection(&path, &new_name) {
+                    Ok(new_path) => {
+                        if self.sql.active_connection.as_deref() == Some(path.as_path()) {
+                            self.sql.active_connection = Some(new_path.clone());
+                        }
+                        if self
+                            .sql
+                            .loaded_query
+                            .as_deref()
+                            .is_some_and(|q| q.starts_with(&path))
+                        {
+                            self.sql.loaded_query = None;
+                        }
+                        let old_key = studio::collection_env_key(&path);
+                        if let Some(env_name) = self.config.sql_environments.remove(&old_key) {
+                            let new_key = studio::collection_env_key(&new_path);
+                            self.config.sql_environments.insert(new_key, env_name);
+                            self.config.save()?;
+                        }
+                        self.refresh_sql_library();
+                        self.sql.focus_connection(&new_path);
+                        self.status = String::from("Conexion renombrada");
+                    }
+                    Err(err) => self.status = format!("No se pudo renombrar: {err}"),
+                }
+            }
+            SqlPromptKind::RenameQuery { path } => {
+                let new_name = input.trim().to_string();
+                match sql_studio::rename_query(&path, &new_name) {
+                    Ok(new_path) => {
+                        if self.sql.loaded_query.as_deref() == Some(path.as_path()) {
+                            self.sql.loaded_query = Some(new_path.clone());
+                        }
+                        self.refresh_sql_library();
+                        self.sql.focus_query(&new_path);
+                        self.status = String::from("Query renombrada");
+                    }
+                    Err(err) => self.status = format!("No se pudo renombrar: {err}"),
+                }
+            }
+            SqlPromptKind::NewQueryName { connection_dir } => {
+                let name = input.trim().to_string();
+                if name.is_empty() {
+                    self.status = String::from("Hace falta un nombre");
+                    return Ok(());
+                }
+                let contents = self.sql.query_input.clone();
+                match sql_studio::create_query(&connection_dir, &name, &contents) {
+                    Ok(path) => {
+                        self.refresh_sql_library();
+                        self.sql.focus_query(&path);
+                        self.sql.loaded_query = Some(path);
+                        self.status = format!("Query \"{name}\" creada");
+                    }
+                    Err(err) => self.status = format!("No se pudo crear la query: {err}"),
+                }
+            }
+            SqlPromptKind::NewEnvironmentName { connection_dir } => {
+                let name = input.trim().to_string();
+                if name.is_empty() {
+                    self.status = String::from("Hace falta un nombre");
+                    return Ok(());
+                }
+                self.open_sql_prompt(
+                    SqlPromptKind::NewEnvironmentValue {
+                        connection_dir,
+                        name,
+                    },
+                    "Valor (ruta del archivo sqlite)",
+                );
+            }
+            SqlPromptKind::NewEnvironmentValue {
+                connection_dir,
+                name,
+            } => {
+                let value = input.trim().to_string();
+                if value.is_empty() {
+                    self.status = String::from("Hace falta un valor");
+                    return Ok(());
+                }
+                self.open_sql_prompt(
+                    SqlPromptKind::NewEnvironmentSecret {
+                        connection_dir,
+                        name,
+                        value,
+                    },
+                    "Es un valor secreto? y/n",
+                );
+            }
+            SqlPromptKind::NewEnvironmentSecret { .. } => {
+                // Resolved by `handle_sql_secret_prompt_key`'s y/n handler,
+                // never by a plain Enter.
+            }
+            SqlPromptKind::RenameEnvironment {
+                connection_dir,
+                old_name,
+            } => {
+                let new_name = input.trim().to_string();
+                match sql_studio::rename_environment(&connection_dir, &old_name, &new_name) {
+                    Ok(()) => {
+                        let key = studio::collection_env_key(&connection_dir);
+                        if self.config.sql_environments.get(&key).map(String::as_str)
+                            == Some(old_name.as_str())
+                        {
+                            self.config.sql_environments.insert(key, new_name);
+                            self.config.save()?;
+                        }
+                        self.refresh_sql_library();
+                        self.sql.focus_connection(&connection_dir);
+                        self.status = String::from("Entorno renombrado");
+                    }
+                    Err(err) => self.status = format!("No se pudo renombrar: {err}"),
+                }
+            }
+            SqlPromptKind::ConfirmDeleteConnection { path, label } => {
+                match sql_studio::delete_connection(&path) {
+                    Ok(()) => {
+                        if self.sql.active_connection.as_deref() == Some(path.as_path()) {
+                            self.sql.active_connection = None;
+                        }
+                        if self
+                            .sql
+                            .loaded_query
+                            .as_deref()
+                            .is_some_and(|q| q.starts_with(&path))
+                        {
+                            self.sql.loaded_query = None;
+                        }
+                        let key = studio::collection_env_key(&path);
+                        if self.config.sql_environments.remove(&key).is_some() {
+                            self.config.save()?;
+                        }
+                        self.refresh_sql_library();
+                        self.status = format!("Borrada {label}");
+                    }
+                    Err(err) => self.status = format!("No se pudo borrar: {err}"),
+                }
+            }
+            SqlPromptKind::ConfirmDeleteQuery { path, label } => {
+                match sql_studio::delete_query(&path) {
+                    Ok(()) => {
+                        if self.sql.loaded_query.as_deref() == Some(path.as_path()) {
+                            self.sql.loaded_query = None;
+                            self.sql.query_input.clear();
+                            self.sql.loaded_query_snapshot = String::new();
+                        }
+                        self.refresh_sql_library();
+                        self.status = format!("Borrada {label}");
+                    }
+                    Err(err) => self.status = format!("No se pudo borrar: {err}"),
+                }
+            }
+            SqlPromptKind::ConfirmDeleteEnvironment {
+                connection_dir,
+                name,
+                label,
+            } => match sql_studio::delete_environment(&connection_dir, &name) {
+                Ok(()) => {
+                    let key = studio::collection_env_key(&connection_dir);
+                    if self.config.sql_environments.get(&key).map(String::as_str)
+                        == Some(name.as_str())
+                    {
+                        self.config.sql_environments.remove(&key);
+                        self.config.save()?;
+                    }
+                    self.refresh_sql_library();
+                    self.status = format!("Borrado {label}");
+                }
+                Err(err) => self.status = format!("No se pudo borrar: {err}"),
+            },
+        }
+        Ok(())
+    }
+
+    fn run_sql_query(&mut self) {
+        if self.sql.in_flight.is_some() {
+            self.status = String::from("Ya hay una consulta SQL en curso");
+            return;
+        }
+        let Some(connection_path) = self.sql.active_connection.clone() else {
+            self.status = String::from("Elegi una conexion en el arbol (Enter)");
+            return;
+        };
+        let resolved = self
+            .sql
+            .connections
+            .iter()
+            .find(|connection| connection.path == connection_path)
+            .and_then(|connection| {
+                if connection.environments.is_empty() {
+                    return None;
+                }
+                let env_name = studio::env_name_in(&self.config.sql_environments, &connection.path)
+                    .map(String::from)
+                    .or_else(|| {
+                        (connection.environments.len() == 1)
+                            .then(|| connection.environments[0].name.clone())
+                    })?;
+                let environment = connection
+                    .environments
+                    .iter()
+                    .find(|e| e.name == env_name)?;
+                Some((env_name, environment.value.clone()))
+            });
+        let Some((env_name, db_path)) = resolved else {
+            self.status =
+                String::from("Elegi un entorno en el arbol (Enter), o crea uno con Shift+E");
+            return;
+        };
+        let query = self.sql.query_input.trim().to_string();
+        if query.is_empty() {
+            self.status = String::from("Escribi una consulta SQL");
+            return;
+        }
+        if let Some(loaded) = self.sql.loaded_query.clone() {
+            if let Err(err) = sql_studio::write_query(&loaded, &self.sql.query_input) {
+                self.status = format!("No se pudo guardar la query: {err}");
+                return;
+            }
+        }
+        self.sql.loaded_query_snapshot = self.sql.query_input.clone();
+        self.sql.last_run_query = query.clone();
+        self.sql.last_run_db_path = db_path.clone();
+        self.status = format!("Ejecutando en [{env_name}]: {query}");
+        self.sql.in_flight = Some(sql::spawn_query(db_path, query, 0));
+        self.sql.focus = SqlFocus::Results;
+    }
+
+    pub fn sql_busy(&self) -> bool {
+        self.sql.in_flight.is_some()
+    }
+
+    /// Collects the result of the query on the wire once it is done. Called
+    /// on every tick of the UI loop, mirroring `poll_http`.
+    pub fn poll_sql(&mut self) {
+        let Some(in_flight) = self.sql.in_flight.as_ref() else {
+            return;
+        };
+        let Some(result) = in_flight.try_finish() else {
+            return;
+        };
+        self.sql.in_flight = None;
+        self.status = match (&result.error, result.rows_affected) {
+            (Some(err), _) => format!("Error SQL: {err}"),
+            (None, Some(affected)) => {
+                format!(
+                    "{affected} fila(s) afectada(s) · {}",
+                    http::format_elapsed(result.elapsed)
+                )
+            }
+            (None, None) if result.rows.is_empty() && result.offset == 0 => {
+                format!("Sin filas · {}", http::format_elapsed(result.elapsed))
+            }
+            (None, None) => {
+                let start = result.offset + 1;
+                let end = result.offset + result.rows.len();
+                let more = if result.has_more {
+                    " · PageDown para mas"
+                } else {
+                    ""
+                };
+                format!(
+                    "Filas {start}-{end}{more} · {}",
+                    http::format_elapsed(result.elapsed)
+                )
+            }
+        };
+        self.sql.row_offset = 0;
+        self.sql.col_offset = 0;
+        self.sql.result = Some(result);
     }
 
     /// Keys of the focused response pane. Returns false so everything else
@@ -5349,6 +6141,7 @@ fn palette_aliases(name: &str) -> &'static [&'static str] {
         "git" => &["repo", "version"],
         "@http" => &["postman", "bruno", "api", "request", "rest"],
         "@jsonviewer" => &["visor", "formatear json"],
+        "@sql" => &["database", "db", "base de datos", "conexiones", "query"],
         "toc" => &["indice", "índice", "headings", "tabla"],
         "recent" => &["recientes", "historial", "ultimos", "últimos"],
         "@commands" => &["ayuda", "comandos", "help"],

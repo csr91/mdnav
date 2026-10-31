@@ -15,6 +15,8 @@ use crate::{
     },
     config::{config_path, TreeInfoMode},
     http::{self, HttpResponse},
+    sql::QueryResult,
+    sql_studio::{SqlFocus, SqlPromptKind, SqlRow},
     strings::Strings,
     studio::{self, CellCol, EditorCursor, EditorTab, StudioPanel, StudioPrompt},
 };
@@ -29,6 +31,8 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     if app.studio.active {
         render_http_studio(frame, areas[0], app);
+    } else if app.sql.active {
+        render_sql_studio(frame, areas[0], app);
     } else if app.json_viewer_active {
         render_json_viewer(frame, areas[0], app);
     } else if app.fullscreen == FullscreenPanel::Tree {
@@ -73,6 +77,35 @@ pub fn render(frame: &mut Frame, app: &App) {
                 } else {
                     Color::Green
                 })
+                .add_modifier(Modifier::BOLD),
+        )))
+        .block(Block::default().borders(Borders::TOP))
+    } else if app.sql.active {
+        let text = if app.sql.exit_prompt {
+            String::from("SQL  g guarda y sale · d descarta · Esc sigue editando")
+        } else if app.sql.prompt.is_some() {
+            String::from("SQL  Enter confirma · Esc cancela")
+        } else {
+            match app.sql.focus {
+                SqlFocus::Tree => String::from(
+                    "SQL  j/k mover · Enter abrir/activar · c conexion · Shift+E entorno · n query · r renombrar · y duplicar · x borrar · Tab · Esc",
+                ),
+                SqlFocus::Query => String::from("SQL  Enter ejecuta · Tab cambia de panel · Esc cierra"),
+                SqlFocus::Results => {
+                    if app.sql.in_flight.is_some() {
+                        String::from("SQL  x cancela la consulta · Esc cierra")
+                    } else {
+                        String::from(
+                            "SQL  j/k filas · h/l columnas · PageDown/PageUp paginas · Tab · Esc cierra",
+                        )
+                    }
+                }
+            }
+        };
+        Paragraph::new(Line::from(Span::styled(
+            text,
+            Style::default()
+                .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )))
         .block(Block::default().borders(Borders::TOP))
@@ -252,6 +285,9 @@ fn mode_label(app: &App) -> (&'static str, Color) {
         Overlay::None => {
             if app.studio.active {
                 return ("HTTP", Color::Green);
+            }
+            if app.sql.active {
+                return ("SQL", Color::Green);
             }
             if app.json_viewer_active {
                 return ("JSON", Color::Green);
@@ -1171,6 +1207,349 @@ fn studio_panes(area: Rect) -> StudioPanes {
             editor: horizontal[1],
             response: vertical[1],
         }
+    }
+}
+
+// ── SQL studio (phase 2: tree-backed connection/query library) ──────────────
+
+fn render_sql_studio(frame: &mut Frame, area: Rect, app: &App) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(32), Constraint::Min(20)])
+        .split(area);
+
+    render_sql_tree(frame, columns[0], app);
+
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(columns[1]);
+
+    render_sql_query_field(frame, right[0], app);
+    render_sql_results(frame, right[1], app);
+
+    if app.sql.exit_prompt {
+        render_sql_exit_popup(frame);
+    } else if app.sql.prompt.is_some() {
+        render_sql_prompt_popup(frame, app);
+    }
+}
+
+fn render_sql_exit_popup(frame: &mut Frame) {
+    let area = frame.area();
+    let width = 56.min(area.width.saturating_sub(4)).max(20);
+    let height = 4.min(area.height.saturating_sub(2));
+    let popup_area = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .title(" SQL ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Hay cambios sin guardar. g guarda y sale · d descarta · Esc sigue editando",
+            Style::default().fg(Color::Yellow),
+        )))
+        .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_sql_tree(frame: &mut Frame, area: Rect, app: &App) {
+    let focused = app.sql.focus == SqlFocus::Tree;
+    let block = Block::default()
+        .title(" Conexiones ")
+        .borders(Borders::ALL)
+        .border_style(border_style(focused));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = app.sql.visible_rows();
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Sin conexiones. c crea una nueva.",
+                Style::default().fg(Color::DarkGray),
+            )))
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let selected = focused && index == app.sql.cursor;
+            let (label, mut style) = match *row {
+                SqlRow::Connection(ci) => {
+                    let connection = &app.sql.connections[ci];
+                    let marker = if connection.expanded { "▾" } else { "▸" };
+                    let active =
+                        app.sql.active_connection.as_deref() == Some(connection.path.as_path());
+                    let suffix = if active { "  (activa)" } else { "" };
+                    (
+                        format!("{marker} {}{suffix}", connection.name),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                }
+                SqlRow::Environment(ci, ei) => {
+                    let connection = &app.sql.connections[ci];
+                    let environment = &connection.environments[ei];
+                    let active =
+                        studio::env_name_in(&app.config.sql_environments, &connection.path)
+                            == Some(environment.name.as_str());
+                    let lock = if environment.secret { " 🔒" } else { "" };
+                    let suffix = if active { "  (activo)" } else { "" };
+                    (
+                        format!("    env: {}{lock}{suffix}", environment.name),
+                        Style::default().fg(Color::Magenta),
+                    )
+                }
+                SqlRow::Query(ci, qi) => {
+                    let query = &app.sql.connections[ci].queries[qi];
+                    (
+                        format!("    {}", query.name),
+                        Style::default().fg(Color::White),
+                    )
+                }
+            };
+            if selected {
+                style = style.bg(Color::DarkGray);
+            }
+            ListItem::new(Line::from(Span::styled(label, style)))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), inner);
+}
+
+fn render_sql_query_field(frame: &mut Frame, area: Rect, app: &App) {
+    let focused = app.sql.focus == SqlFocus::Query;
+    let title = match app
+        .sql
+        .active_connection
+        .as_ref()
+        .and_then(|path| app.sql.connections.iter().find(|c| &c.path == path))
+    {
+        Some(connection) => format!(" Query · {} ", connection.name),
+        None => String::from(" Query · (elegi una conexion en el arbol) "),
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(border_style(focused));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut spans = vec![Span::styled(
+        app.sql.query_input.clone(),
+        Style::default().fg(Color::White),
+    )];
+    if focused {
+        spans.push(Span::styled("█", Style::default().fg(Color::Green)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+fn render_sql_prompt_popup(frame: &mut Frame, app: &App) {
+    let Some(prompt) = app.sql.prompt.as_ref() else {
+        return;
+    };
+    let is_confirm = matches!(
+        prompt.kind,
+        SqlPromptKind::ConfirmDeleteConnection { .. }
+            | SqlPromptKind::ConfirmDeleteQuery { .. }
+            | SqlPromptKind::ConfirmDeleteEnvironment { .. }
+            | SqlPromptKind::NewEnvironmentSecret { .. }
+    );
+    let area = frame.area();
+    let width = 60.min(area.width.saturating_sub(4)).max(20);
+    let height = if is_confirm { 4 } else { 5 }.min(area.height.saturating_sub(2));
+    let popup_area = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .title(" SQL ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let lines = if is_confirm {
+        vec![Line::from(Span::styled(
+            prompt.title.clone(),
+            Style::default().fg(Color::Yellow),
+        ))]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                prompt.title.clone(),
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(prompt.input.clone(), Style::default().fg(Color::White)),
+                Span::styled("█", Style::default().fg(Color::Green)),
+            ]),
+        ]
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_sql_results(frame: &mut Frame, area: Rect, app: &App) {
+    let focused = app.sql.focus == SqlFocus::Results;
+    let block = Block::default()
+        .title(" Resultado ")
+        .borders(Borders::ALL)
+        .border_style(border_style(focused));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if let Some(in_flight) = app.sql.in_flight.as_ref() {
+        let elapsed = in_flight.started.elapsed();
+        let spinner = SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()];
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!(
+                        "{spinner} Ejecutando en {}… {}",
+                        in_flight.db_path,
+                        http::format_elapsed(elapsed)
+                    ),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "x cancela la consulta",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
+    let Some(result) = app.sql.result.as_ref() else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Indica un archivo sqlite, escribi una consulta y Enter para ejecutarla.",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            inner,
+        );
+        return;
+    };
+
+    if let Some(error) = result.error.as_ref() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                error.clone(),
+                Style::default().fg(Color::Red),
+            )))
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    if let Some(affected) = result.rows_affected {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(
+                    "{affected} fila(s) afectada(s) · {}",
+                    http::format_elapsed(result.elapsed)
+                ),
+                Style::default().fg(Color::Green),
+            ))),
+            inner,
+        );
+        return;
+    }
+
+    render_sql_table(frame, inner, result, app.sql.row_offset, app.sql.col_offset);
+}
+
+fn render_sql_table(
+    frame: &mut Frame,
+    area: Rect,
+    result: &QueryResult,
+    row_offset: usize,
+    col_offset: usize,
+) {
+    if result.columns.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Sin filas",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            area,
+        );
+        return;
+    }
+
+    const COL_WIDTH: usize = 18;
+    let visible_cols = (area.width as usize / COL_WIDTH)
+        .max(1)
+        .min(result.columns.len());
+    let col_start = col_offset.min(result.columns.len() - visible_cols);
+    let col_end = col_start + visible_cols;
+
+    let cell = |text: &str, style: Style| -> Span<'static> {
+        Span::styled(
+            format!(
+                "{:<width$}",
+                truncate(text, COL_WIDTH - 1),
+                width = COL_WIDTH
+            ),
+            style,
+        )
+    };
+
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::from(
+        result.columns[col_start..col_end]
+            .iter()
+            .map(|name| cell(name, header_style))
+            .collect::<Vec<_>>(),
+    )];
+
+    let visible_rows = area.height.saturating_sub(1) as usize;
+    for row in result.rows.iter().skip(row_offset).take(visible_rows) {
+        lines.push(Line::from(
+            row[col_start..col_end]
+                .iter()
+                .map(|value| cell(value, Style::default().fg(Color::White)))
+                .collect::<Vec<_>>(),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let truncated: String = text.chars().take(max.saturating_sub(1)).collect();
+        format!("{truncated}…")
     }
 }
 
