@@ -1297,7 +1297,11 @@ fn render_sql_tree(frame: &mut Frame, area: Rect, app: &App) {
                         app.sql.active_connection.as_deref() == Some(connection.path.as_path());
                     let suffix = if active { "  (activa)" } else { "" };
                     (
-                        format!("{marker} {}{suffix}", connection.name),
+                        format!(
+                            "{marker} {} [{}]{suffix}",
+                            connection.name,
+                            connection.engine.as_str()
+                        ),
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
@@ -1314,6 +1318,47 @@ fn render_sql_tree(frame: &mut Frame, area: Rect, app: &App) {
                     (
                         format!("    env: {}{lock}{suffix}", environment.name),
                         Style::default().fg(Color::Magenta),
+                    )
+                }
+                SqlRow::TablesGroup(ci) => {
+                    let connection = &app.sql.connections[ci];
+                    let marker = if connection.tables_expanded {
+                        "▾"
+                    } else {
+                        "▸"
+                    };
+                    let loading = app
+                        .sql
+                        .schema_in_flight
+                        .as_ref()
+                        .is_some_and(|(loading_ci, _)| *loading_ci == ci);
+                    let label = if loading {
+                        format!("    {marker} Tablas (cargando...)")
+                    } else if let Some(err) = &connection.tables_error {
+                        format!("    {marker} Tablas (error: {err})")
+                    } else if let Some(tables) = &connection.tables {
+                        format!("    {marker} Tablas ({})", tables.len())
+                    } else {
+                        format!("    {marker} Tablas")
+                    };
+                    (label, Style::default().fg(Color::Yellow))
+                }
+                SqlRow::Table(ci, ti) => {
+                    let table = &app.sql.connections[ci].tables.as_ref().unwrap()[ti];
+                    let marker = if table.expanded { "▾" } else { "▸" };
+                    (
+                        format!("      {marker} {} ({})", table.name, table.columns.len()),
+                        Style::default().fg(Color::White),
+                    )
+                }
+                SqlRow::Column(ci, ti, coli) => {
+                    let column =
+                        &app.sql.connections[ci].tables.as_ref().unwrap()[ti].columns[coli];
+                    let pk = if column.primary_key { " 🔑" } else { "" };
+                    let null = if column.nullable { "" } else { " NOT NULL" };
+                    (
+                        format!("        {}: {}{pk}{null}", column.name, column.data_type),
+                        Style::default().fg(Color::DarkGray),
                     )
                 }
                 SqlRow::Query(ci, qi) => {

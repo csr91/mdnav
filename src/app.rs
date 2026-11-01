@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -3235,7 +3235,7 @@ Elegi un environment con e en el estudio, o con :@http env.",
         self.http.session.responses.insert(path, response);
     }
 
-    // ── SQL studio (phase 3: environments with secrets + exit confirm) ─────────
+    // ── SQL studio ───────────────────────────────────────────────────────────
 
     fn open_sql_studio(&mut self) -> Result<()> {
         let dir = sql_studio::connections_dir(&self.config.sql_connections_dir)?;
@@ -3462,6 +3462,7 @@ Elegi un environment con e en el estudio, o con :@http env.",
         }
         self.status = format!("Cargando desde la fila {}...", offset + 1);
         self.sql.in_flight = Some(sql::spawn_query(
+            self.sql.last_run_engine,
             self.sql.last_run_db_path.clone(),
             self.sql.last_run_query.clone(),
             offset,
@@ -3488,9 +3489,45 @@ Elegi un environment con e en el estudio, o con :@http env.",
                 let path = self.sql.connections[ci].queries[qi].path.clone();
                 self.open_sql_query(path)?;
             }
+            Some(SqlRow::TablesGroup(ci)) => self.toggle_sql_tables(ci),
+            Some(SqlRow::Table(ci, ti)) => {
+                if let Some(table) = self.sql.connections[ci]
+                    .tables
+                    .as_mut()
+                    .and_then(|tables| tables.get_mut(ti))
+                {
+                    table.expanded = !table.expanded;
+                }
+            }
+            Some(SqlRow::Column(..)) => {}
             None => self.status = String::from("No hay conexiones. c crea una nueva"),
         }
         Ok(())
+    }
+
+    /// Expands/collapses a connection's "Tablas" branch, loading the schema
+    /// on first expand (or re-loading it if it previously failed).
+    fn toggle_sql_tables(&mut self, ci: usize) {
+        if self.sql.schema_in_flight.is_some() {
+            self.status = String::from("Ya se esta cargando el esquema de otra conexion");
+            return;
+        }
+        let connection = &self.sql.connections[ci];
+        if connection.tables.is_some() {
+            self.sql.connections[ci].tables_expanded = !connection.tables_expanded;
+            return;
+        }
+        let resolved = resolve_sql_environment(connection, &self.config.sql_environments);
+        self.sql.connections[ci].tables_expanded = true;
+        let Some((_, engine, value)) = resolved else {
+            self.sql.connections[ci].tables_error = Some(String::from(
+                "Elegi un entorno primero (Enter sobre un entorno)",
+            ));
+            return;
+        };
+        self.sql.connections[ci].tables_error = None;
+        self.status = String::from("Cargando tablas...");
+        self.sql.schema_in_flight = Some((ci, sql::spawn_schema(engine, value)));
     }
 
     fn open_sql_query(&mut self, path: PathBuf) -> Result<()> {
@@ -3564,7 +3601,9 @@ Elegi un environment con e en el estudio, o con :@http env.",
                     name,
                 );
             }
-            None => self.status = String::from("Nada para renombrar"),
+            Some(SqlRow::TablesGroup(_) | SqlRow::Table(..) | SqlRow::Column(..)) | None => {
+                self.status = String::from("Nada para renombrar")
+            }
         }
     }
 
@@ -3604,7 +3643,9 @@ Elegi un environment con e en el estudio, o con :@http env.",
                     Err(err) => self.status = format!("No se pudo duplicar: {err}"),
                 }
             }
-            None => self.status = String::from("Nada para duplicar"),
+            Some(SqlRow::TablesGroup(_) | SqlRow::Table(..) | SqlRow::Column(..)) | None => {
+                self.status = String::from("Nada para duplicar")
+            }
         }
     }
 
@@ -3641,7 +3682,9 @@ Elegi un environment con e en el estudio, o con :@http env.",
                 let title = format!("Borrar {label}? Enter confirma / Esc cancela");
                 self.open_sql_prompt(SqlPromptKind::ConfirmDeleteQuery { path, label }, &title);
             }
-            None => self.status = String::from("Nada para borrar"),
+            Some(SqlRow::TablesGroup(_) | SqlRow::Table(..) | SqlRow::Column(..)) | None => {
+                self.status = String::from("Nada para borrar")
+            }
         }
     }
 
@@ -3728,16 +3771,26 @@ Elegi un environment con e en el estudio, o con :@http env.",
                     return Ok(());
                 }
                 self.open_sql_prompt(
-                    SqlPromptKind::NewConnectionPath { name },
-                    "Ruta del archivo sqlite",
+                    SqlPromptKind::NewConnectionEngine { name },
+                    "Motor: sqlite / postgres / mysql",
                 );
             }
-            SqlPromptKind::NewConnectionPath { name } => {
-                let db_path = input.trim().to_string();
+            SqlPromptKind::NewConnectionEngine { name } => {
+                let Some(engine) = sql::Engine::parse(&input) else {
+                    self.status = String::from("Motor invalido. Usa sqlite, postgres o mysql");
+                    return Ok(());
+                };
+                self.open_sql_prompt(
+                    SqlPromptKind::NewConnectionValue { name, engine },
+                    engine.value_hint(),
+                );
+            }
+            SqlPromptKind::NewConnectionValue { name, engine } => {
+                let value = input.trim().to_string();
                 let Some(root) = self.sql.connections_root.clone() else {
                     return Ok(());
                 };
-                match sql_studio::create_connection(&root, &name, &db_path) {
+                match sql_studio::create_connection(&root, &name, engine, &value) {
                     Ok(path) => {
                         self.refresh_sql_library();
                         self.sql.focus_connection(&path);
@@ -3811,12 +3864,19 @@ Elegi un environment con e en el estudio, o con :@http env.",
                     self.status = String::from("Hace falta un nombre");
                     return Ok(());
                 }
+                let hint = self
+                    .sql
+                    .connections
+                    .iter()
+                    .find(|connection| connection.path == connection_dir)
+                    .map(|connection| connection.engine.value_hint())
+                    .unwrap_or_else(|| sql::Engine::Sqlite.value_hint());
                 self.open_sql_prompt(
                     SqlPromptKind::NewEnvironmentValue {
                         connection_dir,
                         name,
                     },
-                    "Valor (ruta del archivo sqlite)",
+                    hint,
                 );
             }
             SqlPromptKind::NewEnvironmentValue {
@@ -3931,28 +3991,17 @@ Elegi un environment con e en el estudio, o con :@http env.",
             self.status = String::from("Elegi una conexion en el arbol (Enter)");
             return;
         };
-        let resolved = self
+        let Some(connection) = self
             .sql
             .connections
             .iter()
             .find(|connection| connection.path == connection_path)
-            .and_then(|connection| {
-                if connection.environments.is_empty() {
-                    return None;
-                }
-                let env_name = studio::env_name_in(&self.config.sql_environments, &connection.path)
-                    .map(String::from)
-                    .or_else(|| {
-                        (connection.environments.len() == 1)
-                            .then(|| connection.environments[0].name.clone())
-                    })?;
-                let environment = connection
-                    .environments
-                    .iter()
-                    .find(|e| e.name == env_name)?;
-                Some((env_name, environment.value.clone()))
-            });
-        let Some((env_name, db_path)) = resolved else {
+        else {
+            return;
+        };
+        let Some((env_name, engine, conn_value)) =
+            resolve_sql_environment(connection, &self.config.sql_environments)
+        else {
             self.status =
                 String::from("Elegi un entorno en el arbol (Enter), o crea uno con Shift+E");
             return;
@@ -3969,20 +4018,22 @@ Elegi un environment con e en el estudio, o con :@http env.",
             }
         }
         self.sql.loaded_query_snapshot = self.sql.query_input.clone();
+        self.sql.last_run_engine = engine;
         self.sql.last_run_query = query.clone();
-        self.sql.last_run_db_path = db_path.clone();
+        self.sql.last_run_db_path = conn_value.clone();
         self.status = format!("Ejecutando en [{env_name}]: {query}");
-        self.sql.in_flight = Some(sql::spawn_query(db_path, query, 0));
+        self.sql.in_flight = Some(sql::spawn_query(engine, conn_value, query, 0));
         self.sql.focus = SqlFocus::Results;
     }
 
     pub fn sql_busy(&self) -> bool {
-        self.sql.in_flight.is_some()
+        self.sql.in_flight.is_some() || self.sql.schema_in_flight.is_some()
     }
 
     /// Collects the result of the query on the wire once it is done. Called
     /// on every tick of the UI loop, mirroring `poll_http`.
     pub fn poll_sql(&mut self) {
+        self.poll_sql_schema();
         let Some(in_flight) = self.sql.in_flight.as_ref() else {
             return;
         };
@@ -4018,6 +4069,44 @@ Elegi un environment con e en el estudio, o con :@http env.",
         self.sql.row_offset = 0;
         self.sql.col_offset = 0;
         self.sql.result = Some(result);
+    }
+
+    /// Collects a schema load (table/column listing) once its worker is
+    /// done, mirroring `poll_sql`'s shape for queries.
+    fn poll_sql_schema(&mut self) {
+        let Some((ci, in_flight)) = self.sql.schema_in_flight.as_ref() else {
+            return;
+        };
+        let Some(result) = in_flight.try_finish() else {
+            return;
+        };
+        let ci = *ci;
+        self.sql.schema_in_flight = None;
+        match result {
+            Ok(tables) => {
+                self.status = format!("{} tabla(s) cargadas", tables.len());
+                if let Some(connection) = self.sql.connections.get_mut(ci) {
+                    connection.tables = Some(
+                        tables
+                            .into_iter()
+                            .map(|table| sql_studio::SqlSchemaTable {
+                                name: table.name,
+                                columns: table.columns,
+                                expanded: false,
+                            })
+                            .collect(),
+                    );
+                    connection.tables_error = None;
+                }
+            }
+            Err(err) => {
+                self.status = format!("No se pudo cargar el esquema: {err}");
+                if let Some(connection) = self.sql.connections.get_mut(ci) {
+                    connection.tables_expanded = false;
+                    connection.tables_error = Some(err);
+                }
+            }
+        }
     }
 
     /// Keys of the focused response pane. Returns false so everything else
@@ -6117,6 +6206,29 @@ Elegi un environment con e en el estudio, o con :@http env.",
         self.overlay = Overlay::None;
         self.status = String::from(status);
     }
+}
+
+/// Picks which environment a connection should run against: the one chosen
+/// in `config.sql_environments`, or the sole environment if there is
+/// exactly one and none has been chosen yet. Shared by running a query and
+/// loading a connection's table list, so both follow the same rule.
+fn resolve_sql_environment(
+    connection: &sql_studio::SqlConnection,
+    config_envs: &BTreeMap<String, String>,
+) -> Option<(String, sql::Engine, String)> {
+    if connection.environments.is_empty() {
+        return None;
+    }
+    let env_name = studio::env_name_in(config_envs, &connection.path)
+        .map(String::from)
+        .or_else(|| {
+            (connection.environments.len() == 1).then(|| connection.environments[0].name.clone())
+        })?;
+    let environment = connection
+        .environments
+        .iter()
+        .find(|entry| entry.name == env_name)?;
+    Some((env_name, connection.engine, environment.value.clone()))
 }
 
 fn git_status_label(status: GitStatusKind) -> &'static str {

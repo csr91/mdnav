@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     http,
-    sql::{self, InFlight, QueryResult},
+    sql::{self, ColumnInfo, Engine, InFlight, QueryResult, SchemaInFlight},
     studio::validate_entry_name,
 };
 
@@ -62,13 +62,29 @@ pub struct SqlQueryEntry {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A table and its columns, cached in memory once loaded. Never written to
+/// `connection.toml`: this is live database state, not configuration, and
+/// would just go stale sitting on disk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SqlSchemaTable {
+    pub name: String,
+    pub columns: Vec<ColumnInfo>,
+    pub expanded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct SqlConnection {
     pub name: String,
     pub path: PathBuf,
+    pub engine: Engine,
     pub environments: Vec<SqlEnvironmentEntry>,
     pub queries: Vec<SqlQueryEntry>,
     pub expanded: bool,
+    /// Whether the "Tablas" branch is expanded. Loading is lazy and keyed
+    /// off this: expanding it the first time triggers `spawn_schema`.
+    pub tables_expanded: bool,
+    pub tables: Option<Vec<SqlSchemaTable>>,
+    pub tables_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +92,10 @@ pub enum SqlRow {
     Connection(usize),
     Environment(usize, usize),
     Query(usize, usize),
+    /// The "Tablas" branch header under a connection.
+    TablesGroup(usize),
+    Table(usize, usize),
+    Column(usize, usize, usize),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,8 +108,12 @@ pub enum SqlFocus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SqlPromptKind {
     NewConnectionName,
-    NewConnectionPath {
+    NewConnectionEngine {
         name: String,
+    },
+    NewConnectionValue {
+        name: String,
+        engine: Engine,
     },
     RenameConnection {
         path: PathBuf,
@@ -151,9 +175,10 @@ pub struct SqlStudio {
     pub query_input: String,
     pub in_flight: Option<InFlight>,
     pub result: Option<QueryResult>,
-    /// The query text and db path the current/last page came from —
-    /// fetching another page re-runs exactly this, regardless of what the
-    /// user has since typed into `query_input`.
+    /// The engine, query text and connection value the current/last page
+    /// came from — fetching another page re-runs exactly this, regardless
+    /// of what the user has since typed into `query_input`.
+    pub last_run_engine: Engine,
     pub last_run_query: String,
     pub last_run_db_path: String,
     pub row_offset: usize,
@@ -162,6 +187,8 @@ pub struct SqlStudio {
     /// Showing the g/d/Esc save-or-discard prompt because the query editor
     /// has unsaved text and the user tried to leave.
     pub exit_prompt: bool,
+    /// Which connection (by index) is loading its table list, if any.
+    pub schema_in_flight: Option<(usize, SchemaInFlight)>,
 }
 
 impl Default for SqlStudio {
@@ -178,12 +205,14 @@ impl Default for SqlStudio {
             query_input: String::new(),
             in_flight: None,
             result: None,
+            last_run_engine: Engine::default(),
             last_run_query: String::new(),
             last_run_db_path: String::new(),
             row_offset: 0,
             col_offset: 0,
             prompt: None,
             exit_prompt: false,
+            schema_in_flight: None,
         }
     }
 }
@@ -194,6 +223,7 @@ impl SqlStudio {
     pub fn close(&mut self) {
         self.active = false;
         self.in_flight = None;
+        self.schema_in_flight = None;
         self.prompt = None;
         self.exit_prompt = false;
     }
@@ -228,6 +258,19 @@ impl SqlStudio {
                 for ei in 0..connection.environments.len() {
                     rows.push(SqlRow::Environment(ci, ei));
                 }
+                rows.push(SqlRow::TablesGroup(ci));
+                if connection.tables_expanded {
+                    if let Some(tables) = &connection.tables {
+                        for (ti, table) in tables.iter().enumerate() {
+                            rows.push(SqlRow::Table(ci, ti));
+                            if table.expanded {
+                                for coli in 0..table.columns.len() {
+                                    rows.push(SqlRow::Column(ci, ti, coli));
+                                }
+                            }
+                        }
+                    }
+                }
                 for qi in 0..connection.queries.len() {
                     rows.push(SqlRow::Query(ci, qi));
                 }
@@ -245,9 +288,12 @@ impl SqlStudio {
     /// query row alike.
     pub fn selected_connection_dir(&self) -> Option<PathBuf> {
         match self.selected_row()? {
-            SqlRow::Connection(ci) | SqlRow::Environment(ci, _) | SqlRow::Query(ci, _) => {
-                Some(self.connections[ci].path.clone())
-            }
+            SqlRow::Connection(ci)
+            | SqlRow::Environment(ci, _)
+            | SqlRow::Query(ci, _)
+            | SqlRow::TablesGroup(ci)
+            | SqlRow::Table(ci, _)
+            | SqlRow::Column(ci, _, _) => Some(self.connections[ci].path.clone()),
         }
     }
 
@@ -396,6 +442,9 @@ pub fn refresh(dir: &Path, previous: &[SqlConnection]) -> Vec<SqlConnection> {
     for connection in connections.iter_mut() {
         if let Some(prior) = previous.iter().find(|p| p.path == connection.path) {
             connection.expanded = prior.expanded;
+            connection.tables_expanded = prior.tables_expanded;
+            connection.tables = prior.tables.clone();
+            connection.tables_error = prior.tables_error.clone();
         }
     }
     connections
@@ -425,9 +474,13 @@ fn load_connection(dir: &Path) -> Option<SqlConnection> {
     Some(SqlConnection {
         name,
         path: http::canonical_path(dir),
+        engine: Engine::from_stored(&file.engine),
         environments: resolve_environments(dir, &file),
         queries: list_queries(dir),
         expanded: false,
+        tables_expanded: false,
+        tables: None,
+        tables_error: None,
     })
 }
 
@@ -537,11 +590,11 @@ fn migrate_legacy_path(file: &mut ConnectionFile) {
     }
 }
 
-pub fn create_connection(root: &Path, name: &str, db_path: &str) -> Result<PathBuf> {
+pub fn create_connection(root: &Path, name: &str, engine: Engine, value: &str) -> Result<PathBuf> {
     validate_entry_name(name)?;
-    let db_path = db_path.trim();
-    if db_path.is_empty() {
-        bail!("Hace falta la ruta del archivo sqlite");
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("Hace falta el valor de conexion");
     }
     let folder = root.join(http::sanitize_file_name(name));
     if folder.exists() {
@@ -550,11 +603,11 @@ pub fn create_connection(root: &Path, name: &str, db_path: &str) -> Result<PathB
     fs::create_dir_all(&folder)?;
     write_connection_file(
         &folder,
-        "sqlite",
+        engine.as_str(),
         vec![EnvironmentFile {
             name: DEFAULT_ENVIRONMENT.to_string(),
             secret: false,
-            value: Some(db_path.to_string()),
+            value: Some(value.to_string()),
         }],
     )?;
     Ok(http::canonical_path(&folder))
@@ -851,7 +904,8 @@ mod tests {
         let db_path = dir.join("datos.sqlite");
         sql::init_example_db(&db_path).unwrap();
 
-        let created = create_connection(&dir, "local", &db_path.to_string_lossy()).unwrap();
+        let created =
+            create_connection(&dir, "local", Engine::Sqlite, &db_path.to_string_lossy()).unwrap();
         assert!(created.join(CONNECTION_FILE).exists());
 
         let renamed = rename_connection(&created, "principal").unwrap();
@@ -875,7 +929,8 @@ mod tests {
         let dir = temp_dir("query-crud");
         let db_path = dir.join("datos.sqlite");
         sql::init_example_db(&db_path).unwrap();
-        let connection_dir = create_connection(&dir, "local", &db_path.to_string_lossy()).unwrap();
+        let connection_dir =
+            create_connection(&dir, "local", Engine::Sqlite, &db_path.to_string_lossy()).unwrap();
 
         let created = create_query(&connection_dir, "listar", "SELECT 1;").unwrap();
         assert_eq!(read_query(&created).unwrap(), "SELECT 1;");
@@ -911,7 +966,7 @@ mod tests {
         let dir = temp_dir("refresh");
         let db_path = dir.join("datos.sqlite");
         sql::init_example_db(&db_path).unwrap();
-        create_connection(&dir, "local", &db_path.to_string_lossy()).unwrap();
+        create_connection(&dir, "local", Engine::Sqlite, &db_path.to_string_lossy()).unwrap();
 
         let mut connections = list_connections(&dir);
         connections[0].expanded = true;
@@ -946,7 +1001,8 @@ mod tests {
         let dir = temp_dir("secret-env");
         let db_path = dir.join("datos.sqlite");
         sql::init_example_db(&db_path).unwrap();
-        let connection_dir = create_connection(&dir, "local", &db_path.to_string_lossy()).unwrap();
+        let connection_dir =
+            create_connection(&dir, "local", Engine::Sqlite, &db_path.to_string_lossy()).unwrap();
 
         create_environment(
             &connection_dir,
@@ -971,7 +1027,8 @@ mod tests {
         let dir = temp_dir("env-crud");
         let db_path = dir.join("datos.sqlite");
         sql::init_example_db(&db_path).unwrap();
-        let connection_dir = create_connection(&dir, "local", &db_path.to_string_lossy()).unwrap();
+        let connection_dir =
+            create_connection(&dir, "local", Engine::Sqlite, &db_path.to_string_lossy()).unwrap();
         create_environment(&connection_dir, "staging", "secreta", true).unwrap();
 
         rename_environment(&connection_dir, "staging", "qa").unwrap();
