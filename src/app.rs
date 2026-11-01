@@ -3378,6 +3378,7 @@ Elegi un environment con e en el estudio, o con :@http env.",
         match key.code {
             KeyCode::Esc => self.try_close_sql(),
             KeyCode::Tab => self.sql.cycle_focus(),
+            KeyCode::BackTab => self.sql.cycle_focus_back(),
             KeyCode::Up | KeyCode::Char('k') => self.sql.move_cursor(-1),
             KeyCode::Down | KeyCode::Char('j') => self.sql.move_cursor(1),
             KeyCode::Enter => self.activate_sql_row()?,
@@ -3398,6 +3399,7 @@ Elegi un environment con e en el estudio, o con :@http env.",
         match key.code {
             KeyCode::Esc => self.try_close_sql(),
             KeyCode::Tab => self.sql.cycle_focus(),
+            KeyCode::BackTab => self.sql.cycle_focus_back(),
             KeyCode::Enter => self.run_sql_query(),
             KeyCode::Backspace => {
                 self.sql.query_input.pop();
@@ -3420,6 +3422,7 @@ Elegi un environment con e en el estudio, o con :@http env.",
         match key.code {
             KeyCode::Esc => self.try_close_sql(),
             KeyCode::Tab => self.sql.cycle_focus(),
+            KeyCode::BackTab => self.sql.cycle_focus_back(),
             KeyCode::Up | KeyCode::Char('k') => self.sql.scroll_rows(-1),
             KeyCode::Down | KeyCode::Char('j') => self.sql.scroll_rows(1),
             KeyCode::Left | KeyCode::Char('h') => self.sql.scroll_columns(-1),

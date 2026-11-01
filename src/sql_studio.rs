@@ -212,6 +212,14 @@ impl SqlStudio {
         };
     }
 
+    pub fn cycle_focus_back(&mut self) {
+        self.focus = match self.focus {
+            SqlFocus::Tree => SqlFocus::Results,
+            SqlFocus::Query => SqlFocus::Tree,
+            SqlFocus::Results => SqlFocus::Query,
+        };
+    }
+
     pub fn visible_rows(&self) -> Vec<SqlRow> {
         let mut rows = Vec::new();
         for (ci, connection) in self.connections.iter().enumerate() {
