@@ -16,9 +16,15 @@
 //! the next page — a re-scan, not a resumed cursor, which is simpler to run
 //! from a one-shot worker thread and cheap enough for a TUI helper.
 //!
-//! Postgres/mysql connections are plain (no TLS) for now — fine for local
-//! and most dev/staging databases, not yet wired for `sslmode=require` or
-//! similar. Postgres column rendering covers the common scalar types (bool,
+//! Postgres TLS is driven entirely by `sslmode` in the connection string
+//! (default `prefer`, handled by tokio-postgres itself): the same TLS
+//! connector is always offered, and the library decides whether to use it.
+//! Mysql has no such built-in fallback, so `mysql_connect` reimplements
+//! "prefer" by hand: try TLS first, and if the server reports it does not
+//! speak it, retry in plain text. Both engines accept an `sslinsecure=true`
+//! flag appended to the connection string to skip certificate validation
+//! (for a self-signed or internal-CA server) without giving up encryption.
+//! Postgres column rendering covers the common scalar types (bool,
 //! int2/4/8, float4/8, numeric, text/varchar, uuid, json/jsonb, date/time/
 //! timestamp[tz]); anything else renders as `<tipo no soportado>` rather
 //! than guessing. Mysql renders every value through its own untyped
@@ -27,7 +33,7 @@
 
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::Instant;
 
@@ -612,16 +618,165 @@ pub fn spawn_schema(engine: Engine, conn_string: String) -> SchemaInFlight {
             Engine::Sqlite => Connection::open(&conn_string)
                 .map_err(|err| format!("No se pudo abrir {conn_string}: {err}"))
                 .and_then(|conn| sqlite_schema(&conn)),
-            Engine::Postgres => postgres::Client::connect(&conn_string, postgres::NoTls)
-                .map_err(|err| format!("No se pudo conectar: {err}"))
+            Engine::Postgres => postgres_tls(&conn_string)
+                .and_then(|(dsn, _insecure, tls)| {
+                    postgres::Client::connect(&dsn, tls)
+                        .map_err(|err| format!("No se pudo conectar: {err}"))
+                })
                 .and_then(|mut client| postgres_schema(&mut client)),
-            Engine::Mysql => mysql::Conn::new(conn_string.as_str())
+            Engine::Mysql => mysql_connect(&conn_string)
                 .map_err(|err| format!("No se pudo conectar: {err}"))
                 .and_then(|mut conn| mysql_schema(&mut conn)),
         };
         let _ = sender.send(result);
     });
     SchemaInFlight { receiver }
+}
+
+/// Pulls a `sslinsecure=true` flag out of a connection string before handing
+/// the rest to the postgres/mysql URL parsers, which both reject any query
+/// parameter they do not recognize themselves. The flag skips certificate
+/// validation on an otherwise-encrypted connection — for a self-signed or
+/// internal-CA server, not a replacement for a trusted certificate.
+fn extract_tls_insecure_flag(conn_string: &str) -> (String, bool) {
+    let Some((base, query)) = conn_string.split_once('?') else {
+        return (conn_string.to_string(), false);
+    };
+    let mut insecure = false;
+    let mut kept = Vec::new();
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key.eq_ignore_ascii_case("sslinsecure") {
+            insecure = value.eq_ignore_ascii_case("true") || value == "1";
+        } else {
+            kept.push(pair);
+        }
+    }
+    let cleaned = if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    };
+    (cleaned, insecure)
+}
+
+/// Installs a process-wide rustls crypto provider exactly once. Needed
+/// because this binary ends up with more than one backend compiled in at
+/// once (`ring` via mysql's TLS feature, `aws-lc-rs` via reqwest/postgres),
+/// and rustls refuses to guess between them without an explicit pick.
+fn ensure_rustls_crypto_provider() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
+/// Accepts any server certificate but still checks the handshake signature
+/// against it — the same "encrypt, don't verify who signed it" shape as
+/// curl's `-k` or Go's `InsecureSkipVerify`. Only reachable via the
+/// `sslinsecure=true` connection-string flag.
+#[derive(Debug)]
+struct InsecurePostgresVerifier(Arc<rustls::client::WebPkiServerVerifier>);
+
+impl rustls::client::danger::ServerCertVerifier for InsecurePostgresVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.supported_verify_schemes()
+    }
+}
+
+/// Builds the TLS connector passed to every postgres connect attempt.
+/// `sslmode` in the connection string (default `prefer`, parsed by
+/// tokio-postgres itself) decides whether TLS is attempted or required at
+/// all; this only decides how a handshake, once attempted, validates the
+/// server's certificate.
+fn build_postgres_tls(insecure: bool) -> Result<postgres_rustls::MakeTlsConnector, String> {
+    ensure_rustls_crypto_provider();
+
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in rustls_native_certs::load_native_certs().certs {
+        let _ = root_store.add(cert);
+    }
+    let root_store = Arc::new(root_store);
+
+    let config = if insecure {
+        let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::clone(&root_store))
+            .build()
+            .map_err(|err| err.to_string())?;
+        rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(InsecurePostgresVerifier(verifier)))
+            .with_no_client_auth()
+    } else {
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
+
+    Ok(postgres_rustls::MakeTlsConnector::new(
+        tokio_rustls::TlsConnector::from(Arc::new(config)),
+    ))
+}
+
+/// Strips the `sslinsecure` flag from `conn_string` and pairs the rest with
+/// a matching TLS connector, for the three places that open a postgres
+/// connection: running a query, loading its schema, and cancelling it.
+fn postgres_tls(
+    conn_string: &str,
+) -> Result<(String, bool, postgres_rustls::MakeTlsConnector), String> {
+    let (clean, insecure) = extract_tls_insecure_flag(conn_string);
+    let connector = build_postgres_tls(insecure)?;
+    Ok((clean, insecure, connector))
+}
+
+/// Connects with TLS requested first; if the server reports it does not
+/// support TLS, retries in plain text rather than failing outright — the
+/// same "prefer" behavior postgres gets from tokio-postgres directly,
+/// reimplemented here because the mysql crate only offers "require" (hard
+/// error if unsupported) or "never attempt".
+fn mysql_connect(conn_string: &str) -> mysql::Result<mysql::Conn> {
+    let (clean, insecure) = extract_tls_insecure_flag(conn_string);
+    let opts = mysql::Opts::from_url(&clean)?;
+    let ssl_opts = mysql::SslOpts::default().with_danger_accept_invalid_certs(insecure);
+    let with_tls = mysql::OptsBuilder::from_opts(opts.clone()).ssl_opts(ssl_opts);
+    match mysql::Conn::new(with_tls) {
+        Ok(conn) => Ok(conn),
+        Err(mysql::Error::DriverError(mysql::DriverError::TlsNotSupported)) => {
+            mysql::Conn::new(opts)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// However a query in flight gets cancelled, per engine. Sqlite aborts the
@@ -632,19 +787,27 @@ pub fn spawn_schema(engine: Engine, conn_string: String) -> SchemaInFlight {
 /// than a protocol-level guarantee like the other two.
 enum Canceler {
     Sqlite(InterruptHandle),
-    Postgres(postgres::CancelToken),
-    Mysql { dsn: String, connection_id: u64 },
+    Postgres {
+        token: postgres::CancelToken,
+        insecure: bool,
+    },
+    Mysql {
+        dsn: String,
+        connection_id: u64,
+    },
 }
 
 impl Canceler {
     fn cancel(&self) {
         match self {
             Canceler::Sqlite(handle) => handle.interrupt(),
-            Canceler::Postgres(token) => {
-                let _ = token.cancel_query(postgres::NoTls);
+            Canceler::Postgres { token, insecure } => {
+                if let Ok(tls) = build_postgres_tls(*insecure) {
+                    let _ = token.cancel_query(tls);
+                }
             }
             Canceler::Mysql { dsn, connection_id } => {
-                if let Ok(mut killer) = mysql::Conn::new(dsn.as_str()) {
+                if let Ok(mut killer) = mysql_connect(dsn) {
                     let _ = killer.query_drop(format!("KILL QUERY {connection_id}"));
                 }
             }
@@ -705,20 +868,23 @@ pub fn spawn_query(engine: Engine, conn_string: String, sql: String, offset: usi
                     started.elapsed(),
                 ),
             },
-            Engine::Postgres => {
-                match postgres::Client::connect(&worker_conn_string, postgres::NoTls) {
+            Engine::Postgres => match postgres_tls(&worker_conn_string) {
+                Ok((dsn, insecure, tls)) => match postgres::Client::connect(&dsn, tls) {
                     Ok(mut client) => {
-                        *canceler_for_worker.lock().unwrap() =
-                            Some(Canceler::Postgres(client.cancel_token()));
+                        *canceler_for_worker.lock().unwrap() = Some(Canceler::Postgres {
+                            token: client.cancel_token(),
+                            insecure,
+                        });
                         run_postgres(&mut client, &sql, started, offset)
                     }
                     Err(err) => QueryResult::failed(
                         format!("No se pudo conectar: {err}"),
                         started.elapsed(),
                     ),
-                }
-            }
-            Engine::Mysql => match mysql::Conn::new(worker_conn_string.as_str()) {
+                },
+                Err(err) => QueryResult::failed(err, started.elapsed()),
+            },
+            Engine::Mysql => match mysql_connect(&worker_conn_string) {
                 Ok(mut conn) => {
                     if let Ok(Some(id)) = conn.query_first::<u64, _>("SELECT CONNECTION_ID()") {
                         *canceler_for_worker.lock().unwrap() = Some(Canceler::Mysql {
@@ -927,6 +1093,26 @@ mod tests {
         let name_column = users.columns.iter().find(|c| c.name == "name").unwrap();
         assert!(!name_column.nullable);
         assert!(!name_column.primary_key);
+    }
+
+    #[test]
+    fn extract_tls_insecure_flag_strips_the_param_and_keeps_the_rest() {
+        let (clean, insecure) =
+            extract_tls_insecure_flag("postgres://u:p@host/db?sslinsecure=true&x=1");
+        assert_eq!(clean, "postgres://u:p@host/db?x=1");
+        assert!(insecure);
+
+        let (clean, insecure) = extract_tls_insecure_flag("postgres://u:p@host/db");
+        assert_eq!(clean, "postgres://u:p@host/db");
+        assert!(!insecure);
+
+        let (clean, insecure) = extract_tls_insecure_flag("mysql://u:p@host/db?sslinsecure=1");
+        assert_eq!(clean, "mysql://u:p@host/db");
+        assert!(insecure);
+
+        let (clean, insecure) = extract_tls_insecure_flag("mysql://u:p@host/db?SSLInsecure=FALSE");
+        assert_eq!(clean, "mysql://u:p@host/db");
+        assert!(!insecure);
     }
 
     #[test]
