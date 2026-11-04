@@ -2,7 +2,7 @@
 name = "mdnav"
 version = "0.1.16"
 edition = "2021"
-description = "Terminal navigator for MkDocs and Markdown documentation trees"
+description = "Terminal workspace for developers: browse and edit repos, test HTTP APIs, run SQL queries and manage git in one TUI"
 
 [dependencies]
 anyhow = "1"

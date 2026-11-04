@@ -1,8 +1,8 @@
 # Roadmap
 
-## v0.1.11 — actual
+## v0.1.16 — actual
 
-- [x] Arbol navegable de carpetas y archivos `.md`
+- [x] Arbol navegable de cualquier directorio, con filtro opcional "Solo Mds"
 - [x] Preview Markdown con scroll independiente
 - [x] Syntax highlighting en code blocks y archivos fuente (sh, py, etc.)
 - [x] Deteccion y preview de bloques Mermaid (terminal, HTML, web)
@@ -35,7 +35,11 @@
 - [x] Configuracion TOML robusta con migracion automatica del formato anterior
 - [x] Operaciones move/copy seguras: sin sobrescritura, rollback y fallback entre filesystems
 - [x] Tests automatizados y CI en Windows/Linux
-- [x] Requests HTTP con collections OpenCollection: estudio `:@http` independiente del directorio de trabajo, biblioteca en la config del usuario, editor con autosave y response
+- [x] Requests HTTP con collections OpenCollection: estudio `:@http` independiente del directorio de trabajo, biblioteca en la config del usuario, editor que guarda al salir de un campo o al enviar (sin autosave por tiempo, con confirmacion guardar/descartar antes de perder cambios) y response
+- [x] Editor de environments en el estudio HTTP (`e` o `:@http env`): crear, renombrar, duplicar, borrar y editar variables, con secretos en `.env`
+- [x] Estudio SQL `:@sql` con SQLite, PostgreSQL y MySQL: conexiones con entornos y secretos en `.env`, queries guardadas, resultados paginados, cancelacion por motor, TLS (con `sslinsecure=true` para certificados propios) y explorador de tablas y columnas
+- [x] JSON Viewer (`:@jsonviewer`): pegar o abrir un `.json` y formatearlo
+- [x] `mdnav share`: links efimeros desde archivo, stdin o portapapeles, con tipo log, csv, json, diff o texto
 
 ## Proximo — v0.2.x
 

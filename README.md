@@ -1,8 +1,13 @@
 # mdnav
 
-Explorador TUI para navegar documentacion Markdown y proyectos MkDocs desde la terminal.
+Workspace de terminal para el día a día del desarrollador: explorá y editá tu repo, probá APIs, consultá bases de datos y manejá git, todo en una sola TUI.
 
-Navega el arbol de archivos, previsualiza Markdown con syntax highlighting, editá con tu editor favorito y gestioná tu repo git — todo sin salir de la terminal.
+- **Explorar y editar**: árbol de cualquier directorio con crear, renombrar, mover, copiar y borrar; búsqueda de archivos y `grep`; bookmarks y recientes; edición con tu editor favorito.
+- **Preview**: código de cualquier lenguaje con syntax highlighting, Markdown renderizado con índice, links y diagramas Mermaid.
+- **Studio HTTP** (`:@http`): cliente de APIs con collections [OpenCollection](https://www.opencollection.com/) versionables en git, environments, secretos en `.env`.
+- **Studio SQL** (`:@sql`): conexiones y queries guardadas para SQLite, PostgreSQL y MySQL, con resultados paginados, TLS y explorador de tablas y columnas.
+- **Git**: estado en el árbol y status, diff, commit, push, branches y stash desde la paleta.
+- **Compartir** (`mdnav share`): links efímeros para logs, JSON, CSV, diffs o texto.
 
 ## Instalacion
 
@@ -30,9 +35,9 @@ irm https://raw.githubusercontent.com/csr91/mdnav/master/uninstall.ps1 | iex
 ## Uso
 
 ```bash
-mdnav              # abre el directorio actual
-mdnav ruta/docs    # abre una carpeta específica
-mdnav --version    # versión instalada
+mdnav                # abre el directorio actual
+mdnav ruta/proyecto  # abre una carpeta específica
+mdnav --version      # versión instalada
 ```
 
 ## Compartir contenido (`mdnav share`)
@@ -94,7 +99,7 @@ El preview muestra la ruta del archivo actual en el titulo y metadata breve en l
 
 Presioná `:` para abrir y escribí el comando. La paleta chica prioriza tus comandos recientes y muestra sugerencias por prefijo mientras tipeás; tambien entiende algunas intenciones (`buscar`, `copiar`, `indice`, `recientes`). Usá `:@commands` para abrir el catálogo grande agrupado por secciones, con todos los comandos y su descripción.
 
-`:q` `:files` `:find` `:grep` `:marks` `:recent` `:create` `:git` `:@http` `:@jsonviewer` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:@commands`
+`:q` `:files` `:find` `:grep` `:marks` `:recent` `:create` `:git` `:@http` `:@sql` `:@jsonviewer` `:select` `:edit` `:rename` `:move` `:copy` `:delete` `:copypath` `:goto` `:toc` `:mermaid` `:fullscreen` `:bookmark` `:bookmarks` `:gitinfo` `:split1..5` `:sort` `:treeinfo` `:undo` `:@commands`
 
 `:recent` abre los ultimos archivos visitados. `:marks` abre un popup filtrable con los bookmarks guardados. `:find` mantiene resaltada la ultima busqueda en el preview hasta abrir otro archivo o limpiar la busqueda. `:grep` busca texto en los archivos visibles del arbol y salta al resultado elegido.
 
@@ -161,6 +166,63 @@ Los requests salen en un thread aparte: la UI no se congela y `Esc` en la respon
 **Fuera de alcance por ahora:** perfiles de auth con nombre, pegar un curl, importar Postman desde el estudio, scripts y assertions (se avisa cuántos tiene el request), bodies multipart, file y GraphQL nativo, y auth OAuth, AWS, digest y NTLM.
 
 Con **Solo Mds** activado, el árbol igual muestra los `.yml` de las collections y los exports de Postman.
+
+## Studio SQL
+
+`:@sql` abre el estudio de bases de datos, esté donde esté el directorio de trabajo. Hay tres motores: **SQLite** (vía `rusqlite`), **PostgreSQL** (vía `postgres`) y **MySQL** (vía `mysql`). El motor se elige al crear la conexión y lo comparten todos sus entornos; queda guardado como `engine` en `connection.toml`. Las conexiones viven en `~/.config/mdnav/sql` (o en `sql_connections_dir` del config), una carpeta por conexión:
+
+```
+sql/
+└── ejemplo/
+    ├── connection.toml    # motor y entornos de la conexión
+    ├── .env               # valores de los entornos secretos
+    ├── ejemplo.sqlite     # la base de ejemplo
+    └── listar-notas.sql   # una query por archivo
+```
+
+La primera vez aparece `ejemplo`, una conexión SQLite con una tabla `notas` y la query `listar-notas`. `c` crea otra conexión: pide el nombre, el motor y el valor de su entorno `default`. `n` agrega una query.
+
+El valor de un entorno depende del motor:
+
+| Motor | Se escribe como | Valor del entorno |
+|-------|-----------------|-------------------|
+| SQLite | `sqlite` o `sqlite3` | ruta del archivo `.sqlite` |
+| PostgreSQL | `postgres`, `postgresql` o `pg` | `postgres://usuario:clave@host:5432/base` |
+| MySQL | `mysql`, `maria` o `mariadb` | `mysql://usuario:clave@host:3306/base` |
+
+El panel izquierdo es el árbol de conexiones: cada conexión muestra su motor (`[sqlite]`, `[postgres]`, `[mysql]`) y despliega sus entornos (`env:`, con 🔒 si es secreto), la rama `Tablas` y sus queries. A la derecha está la query arriba y el resultado abajo. El borde marca el panel con foco y el pie cambia con ese panel.
+
+Para ejecutar hace falta una conexión activa y un entorno. `Enter` sobre una conexión la despliega y la activa (`(activa)`), sobre un entorno lo elige (`(activo)`) y sobre una query la carga en el editor. Si la conexión tiene un solo entorno, se elige solo. El entorno activo se guarda en el config con la ruta canónica de la conexión.
+
+| Tecla | Acción |
+|-------|--------|
+| `j` / `k` o `↑` / `↓` | moverse en el árbol; en el resultado, filas |
+| `h` / `l` o `←` / `→` | en el resultado, columnas |
+| `Tab` / `Shift+Tab` | árbol → query → resultado (`Shift+Tab` al revés) |
+| `Enter` | en el árbol, activar conexión, elegir entorno, abrir query o desplegar `Tablas` y una tabla; en la query, ejecutar |
+| letra | en la query, escribe; `Backspace` borra |
+| `c` | conexión nueva: nombre, motor y valor |
+| `Shift+E` | entorno nuevo: nombre, valor (ruta o connection string, según el motor) y si es secreto (`y` / `n`) |
+| `n` | query nueva con el texto del editor |
+| `r` | renombrar (el nombre no puede llevar `.` ni `/`) |
+| `y` | duplicar la conexión, el entorno o la query |
+| `x` | borrar, con confirmación; en el resultado, cancelar la consulta en curso |
+| `PgDn` / `PgUp` | página siguiente / anterior del resultado |
+| `Esc` | salir del estudio |
+
+Cada conexión puede tener varios entornos (dev, staging, prod...), cada uno con su valor. Un entorno secreto no guarda el valor en `connection.toml`: va al `.env` de la conexión, bajo el nombre del entorno en mayúsculas. El entorno `default` que crea `c` no es secreto: si el connection string lleva una clave, creá un entorno secreto con `Shift+E`. Duplicar una conexión copia la carpeta entera, `.env` incluido.
+
+**TLS (PostgreSQL y MySQL):** para el caso común no hay que configurar nada. PostgreSQL respeta el `sslmode` del connection string: por defecto (`prefer`) usa TLS si el servidor lo soporta y si no sigue en texto plano, y el certificado se valida contra los certificados raíz del sistema. MySQL hace lo mismo a mano: intenta con TLS y, si el servidor responde que no lo soporta, reintenta sin cifrar. Para un servidor con certificado autofirmado o de una CA interna, agregá `sslinsecure=true` (o `sslinsecure=1`) a los parámetros de la URL, por ejemplo `postgres://usuario:clave@host:5432/base?sslmode=require&sslinsecure=true`: la conexión sigue cifrada, pero no se valida quién firmó el certificado. mdnav saca ese parámetro antes de pasarle la URL al driver.
+
+**Tablas:** `Enter` sobre la rama `Tablas` de una conexión lista sus tablas usando el entorno activo de esa conexión (o el único que tenga), y `Enter` sobre una tabla muestra sus columnas con el tipo, 🔑 si es primary key y `NOT NULL` si no acepta nulos. Mientras carga se ve `Tablas (cargando...)`, después la cantidad de tablas; si falla se ve el error y otro `Enter` reintenta. En SQLite salen las tablas de `sqlite_master` (sin las internas `sqlite_*`), en PostgreSQL las del schema `public` y en MySQL las de la base del connection string. La lista se carga una vez y queda en memoria hasta que salís del estudio: después `Enter` solo la pliega o la despliega, aunque cambies de entorno. Se carga un esquema por vez.
+
+Ejecutar con `Enter` escribe la query en su `.sql` si vino del árbol, y la escritura es atómica. No hay otro guardado. Si salís con texto que no guardaste ni ejecutaste, pregunta `g` guardar, `d` descartar o `Esc` seguir editando; si ese texto no tiene archivo, `g` pide un nombre y lo guarda como query nueva.
+
+Cada ejecución corre una sola sentencia y abre su propia conexión. Un `SELECT` trae el resultado de a 200 filas: `PgDn` vuelve a correr la última query ejecutada (no la que estés escribiendo) desde la fila siguiente y `PgUp` vuelve a la página anterior. La barra inferior muestra `Filas X-Y` y avisa si hay más. Un `INSERT`, `UPDATE`, `DELETE` o DDL muestra las filas afectadas. Las celdas se truncan al ancho de la columna y `NULL` se ve como `NULL`. En SQLite un blob se ve como `<blob N bytes>`; en PostgreSQL un tipo que mdnav no sabe mostrar (arrays, intervalos, `bytea`...) se ve como `<tipo no soportado>`, por ejemplo `<bytea no soportado>`; en MySQL todo valor se muestra como texto.
+
+Las consultas salen en un thread aparte: la UI no se congela. Mientras una corre, `x` en el resultado la cancela según el motor: SQLite la interrumpe directamente, PostgreSQL manda el pedido de cancelación del protocolo por una conexión aparte y MySQL abre otra conexión y ejecuta `KILL QUERY` sobre la de la consulta, así que el usuario necesita permiso para hacerlo. Si la conexión todavía no terminó de abrirse, `x` no hace nada. `Esc` sale del estudio abandonándola.
+
+**Fuera de alcance por ahora:** otros motores además de SQLite, PostgreSQL y MySQL, cambiar el motor de una conexión desde el estudio, schemas de PostgreSQL fuera de `public` en `Tablas` y recargar `Tablas` sin salir del estudio.
 
 ## Settings
 
